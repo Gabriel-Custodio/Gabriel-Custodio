@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-set "PATH=%~dp0bin;%PATH%"
+set "PATH=%~dp0bin;%APPDATA%\Python\Python315\Scripts;%PATH%"
 
 :MENU
 cls
@@ -21,7 +21,9 @@ if "%op%"=="1" (
     goto MENU
 )
 if "%op%"=="2" (
-    python gerar_cortes.py
+    echo.
+    set /p url="Cole a URL do video do YouTube: "
+    python gerar_cortes.py "%url%"
     pause
     goto MENU
 )
