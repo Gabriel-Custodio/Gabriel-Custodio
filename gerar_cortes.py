@@ -32,9 +32,13 @@ FONT_SIZE = 70
 
 
 def run_cmd(cmd, cwd=None):
-    """Executa comando e retorna (sucesso, stdout, stderr)."""
+    """Executa comando (lista de argumentos, sem shell) e retorna (sucesso, stdout, stderr).
+
+    Sem shell=True, a URL e os nomes de arquivo nunca são interpretados pelo cmd.exe
+    (evita injeção de comando e quebra com '&', espaços etc.).
+    """
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+        result = subprocess.run(cmd, capture_output=True, text=True,
                                 cwd=cwd, encoding='utf-8', errors='replace')
         return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
     except Exception as e:
@@ -55,16 +59,21 @@ def clean_filename(name):
 def download_video(url, output_prefix):
     """Baixa vídeo (1080p max) e áudio usando yt-dlp."""
     print(f"\n📥 Baixando vídeo: {url}")
-    ffmpeg_loc = f# Baixar vídeo (melhor qualidade até 1080p)
+    # Onde o yt-dlp encontra o ffmpeg (necessário para juntar vídeo + áudio)
+    ffmpeg_loc = ["--ffmpeg-location", str(BIN_DIR)]
+
+    # Baixar vídeo (melhor qualidade até 1080p)
     video_path = TEMP_DIR / f"{output_prefix}_video.mp4"
     cmd = [
         sys.executable, "-m", "yt_dlp",
-        ffmpeg_loc,
+        *ffmpeg_loc,
+        "--no-playlist",
+        "--merge-output-format", "mp4",
         "-f", "bv*[height<=1080]+ba/b[height<=1080]",
         "-o", str(video_path),
         url
     ]
-    ok, out, err = run_cmd(" ".join(cmd))
+    ok, out, err = run_cmd(cmd)
     if not ok or not video_path.exists():
         print(f"❌ Falha ao baixar vídeo: {err}")
         return None, None
@@ -73,12 +82,13 @@ def download_video(url, output_prefix):
     audio_path = TEMP_DIR / f"{output_prefix}_audio.m4a"
     cmd = [
         sys.executable, "-m", "yt_dlp",
-        ffmpeg_loc,
+        *ffmpeg_loc,
+        "--no-playlist",
         "-f", "bestaudio[ext=m4a]/bestaudio",
         "-o", str(audio_path),
         url
     ]
-    ok, out, err = run_cmd(" ".join(cmd))
+    ok, out, err = run_cmd(cmd)
     if not ok:
         print(f"⚠️  Falha ao baixar áudio separado: {err}")
 
@@ -86,7 +96,8 @@ def download_video(url, output_prefix):
     sub_path = TEMP_DIR / f"{output_prefix}_subs.json3"
     cmd = [
         sys.executable, "-m", "yt_dlp",
-        ffmpeg_loc,
+        *ffmpeg_loc,
+        "--no-playlist",
         "--write-auto-sub",
         "--sub-lang", "pt,pt-BR,pt-PT",
         "--sub-format", "json3",
@@ -94,7 +105,7 @@ def download_video(url, output_prefix):
         "-o", str(TEMP_DIR / f"{output_prefix}_subs.%(ext)s"),
         url
     ]
-    ok, out, err = run_cmd(" ".join(cmd))
+    ok, out, err = run_cmd(cmd)
 
     # Procurar arquivo de legenda baixado
     sub_files = list(TEMP_DIR.glob(f"{output_prefix}_subs*.json3"))
@@ -545,7 +556,7 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num):
     ]
 
     print(f"⚙️  Executando ffmpeg...")
-    ok, out, err = run_cmd(" ".join(cmd))
+    ok, out, err = run_cmd(cmd)
 
     if not ok:
         print(f"❌ Erro no ffmpeg: {err[:500]}")
@@ -581,7 +592,7 @@ def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_
         str(output_path)
     ]
 
-    ok, out, err = run_cmd(" ".join(cmd))
+    ok, out, err = run_cmd(cmd)
     if ok:
         print(f"✅ Corte salvo (simplificado): {output_path}")
         return True
@@ -592,15 +603,13 @@ def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_
 
 def get_video_duration(video_path):
     """Obtém duração do vídeo via ffmpeg (fallback sem ffprobe)."""
-    ffmpeg_cmd = FFMPEG.as_posix()
-    cmd = f'"{ffmpeg_cmd}" -i "{video_path}" 2>&1 | findstr /R "Duration"'
-    ok, out, err = run_cmd(cmd)
-    if ok and out:
-        import re
-        match = re.search(r'Duration: (\d+):(\d+):(\d+\.\d+)', out)
-        if match:
-            h, m, s = match.groups()
-            return int(h) * 3600 + int(m) * 60 + float(s)
+    # `ffmpeg -i` sem arquivo de saída retorna erro, mas imprime a duração no stderr.
+    # Por isso não checamos o código de retorno, só procuramos a linha "Duration".
+    _, out, err = run_cmd([FFMPEG.as_posix(), "-i", str(video_path)])
+    match = re.search(r'Duration: (\d+):(\d+):(\d+\.\d+)', f"{out}\n{err}")
+    if match:
+        h, m, s = match.groups()
+        return int(h) * 3600 + int(m) * 60 + float(s)
     return 0
 
 
@@ -618,14 +627,15 @@ def main():
     if not FFMPEG.exists():
         print(f"❌ ffmpeg não encontrado em {FFMPEG}")
         sys.exit(1)
-    ok, _, _ = run_cmd(f'"{FFMPEG.as_posix()}" -version')
+    ok, _, _ = run_cmd([FFMPEG.as_posix(), "-version"])
     if not ok:
         print(f"❌ ffmpeg não funciona: {FFMPEG}")
         sys.exit(1)
 
-    ok, _, _ = run_cmd("yt-dlp --version")
+    # Mesmo método usado nos downloads (python -m yt_dlp): não depende do PATH
+    ok, _, _ = run_cmd([sys.executable, "-m", "yt_dlp", "--version"])
     if not ok:
-        print("❌ yt-dlp não encontrado no PATH")
+        print("❌ yt-dlp não encontrado. Rode: pip install -r requirements.txt")
         sys.exit(1)
 
     ensure_dirs()
