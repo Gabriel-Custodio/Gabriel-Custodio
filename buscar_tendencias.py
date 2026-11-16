@@ -1,4 +1,5 @@
-﻿import json
+﻿import sys
+import json
 import subprocess
 from datetime import datetime, timedelta
 
@@ -22,7 +23,7 @@ def buscar():
     data_limite = (datetime.now() - timedelta(days=7)).strftime("%Y%m%d")
 
     cmd = [
-        "yt-dlp",
+        sys.executable, "-m", "yt_dlp",
         f"ytsearch30:{tema}",
         "--dump-json",
         "--no-warnings",
