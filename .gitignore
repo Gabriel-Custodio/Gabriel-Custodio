@@ -1,0 +1,14 @@
+﻿.env
+bin/
+cortes_prontos/
+downloads/
+temp/
+*.mp4
+*.mp3
+*.wav
+*.webm
+*.exe
+*.7z
+*.zip
+__pycache__/
+*.pyc
