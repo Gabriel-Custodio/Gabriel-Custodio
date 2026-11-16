@@ -12,3 +12,6 @@ temp/
 *.zip
 __pycache__/
 *.pyc
+
+# Configuracao local do Claude Code (tem caminhos e permissoes da maquina de cada um)
+.claude/settings.local.json

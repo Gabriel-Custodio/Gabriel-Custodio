@@ -10,6 +10,7 @@ import sys
 import os
 import re
 import math
+import shutil
 import textwrap
 from pathlib import Path
 from datetime import timedelta
@@ -45,6 +46,21 @@ def run_cmd(cmd, cwd=None):
         return False, "", str(e)
 
 
+def resolve_ffmpeg():
+    """Define qual ffmpeg usar: bin/ffmpeg.exe se existir, senão o do PATH.
+
+    Retorna True se encontrou um ffmpeg (e atualiza a variável global FFMPEG).
+    """
+    global FFMPEG
+    if FFMPEG.exists():
+        return True
+    found = shutil.which("ffmpeg")
+    if found:
+        FFMPEG = Path(found)
+        return True
+    return False
+
+
 def ensure_dirs():
     """Cria diretórios necessários."""
     OUTPUT_DIR.mkdir(exist_ok=True)
@@ -60,7 +76,7 @@ def download_video(url, output_prefix):
     """Baixa vídeo (1080p max) e áudio usando yt-dlp."""
     print(f"\n📥 Baixando vídeo: {url}")
     # Onde o yt-dlp encontra o ffmpeg (necessário para juntar vídeo + áudio)
-    ffmpeg_loc = ["--ffmpeg-location", str(BIN_DIR)]
+    ffmpeg_loc = ["--ffmpeg-location", str(FFMPEG.parent)]
 
     # Baixar vídeo (melhor qualidade até 1080p)
     video_path = TEMP_DIR / f"{output_prefix}_video.mp4"
@@ -157,15 +173,15 @@ def parse_vtt_subtitle(sub_path):
         blocks = re.split(r'\n\s*\n', content)
         for block in blocks:
             lines = block.strip().split('\n')
-            if len(lines) >= 2 and '-->' in lines[1]:
-                time_line = lines[1]
-                text = ' '.join(lines[2:]).strip()
+            # No VTT do YouTube a linha de tempo é a primeira do bloco (sem número do cue)
+            idx = next((i for i, ln in enumerate(lines) if '-->' in ln), None)
+            if idx is not None:
+                time_line = lines[idx]
+                # Remove tags inline do YouTube (<00:00:01.000>, <c>...</c>)
+                text = re.sub(r'<[^>]+>', '', ' '.join(lines[idx + 1:])).strip()
                 # Parse timestamp: 00:00:00.000 --> 00:00:05.000
                 times = re.findall(r'(\d+):(\d+):(\d+[\.,]\d+)', time_line)
                 if len(times) == 2:
-                    start = sum(int(x) * m for x, m in zip(times[0], [3600, 60, 1]))
-                    end = sum(int(x) * m for x, m in zip(times[1], [3600, 60, 1]))
-                    # Fix decimal separator
                     start = float(times[0][0]) * 3600 + float(times[0][1]) * 60 + float(times[0][2].replace(',', '.'))
                     end = float(times[1][0]) * 3600 + float(times[1][1]) * 60 + float(times[1][2].replace(',', '.'))
                     if text:
@@ -199,19 +215,56 @@ def parse_srt_subtitle(sub_path):
     return segments
 
 
+def dedupe_segments(segments):
+    """Remove repetições das legendas automáticas do YouTube.
+
+    As legendas automáticas são "rolantes": o mesmo texto aparece em vários
+    eventos que se sobrepõem no tempo. Aqui ordenamos por tempo, tiramos do
+    início de cada segmento as palavras que já terminaram o segmento anterior
+    e encurtamos o anterior para não sobrepor, evitando legenda duplicada.
+    """
+    result = []
+    prev_raw = []  # texto original (sem cortes) do evento anterior
+    for seg in sorted(segments, key=lambda s: (s['start'], s['end'])):
+        words = seg['text'].split()
+        if not words:
+            continue
+        raw = list(words)
+        if result:
+            prev = result[-1]
+            prev_words = prev_raw
+            # Maior sufixo do anterior que também é o prefixo do atual = repetição.
+            # (1 palavra só conta se o segmento inteiro for essa palavra.)
+            for k in range(min(len(prev_words), len(words)), 0, -1):
+                if prev_words[-k:] == words[:k] and (k >= 2 or k == len(words)):
+                    words = words[k:]
+                    break
+            if not words:  # era só repetição: apenas estende o tempo do anterior
+                prev['end'] = max(prev['end'], seg['end'])
+                prev_raw = raw
+                continue
+            if prev['start'] < seg['start'] < prev['end']:
+                prev['end'] = seg['start']
+        prev_raw = raw
+        result.append({'start': seg['start'], 'end': seg['end'], 'text': ' '.join(words)})
+    return result
+
+
 def load_subtitles(sub_path):
-    """Carrega legendas baseado na extensão."""
+    """Carrega legendas baseado na extensão e remove repetições."""
     if not sub_path or not sub_path.exists():
         return []
 
     ext = sub_path.suffix.lower()
     if ext == '.json3':
-        return parse_json3_subtitle(sub_path)
+        segments = parse_json3_subtitle(sub_path)
     elif ext == '.vtt':
-        return parse_vtt_subtitle(sub_path)
+        segments = parse_vtt_subtitle(sub_path)
     elif ext == '.srt':
-        return parse_srt_subtitle(sub_path)
-    return []
+        segments = parse_srt_subtitle(sub_path)
+    else:
+        return []
+    return dedupe_segments(segments)
 
 
 def merge_subtitle_segments(segments, max_chars=500):
@@ -624,8 +677,9 @@ def main():
     print("=" * 60)
 
     # Verificar dependências
-    if not FFMPEG.exists():
-        print(f"❌ ffmpeg não encontrado em {FFMPEG}")
+    if not resolve_ffmpeg():
+        print(f"❌ ffmpeg não encontrado em {FFMPEG} nem no PATH")
+        print("   Rode 'python verificar_dependencias.py' ou copie o ffmpeg.exe para a pasta 'bin'.")
         sys.exit(1)
     ok, _, _ = run_cmd([FFMPEG.as_posix(), "-version"])
     if not ok:
