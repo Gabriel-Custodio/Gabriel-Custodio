@@ -61,6 +61,18 @@ MIN_WORDS_FOR_AUDIO_TRANSCRIPTION = 30
 VISUAL_FRAME_INTERVAL = 30  # Extrair frame a cada 30 segundos
 MAX_VISUAL_FRAMES = 20
 
+# Configurações do Modo Edição Completa por Visão IA (constantes do Gabriel; o modo ainda não
+# foi implementado, nenhuma função usa estes valores por enquanto)
+VISION_EDIT_FRAME_INTERVAL = 4  # 1 frame a cada 4 segundos
+VISION_EDIT_FRAME_WIDTH = 480   # Largura dos frames para análise
+VISION_EDIT_MAX_FRAMES = 180    # Máximo de frames (para vídeos longos)
+VISION_EDIT_VIDEOS_MIN = 1      # Mínimo de vídeos curtos a gerar
+VISION_EDIT_VIDEOS_MAX = 3      # Máximo de vídeos curtos a gerar
+VISION_EDIT_SCENES_MIN = 5      # Mínimo de cenas por vídeo
+VISION_EDIT_SCENES_MAX = 8      # Máximo de cenas por vídeo
+VISION_EDIT_TARGET_DURATION_MIN = 30  # Duração mínima por vídeo (segundos)
+VISION_EDIT_TARGET_DURATION_MAX = 45  # Duração máxima por vídeo (segundos)
+
 # Groq: chat (visão e roteiros). Os nomes dos modelos mudam a cada poucos meses; troque no
 # .env (GROQ_VISION_MODEL / GROQ_TEXT_MODEL) sem mexer no código. Veja .env.example.
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
