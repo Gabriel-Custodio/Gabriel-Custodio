@@ -3,6 +3,13 @@
 Gerador de cortes virais para TikTok/YouTube Shorts.
 Baixa vídeo, extrai áudio, transcreve com legendas do YouTube,
 identifica melhores trechos (30-55s) e exporta formato vertical 9:16 com legendas.
+
+Modos de áudio:
+  --audio original  : Mantém áudio original do vídeo (padrão)
+  --audio ia        : Gera narração com IA (edge-tts, voz pt-BR-AntonioNeural),
+                      cria roteiro viral resumido com gancho forte, remove áudio
+                      original (-an), ajusta duração do vídeo ao MP3 gerado e
+                      sincroniza legendas .ass com a narração.
 """
 import subprocess
 import json
@@ -12,6 +19,8 @@ import re
 import math
 import shutil
 import textwrap
+import asyncio
+import argparse
 from pathlib import Path
 from datetime import timedelta
 
@@ -19,7 +28,7 @@ from datetime import timedelta
 # ========== CONFIGURAÇÕES ==========
 OUTPUT_DIR = Path("cortes_prontos")
 TEMP_DIR = Path("temp_downloads")
-BIN_DIR = Path("bin")
+BIN_DIR = Path(__file__).parent / "bin"
 FFMPEG = BIN_DIR / "ffmpeg.exe"
 MODEL_SIZE = "small"  # não usado com yt-dlp, mas mantido para compatibilidade
 LANGUAGE = "pt"
@@ -29,6 +38,10 @@ NUM_CLIPS = 3
 VERTICAL_WIDTH = 1080
 VERTICAL_HEIGHT = 1920
 FONT_SIZE = 70
+# Configurações de narração IA
+TTS_VOICE = "pt-BR-AntonioNeural"
+TTS_RATE = "+0%"
+TTS_VOLUME = "+0%"
 # ====================================
 
 
@@ -458,32 +471,141 @@ def find_best_clips(segments, video_duration, num_clips=NUM_CLIPS):
     return selected[:num_clips]
 
 
-def create_ass_subtitle(segments, clip_start, clip_end, output_path):
-    """Cria arquivo ASS com legendas dinamicas para o corte."""
-    # Filtrar segmentos dentro do corte
-    clip_segments = []
-    for seg in segments:
-        if seg['end'] <= clip_start:
-            continue
-        if seg['start'] >= clip_end:
-            break
-        # Ajustar tempos relativos ao corte
-        adj_start = max(0, seg['start'] - clip_start)
-        adj_end = min(clip_end - clip_start, seg['end'] - clip_start)
-        if adj_end > adj_start:
-            clip_segments.append({
-                'start': adj_start,
-                'end': adj_end,
-                'text': seg['text']
-            })
+def generate_viral_script(original_text, target_duration):
+    """
+    Gera um roteiro viral resumido a partir do texto original.
+    Cria gancho forte, desenvolvimento conciso e conclusão clara.
+    """
+    # Limpar e preparar texto
+    text = original_text.strip()
+    words = text.split()
 
-    if not clip_segments:
+    if len(words) < 20:
+        return text  # Texto muito curto, usar original
+
+    # Estratégia: pegar início (gancho), meio (pontos-chave) e fim (conclusão)
+    # Proporção: 20% gancho, 60% desenvolvimento, 20% conclusão
+    hook_end = max(1, len(words) // 5)
+    conclusion_start = max(hook_end + 1, len(words) * 4 // 5)
+
+    hook_part = ' '.join(words[:hook_end])
+    middle_part = ' '.join(words[hook_end:conclusion_start])
+    conclusion_part = ' '.join(words[conclusion_start:])
+
+    # Identificar palavras-chave de valor no meio
+    value_keywords = ['passo', 'passos', 'etapa', 'etapas', 'como', 'porque', 'porquê',
+                      'resultado', 'resultados', 'antes', 'depois', 'transformou',
+                      'mudei', 'aprendi', 'descobri', 'testei', 'funciona', 'prova',
+                      'provas', 'números', 'dados', 'estudo', 'pesquisa', 'ciência',
+                      'técnica', 'método', 'estratégia', 'segredo', 'truque', 'dica']
+
+    middle_words = middle_part.split()
+    key_sentences = []
+    current_sentence = []
+
+    for word in middle_words:
+        current_sentence.append(word)
+        if word.endswith('.') or word.endswith('!') or word.endswith('?'):
+            sentence = ' '.join(current_sentence)
+            if any(kw in sentence.lower() for kw in value_keywords):
+                key_sentences.append(sentence)
+            current_sentence = []
+
+    if current_sentence:
+        sentence = ' '.join(current_sentence)
+        if any(kw in sentence.lower() for kw in value_keywords):
+            key_sentences.append(sentence)
+
+    # Construir roteiro viral
+    # Gancho: primeiras palavras com tom de urgência/curiosidade
+    hook = hook_part
+    if not re.search(r'[?!]', hook):
+        hook = hook.rstrip('.') + "!"
+
+    # Desenvolvimento: frases-chave (máx 3-4)
+    development = ' '.join(key_sentences[:4]) if key_sentences else middle_part[:300]
+
+    # Conclusão: última parte com call-to-action
+    conclusion = conclusion_part
+    if not re.search(r'\b(inscreva|like|comente|siga|compartilhe|baixe|link)\b', conclusion.lower()):
+        conclusion = conclusion.rstrip('.') + " — Fica a dica!"
+
+    script = f"{hook} {development} {conclusion}".strip()
+
+    # Limitar tamanho aproximado para duração alvo
+    # Estimativa: ~150 palavras por minuto em português = 2.5 palavras/seg
+    max_words = int(target_duration * 2.5)
+    script_words = script.split()
+    if len(script_words) > max_words:
+        script = ' '.join(script_words[:max_words])
+        # Garantir que termina com pontuação
+        if not script.endswith(('.', '!', '?', '...')):
+            script += "."
+
+    return script
+
+
+async def generate_tts_audio(text, output_path, voice=TTS_VOICE, rate=TTS_RATE, volume=TTS_VOLUME):
+    """Gera áudio com edge-tts."""
+    try:
+        import edge_tts
+    except ImportError:
+        print("❌ edge-tts não instalado. Rode: pip install edge-tts")
         return False
 
-    # Quebrar texto em linhas por tempo (máx ~2 linhas por vez)
-    # Estilo ASS
+    try:
+        communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume)
+        await communicate.save(str(output_path))
+        return output_path.exists()
+    except Exception as e:
+        print(f"❌ Erro ao gerar TTS: {e}")
+        return False
+
+
+def create_ass_subtitle_from_script(script_text, audio_duration, output_path):
+    """
+    Cria arquivo ASS sincronizado com o áudio da narração.
+    Divide o texto em blocos de 3-5 palavras distribuídos ao longo da duração do áudio.
+    """
+    words = script_text.strip().split()
+    if not words:
+        return False
+
+    # Configuração: 3-5 palavras por bloco
+    WORDS_PER_CHUNK = 4
+    chunks = []
+
+    for i in range(0, len(words), WORDS_PER_CHUNK):
+        chunk_words = words[i:i + WORDS_PER_CHUNK]
+        chunks.append(' '.join(chunk_words))
+
+    if not chunks:
+        return False
+
+    # Distribuir tempo proporcionalmente (cada chunk tem duração similar)
+    chunk_duration = audio_duration / len(chunks)
+
+    word_chunks = []
+    for i, chunk_text in enumerate(chunks):
+        start = i * chunk_duration
+        end = min((i + 1) * chunk_duration, audio_duration)
+        word_chunks.append({
+            'start': start,
+            'end': end,
+            'text': chunk_text
+        })
+
+    # Garantir sem sobreposição
+    for i in range(len(word_chunks) - 1):
+        if word_chunks[i]['end'] > word_chunks[i + 1]['start']:
+            word_chunks[i]['end'] = word_chunks[i + 1]['start']
+
+    # Remover chunks muito curtos
+    word_chunks = [c for c in word_chunks if c['end'] - c['start'] >= 0.4]
+
+    # Estilo ASS - Positionado mais para baixo (Alignment=2 = bottom-center, MarginV=320)
     ass_header = f"""[Script Info]
-Title: Cortes Virais
+Title: Cortes Virais - Narrado por IA
 ScriptType: v4.00+
 PlayResX: {VERTICAL_WIDTH}
 PlayResY: {VERTICAL_HEIGHT}
@@ -492,8 +614,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,62,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,40,40,350,1
-Style: Highlight,Arial,{FONT_SIZE},&H00FFFF00,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,5,50,50,80,1
+Style: Default,Arial,62,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,40,40,320,1
+Style: Highlight,Arial,{FONT_SIZE},&H00FFFF00,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,5,50,50,320,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -508,29 +630,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return f"{hours}:{minutes:02d}:{int(secs):02d}.{centiseconds:02d}"
 
     events = []
-    for i, seg in enumerate(clip_segments):
-        start_str = format_ass_time(seg['start'])
-        end_str = format_ass_time(seg['end'])
-        text = seg['text'].strip()
+    for i, chunk in enumerate(word_chunks):
+        start_str = format_ass_time(chunk['start'])
+        end_str = format_ass_time(chunk['end'])
+        text = chunk['text'].strip()
 
-        # Quebrar em linhas se muito longo
-        max_chars_per_line = 35
-        if len(text) > max_chars_per_line:
-            words = text.split()
-            lines = []
-            current = ""
-            for w in words:
-                if len(current + " " + w) <= max_chars_per_line:
-                    current += (" " + w) if current else w
-                else:
-                    lines.append(current)
-                    current = w
-            if current:
-                lines.append(current)
-            text = r"\N".join(lines)
-
-        # A cada 3º segmento, usar estilo highlight (linha atual)
-        style = "Highlight" if i % 3 == 0 else "Default"
+        # Alternar estilo para efeito de "karaoke"
+        style = "Highlight" if i % 2 == 0 else "Default"
         events.append(f"Dialogue: 0,{start_str},{end_str},{style},,0,0,0,,{text}")
 
     ass_content = ass_header + "\n".join(events)
@@ -541,31 +647,62 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return True
 
 
-def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num):
+def get_audio_duration(audio_path):
+    """Obtém duração do áudio via ffmpeg."""
+    _, out, err = run_cmd([FFMPEG.as_posix(), "-i", str(audio_path)])
+    match = re.search(r'Duration: (\d+):(\d+):(\d+\.\d+)', f"{out}\n{err}")
+    if match:
+        h, m, s = match.groups()
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    return 0
+
+
+def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, audio_mode="original", script_text=None):
     """Corta vídeo, converte para vertical 9:16, adiciona legendas e normaliza áudio."""
-    print(f"\n🎬 Processando corte {clip_num}: {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s)")
+    print(f"\n🎬 Processando corte {clip_num}: {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s) [Modo: {audio_mode}]")
 
-    # Criar arquivo ASS temporário
-    ass_path = TEMP_DIR / f"clip_{clip_num}_subs.ass"
-    if not create_ass_subtitle(segments, clip['start'], clip['end'], ass_path):
-        print("⚠️  Falha ao criar legendas, exportando sem...")
-        ass_path = None
+    ass_path = None
+    tts_audio_path = None
+    final_duration = clip['duration']
+    video_trim_start = clip['start']
 
-    # Construir comando ffmpeg complexo
-    # 1. Cortar segmento
-    # 2. Escala para vertical com fundo desfocado (blur)
-    # 3. Centralizar vídeo
-    # 4. Queimar legendas (se houver)
-    # 5. Normalizar áudio (loudnorm)
+    if audio_mode == "ia":
+        # Modo IA: gerar narração e sincronizar
+        print(f"🤖 Gerando roteiro viral e narração com edge-tts ({TTS_VOICE})...")
 
-    vf_filters = [
-        f"trim=start={clip['start']}:end={clip['end']},setpts=PTS-STARTPTS",
-        f"scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:force_original_aspect_ratio=decrease",
-        f"pad={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black@0",  # placeholder para blur
-    ]
+        # Gerar roteiro viral baseado no texto do clip
+        viral_script = generate_viral_script(clip['text'], clip['duration'])
+        print(f"📝 Roteiro gerado ({len(viral_script.split())} palavras): {viral_script[:150]}...")
 
+        # Gerar áudio TTS
+        tts_audio_path = TEMP_DIR / f"clip_{clip_num}_tts.mp3"
+        success = asyncio.run(generate_tts_audio(viral_script, tts_audio_path))
+
+        if not success or not tts_audio_path.exists():
+            print("⚠️  Falha no TTS, usando áudio original...")
+            audio_mode = "original"
+        else:
+            # Obter duração real do áudio gerado
+            tts_duration = get_audio_duration(tts_audio_path)
+            print(f"🔊 Áudio TTS gerado: {tts_duration:.1f}s")
+            final_duration = tts_duration
+            video_trim_start = clip['start']  # Começar do início do clip original
+
+            # Criar legendas sincronizadas com a narração
+            ass_path = TEMP_DIR / f"clip_{clip_num}_subs.ass"
+            if not create_ass_subtitle_from_script(viral_script, tts_duration, ass_path):
+                print("⚠️  Falha ao criar legendas sincronizadas")
+                ass_path = None
+
+    if audio_mode == "original":
+        # Modo original: usar legendas baseadas nas legendas do YouTube
+        ass_path = TEMP_DIR / f"clip_{clip_num}_subs.ass"
+        if not create_ass_subtitle(segments, clip['start'], clip['end'], ass_path):
+            print("⚠️  Falha ao criar legendas, exportando sem...")
+            ass_path = None
+
+    # Construir comando ffmpeg
     # Fundo desfocado: duplicar vídeo, escalar para cobrir tela inteira, blur, overlay
-    # Mais eficiente: usar split + gblur
     bg_filter = (
         f"[0:v]split=2[v1][v2];"
         f"[v1]scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:force_original_aspect_ratio=increase,"
@@ -575,52 +712,90 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num):
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2[video]"
     )
 
-    # Filtro completo com legenda e normalização de áudio
-    if ass_path and ass_path.exists():
-        filter_complex = (
-            f"{bg_filter};"
-            f"[video]subtitles='{ass_path.as_posix()}'[vout]"
-        )
-        map_v = "[vout]"
+    if audio_mode == "ia" and tts_audio_path and tts_audio_path.exists():
+        # Usar áudio TTS externo, remover áudio original do vídeo (-an na entrada de vídeo)
+        # O vídeo será esticado/acelerado para durar o mesmo que o áudio TTS
+        speed_ratio = clip['duration'] / final_duration if final_duration > 0 else 1.0
+
+        if ass_path and ass_path.exists():
+            filter_complex = (
+                f"{bg_filter};"
+                f"[video]setpts={1/speed_ratio:.6f}*PTS[vspeed];"
+                f"[vspeed]subtitles='{ass_path.as_posix()}'[vout]"
+            )
+            map_v = "[vout]"
+        else:
+            filter_complex = (
+                f"{bg_filter};"
+                f"[video]setpts={1/speed_ratio:.6f}*PTS[vout]"
+            )
+            map_v = "[vout]"
+
+        ffmpeg_cmd = FFMPEG.as_posix()
+        cmd = [
+            ffmpeg_cmd, "-y",
+            "-ss", str(video_trim_start),
+            "-t", str(clip['duration']),
+            "-i", str(video_path),
+            "-i", str(tts_audio_path),
+            "-filter_complex", filter_complex,
+            "-map", map_v,
+            "-map", "1:a",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary",
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            "-shortest",  # Terminar quando o mais curto acabar (áudio TTS)
+            str(output_path)
+        ]
     else:
-        filter_complex = f"{bg_filter}"
-        map_v = "[video]"
+        # Modo original: usar áudio do vídeo
+        if ass_path and ass_path.exists():
+            filter_complex = (
+                f"{bg_filter};"
+                f"[video]subtitles='{ass_path.as_posix()}'[vout]"
+            )
+            map_v = "[vout]"
+        else:
+            filter_complex = f"{bg_filter}"
+            map_v = "[video]"
 
-    # Filtro de áudio: loudnorm para -16 LUFS (padrão broadcast/streaming)
-    af_filter = "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary"
+        af_filter = "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary"
 
-    ffmpeg_cmd = FFMPEG.as_posix()
-    cmd = [
-        ffmpeg_cmd, "-y",
-        "-ss", str(clip['start']),
-        "-t", str(clip['duration']),
-        "-i", str(video_path),
-        "-filter_complex", filter_complex,
-        "-map", map_v,
-        "-map", "0:a?",
-        "-af", af_filter,
-        "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "20",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
-        str(output_path)
-    ]
+        ffmpeg_cmd = FFMPEG.as_posix()
+        cmd = [
+            ffmpeg_cmd, "-y",
+            "-ss", str(clip['start']),
+            "-t", str(clip['duration']),
+            "-i", str(video_path),
+            "-filter_complex", filter_complex,
+            "-map", map_v,
+            "-map", "0:a?",
+            "-af", af_filter,
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(output_path)
+        ]
 
     print(f"⚙️  Executando ffmpeg...")
     ok, out, err = run_cmd(cmd)
 
     if not ok:
         print(f"❌ Erro no ffmpeg: {err[:500]}")
-        # Tentar versão simplificada sem blur
-        return cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num)
+        return cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num, audio_mode, tts_audio_path)
 
     print(f"✅ Corte salvo: {output_path}")
     return True
 
 
-def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num):
+def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num, audio_mode="original", tts_audio_path=None):
     """Versão simplificada sem fundo desfocado (fallback)."""
     print(f"🔄 Tentando versão simplificada...")
 
@@ -629,21 +804,45 @@ def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_
         vf += f",subtitles='{ass_path.as_posix()}'"
 
     ffmpeg_cmd = FFMPEG.as_posix()
-    cmd = [
-        ffmpeg_cmd, "-y",
-        "-ss", str(clip['start']),
-        "-t", str(clip['duration']),
-        "-i", str(video_path),
-        "-vf", vf,
-        "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
-        "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "20",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
-        str(output_path)
-    ]
+
+    if audio_mode == "ia" and tts_audio_path and tts_audio_path.exists():
+        speed_ratio = clip['duration'] / get_audio_duration(tts_audio_path) if get_audio_duration(tts_audio_path) > 0 else 1.0
+        vf = f"setpts={1/speed_ratio:.6f}*PTS," + vf
+        cmd = [
+            ffmpeg_cmd, "-y",
+            "-ss", str(clip['start']),
+            "-t", str(clip['duration']),
+            "-i", str(video_path),
+            "-i", str(tts_audio_path),
+            "-vf", vf,
+            "-map", "0:v",
+            "-map", "1:a",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            "-shortest",
+            str(output_path)
+        ]
+    else:
+        cmd = [
+            ffmpeg_cmd, "-y",
+            "-ss", str(clip['start']),
+            "-t", str(clip['duration']),
+            "-i", str(video_path),
+            "-vf", vf,
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(output_path)
+        ]
 
     ok, out, err = run_cmd(cmd)
     if ok:
@@ -667,13 +866,18 @@ def get_video_duration(video_path):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Uso: python gerar_cortes.py <URL_DO_YOUTUBE>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Gerador de cortes virais para TikTok/YouTube Shorts")
+    parser.add_argument("url", help="URL do vídeo do YouTube")
+    parser.add_argument("--audio", choices=["original", "ia"], default="original",
+                        help="Modo de áudio: original (padrão) ou ia (narração com edge-tts)")
+    args = parser.parse_args()
 
-    url = sys.argv[1]
+    url = args.url
+    audio_mode = args.audio
+
     print("=" * 60)
     print("✂️  GERADOR DE CORTES VIRAIS - TikTok / YouTube Shorts")
+    print(f"🔊 Modo de áudio: {'Narração IA (edge-tts)' if audio_mode == 'ia' else 'Áudio original'}")
     print("=" * 60)
 
     # Verificar dependências
@@ -691,6 +895,12 @@ def main():
     if not ok:
         print("❌ yt-dlp não encontrado. Rode: pip install -r requirements.txt")
         sys.exit(1)
+
+    if audio_mode == "ia":
+        ok, _, _ = run_cmd([sys.executable, "-c", "import edge_tts"])
+        if not ok:
+            print("❌ edge-tts não encontrado. Rode: pip install edge-tts")
+            sys.exit(1)
 
     ensure_dirs()
 
@@ -715,7 +925,6 @@ def main():
     if not segments:
         print("⚠️  Nenhuma legenda encontrada. Tentando extrair do vídeo...")
         # Fallback: yt-dlp pode ter baixado legenda embutida
-        # Tentar buscar arquivo vtt/srt na temp
         for ext in ['.vtt', '.srt', '.json3']:
             sub_files = list(TEMP_DIR.glob(f"{prefix}_subs*{ext}"))
             if sub_files:
@@ -753,10 +962,11 @@ def main():
     for i, clip in enumerate(clips, 1):
         # Nome do arquivo final
         safe_text = clean_filename(clip['text'][:50])
-        output_name = f"corte_{i}_{safe_text}.mp4"
+        suffix = "_ia" if audio_mode == "ia" else ""
+        output_name = f"corte_{i}{suffix}_{safe_text}.mp4"
         output_path = OUTPUT_DIR / output_name
 
-        if cut_and_export_vertical(video_path, clip, segments, output_path, i):
+        if cut_and_export_vertical(video_path, clip, segments, output_path, i, audio_mode):
             success_count += 1
 
     # 6. Limpeza
