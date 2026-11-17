@@ -5,7 +5,8 @@
 - **Dependências:** Sempre chamar `yt-dlp` como módulo (`sys.executable, "-m", "yt_dlp"`) e usar o FFmpeg local em `./bin/ffmpeg.exe`.
 - **Python do projeto:** Usar sempre o Python do ambiente virtual (`.venv\Scripts\python.exe`) no `iniciar.bat`.
 - **API:** Credenciais ficam no arquivo `.env` na raiz (nunca expor chaves no código).
-  - `GROQ_API_KEY`: Chave para API Groq Whisper (transcrição de áudio fallback)
+  - `GROQ_API_KEY`: Chave da API Groq (transcrição Whisper, análise de frames e roteiros por IA). Copie `.env.example` para `.env`.
+  - `GROQ_VISION_MODEL` / `GROQ_TEXT_MODEL` (opcionais): trocam os modelos padrão sem editar o código.
 
 ## Arquitetura dos Arquivos
 - `iniciar.bat`: Menu principal em Batch (manter codificação ASCII sem acentos nos `echo` para não quebrar no CMD). Usa `.venv\Scripts\python.exe` e oferece 3 opções: buscar tendências, gerar cortes com áudio original, gerar cortes com narração IA.
@@ -41,10 +42,15 @@ Para resolver "Legendas: NÃO ENCONTRADAS" em vídeos longos de gameplay:
 - **Extração de frames:** `extract_key_frames()` via `./bin/ffmpeg.exe`:
   - 1 frame a cada 30s (ajustado para máx. 20 frames)
   - Resolução 1280x720, qualidade alta
-- **Análise visual:** `analyze_frames_with_ai()` — identifica clímax, vitórias, descobertas
-- **Geração de roteiro:** `generate_script_from_visual_analysis()` cria narração viral do zero
+- **Análise visual:** `analyze_frames_with_ai()` manda os frames ao Groq em **lotes de no máximo 3 imagens** (limite do modelo de visão; nunca enviar mais por chamada). Cada frame volta com descrição + nota 0-10; o timestamp vem do NOSSO frame, nunca de número devolvido pelo modelo.
+- **Escolha dos clímax:** os frames de maior nota (mínimo `MIN_CLIMAX_SCORE`=5), afastados pelo menos `TARGET_DURATION_MAX` segundos entre si.
+- **Geração de roteiro:** `_write_script_for_moment()` escreve a narração SÓ com as descrições reais dos frames (sem inventar fatos).
+- **Sem chave ou sem clímax confiável = sem corte.** NUNCA criar roteiro genérico/falso de reserva nem cortar em posições fixas (o antigo `_fallback_visual_analysis` foi removido de propósito). Sem `GROQ_API_KEY` o programa para antes de extrair frames.
 - **Modo forçado:** Automático `--audio ia` (narração 100% IA, sem áudio original)
-- **Saída:** Segmentos artificiais distribuídos uniformemente na duração do vídeo
+- **Modelos:** nomes ficam no `.env` (`GROQ_VISION_MODEL`, `GROQ_TEXT_MODEL`) porque o Groq descontinua modelos a cada poucos meses; os padrões estão em `DEFAULT_GROQ_VISION_MODEL` / `DEFAULT_GROQ_TEXT_MODEL`. Se a API devolver 400/404 de modelo, confira https://console.groq.com/docs/deprecations.
+
+## Roteiro do modo `--audio ia`
+- `generate_viral_script_ai()` reescreve o trecho com um modelo de texto do Groq (a transcrição automática do YouTube não tem pontuação). Se não houver chave, ou a IA falhar/devolver pouco texto, cai para `generate_viral_script()` (regras fixas).
 
 ## Geração de Áudio com edge-tts (Regra Obrigatória)
 **edge-tts 7.x**: O método `.stream()` de `edge_tts.Communicate` **só pode ser iterado uma única vez** — não se pode chamar `.stream()` e depois `.save()` na mesma instância.

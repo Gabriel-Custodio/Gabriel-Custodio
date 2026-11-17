@@ -23,6 +23,7 @@ import os
 import re
 import math
 import shutil
+import time
 import textwrap
 import asyncio
 import argparse
@@ -59,6 +60,16 @@ MAX_VIDEO_DURATION_FOR_SINGLE_CHUNK = 20 * 60  # 20 minutos
 MIN_WORDS_FOR_AUDIO_TRANSCRIPTION = 30
 VISUAL_FRAME_INTERVAL = 30  # Extrair frame a cada 30 segundos
 MAX_VISUAL_FRAMES = 20
+
+# Groq: chat (visão e roteiros). Os nomes dos modelos mudam a cada poucos meses; troque no
+# .env (GROQ_VISION_MODEL / GROQ_TEXT_MODEL) sem mexer no código. Veja .env.example.
+GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+DEFAULT_GROQ_VISION_MODEL = "qwen/qwen3.8-27b"
+DEFAULT_GROQ_TEXT_MODEL = "openai/gpt-oss-120b"
+MAX_IMAGES_PER_REQUEST = 3  # limite de imagens por chamada do modelo de visão
+MIN_CLIMAX_SCORE = 5  # nota mínima (0-10) para um frame virar corte
+SCRIPT_WORDS_PER_SECOND = 2.5  # ~150 palavras por minuto em português
+ENV_PATH = Path(__file__).parent / ".env"
 
 # ====================================
 
@@ -247,215 +258,307 @@ def extract_key_frames(video_path, output_dir, interval=VISUAL_FRAME_INTERVAL, m
     return frame_paths
 
 
-def analyze_frames_with_ai(frame_paths, api_key):
+def load_env_file(env_path=ENV_PATH):
+    """Lê o .env (linhas CHAVE=valor) para os.environ, sem sobrescrever o que já existe.
+
+    Usa utf-8-sig porque o Bloco de Notas do Windows costuma salvar com BOM, o que
+    faria a primeira chave (GROQ_API_KEY) não ser reconhecida.
     """
-    Analisa frames com IA (via API) para identificar clímax e momentos virais.
-    Retorna lista de dicionários com timestamps de clímax selecionados.
-    Cada item: {'timestamp': float, 'reason': str, 'script': str}
-    """
+    env_path = Path(env_path)
+    if not env_path.exists():
+        return
     try:
-        import requests
-    except ImportError:
-        return []
-
-    if not frame_paths or not api_key:
-        # Fallback sem API: retorna frames distribuídos como clímax candidatos
-        return _fallback_visual_analysis(frame_paths)
-
-    print(f"🤖 Analisando {len(frame_paths)} frames com IA para identificar clímax...")
-
-    # Prepara imagens em base64 (máximo 8 para análise)
-    images_b64 = []
-    for frame_info in frame_paths[:8]:
-        try:
-            with open(frame_info['path'], 'rb') as f:
-                b64 = base64.b64encode(f.read()).decode('utf-8')
-                images_b64.append({
-                    'timestamp': frame_info['timestamp'],
-                    'data': b64
-                })
-        except Exception as e:
-            print(f"   ⚠️  Erro ao ler frame: {e}")
-
-    if not images_b64:
-        return _fallback_visual_analysis(frame_paths)
-
-    try:
-        # Chama API de visão (Groq suporta modelos multimodais)
-        # Se não houver modelo de visão disponível, usa fallback
-        climax_moments = _call_vision_api(images_b64, api_key)
-        if climax_moments:
-            return climax_moments
-
-        # Fallback se API falhar
-        return _fallback_visual_analysis(frame_paths)
-
+        with open(env_path, 'r', encoding='utf-8-sig') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                if key.startswith('export '):
+                    key = key[len('export '):].strip()
+                value = value.strip().strip('"\'')
+                if key and value:
+                    os.environ.setdefault(key, value)
     except Exception as e:
-        print(f"   ⚠️  Erro na análise visual via API: {e}")
-        return _fallback_visual_analysis(frame_paths)
+        print(f"⚠️  Não foi possível ler o .env: {e}")
 
 
-def _call_vision_api(images_b64, api_key):
-    """
-    Chama API de visão (Groq) para identificar momentos de clímax.
-    Retorna lista de {'timestamp': float, 'reason': str, 'script': str}
+def get_groq_key():
+    """Chave da API do Groq (vem do .env ou do ambiente) ou None."""
+    return os.environ.get("GROQ_API_KEY") or None
+
+
+def get_vision_model():
+    """Modelo do Groq para analisar imagens (troque no .env: GROQ_VISION_MODEL)."""
+    return os.environ.get("GROQ_VISION_MODEL") or DEFAULT_GROQ_VISION_MODEL
+
+
+def get_text_model():
+    """Modelo do Groq para escrever roteiros (troque no .env: GROQ_TEXT_MODEL)."""
+    return os.environ.get("GROQ_TEXT_MODEL") or DEFAULT_GROQ_TEXT_MODEL
+
+
+def groq_chat(messages, api_key, model, max_tokens=4000, temperature=0.7, timeout=120, retries=3):
+    """Chama o chat/completions do Groq e devolve o texto da resposta (ou None se falhar).
+
+    Tenta de novo em 429 (limite de uso) e erros 5xx. O max_tokens é folgado porque
+    modelos com raciocínio gastam tokens "pensando" antes da resposta final.
     """
     try:
         import requests
     except ImportError:
+        print("   ❌ requests não instalado. Rode: pip install -r requirements.txt")
         return None
-
-    # Prepara payload para modelo de visão
-    # Groq tem suporte a modelos multimodais como llama-3.2-90b-vision-preview
-    content = [
-        {
-            "type": "text",
-            "text": (
-                "Analise estes frames de um vídeo de gameplay. "
-                "Identifique os 1 a 3 melhores momentos de CLÍMAX VISUAL que dariam bons cortes virais (30-45s cada). "
-                "Critérios: vitória, descoberta, reação forte, conclusão de desafio, momento 'wow', fail engraçado, "
-                "easter egg, boss defeat, achievement unlock, final de speedrun.\n\n"
-                "Para CADA clímax identificado, retorne JSON com:\n"
-                "- timestamp: segundo exato do frame (número)\n"
-                "- reason: por que é viral (ex: 'vitória contra boss final', 'descoberta secreta', 'reação de susto')\n"
-                "- script: roteiro narrado viral de 35-45s em pt-BR com gancho, desenvolvimento e CTA, "
-                "com pontuação rigorosa (vírgulas, pontos, exclamações) para TTS natural.\n\n"
-                "Responda APENAS com array JSON válido. Exemplo:\n"
-                "[{\"timestamp\": 342.5, \"reason\": \"vitória contra boss final\", "
-                "\"script\": \"Você não vai acreditar! Após 50 tentativas, finalmente derrotei o boss final! "
-                "O segredo era atacar na fase 2. Fica a dica: persistência vence!\"}]"
-            )
-        }
-    ]
-
-    for img in images_b64:
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{img['data']}"}
-        })
 
     payload = {
-        "model": "llama-3.2-90b-vision-preview",
-        "messages": [{"role": "user", "content": content}],
-        "temperature": 0.7,
-        "max_tokens": 2000
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_completion_tokens": max_tokens,
     }
+    headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
 
-    headers = {
-        'Authorization': f'Bearer {api_key}',
-        'Content-Type': 'application/json'
-    }
+    for attempt in range(1, retries + 1):
+        wait = min(2 ** attempt * 2, 30)
+        try:
+            response = requests.post(GROQ_CHAT_URL, json=payload, headers=headers, timeout=timeout)
+        except requests.RequestException as e:
+            print(f"   ⚠️  Falha de rede ao chamar o Groq ({model}): {e}")
+            response = None
 
-    response = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        json=payload,
-        headers=headers,
-        timeout=60
-    )
+        if response is not None:
+            if response.status_code == 200:
+                try:
+                    content = response.json()['choices'][0]['message']['content']
+                except (KeyError, IndexError, ValueError):
+                    print(f"   ❌ Resposta inesperada do Groq ({model})")
+                    return None
+                # Alguns modelos devolvem o raciocínio entre <think>...</think>
+                return re.sub(r'<think>.*?</think>', '', content or '', flags=re.DOTALL).strip()
+            if response.status_code not in (429, 500, 502, 503, 504):
+                print(f"   ❌ Groq {response.status_code} ({model}): {response.text[:300]}")
+                return None
+            try:
+                wait = min(float(response.headers.get('retry-after', wait)), 30)
+            except ValueError:
+                pass
+            print(f"   ⚠️  Groq {response.status_code}, tentativa {attempt}/{retries}...")
 
-    if response.status_code != 200:
-        print(f"   ⚠️  API visão falhou: {response.status_code}")
+        if attempt < retries:
+            time.sleep(wait)
+    return None
+
+
+def extract_json(text):
+    """Extrai o primeiro JSON (lista ou objeto) de uma resposta, mesmo dentro de ```json ... ```."""
+    if not text:
         return None
-
-    result = response.json()
-    content_text = result['choices'][0]['message']['content'].strip()
-
-    # Extrai JSON da resposta
-    import json
+    cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip())
     try:
-        # Tenta parsear JSON direto
-        climax_moments = json.loads(content_text)
-    except json.JSONDecodeError:
-        # Tenta extrair JSON de dentro de markdown ou texto
-        import re
-        json_match = re.search(r'\[.*\]', content_text, re.DOTALL)
-        if json_match:
-            climax_moments = json.loads(json_match.group())
-        else:
-            print(f"   ⚠️  Resposta da API não contém JSON válido")
-            return None
-
-    # Valida e filtra resultados
-    valid_moments = []
-    for moment in climax_moments:
-        if isinstance(moment, dict) and 'timestamp' in moment and 'script' in moment:
-            ts = float(moment['timestamp'])
-            # Garante que timestamp está dentro da duração do vídeo (aproximado)
-            if ts >= 0:
-                valid_moments.append({
-                    'timestamp': ts,
-                    'reason': moment.get('reason', 'clímax visual'),
-                    'script': moment['script']
-                })
-
-    # Ordena por timestamp e pega top 3
-    valid_moments.sort(key=lambda x: x['timestamp'])
-    return valid_moments[:3]
+        return json.loads(cleaned)
+    except ValueError:
+        pass
+    for opener, closer in (('[', ']'), ('{', '}')):
+        start, end = cleaned.find(opener), cleaned.rfind(closer)
+        if start != -1 and end > start:
+            try:
+                return json.loads(cleaned[start:end + 1])
+            except ValueError:
+                continue
+    return None
 
 
-def _fallback_visual_analysis(frame_paths):
+def clean_script(text, max_words):
+    """Limpa o roteiro devolvido pela IA e garante tamanho e pontuação final.
+
+    Remove markdown/aspas, junta linhas e, se passar de max_words, corta na última
+    frase completa. Retorna None se sobrar texto de menos para uma narração.
     """
-    Fallback sem API: seleciona frames bem distribuídos como clímax candidatos.
-    Gera roteiros padrão para cada um.
-    """
-    print("   📋 Usando análise visual de fallback (sem API de visão)...")
+    if not text:
+        return None
+    text = re.sub(r'[*_#`>]+', '', text)
+    text = re.sub(r'\s+', ' ', text).strip().strip('"“”\'')
+    words = text.split()
+    if len(words) < 15:
+        return None
+    if len(words) > max_words:
+        truncated = ' '.join(words[:max_words])
+        last_punct = max(truncated.rfind(p) for p in '.!?…')
+        text = truncated[:last_punct + 1] if last_punct > len(truncated) * 0.5 else truncated.rstrip(',;:') + '.'
+    if not re.search(r'[.!?…]$', text):
+        text += '.'
+    return text
 
+
+def generate_viral_script_ai(original_text, target_duration, api_key):
+    """Reescreve o trecho do vídeo como narração viral usando um modelo de texto do Groq.
+
+    A transcrição automática do YouTube não tem pontuação e tem erros de reconhecimento,
+    então o modelo recebe isso como "matéria-prima" e devolve frases curtas e pontuadas.
+    Retorna None se a IA falhar (quem chama usa generate_viral_script, por regras).
+    """
+    max_words = int(target_duration * SCRIPT_WORDS_PER_SECOND)
+    prompt = (
+        f"O texto abaixo é a transcrição automática (sem pontuação, pode ter erros de reconhecimento) "
+        f"de um trecho de cerca de {target_duration:.0f} segundos de um vídeo.\n\n"
+        f"TRANSCRIÇÃO:\n{original_text[:6000]}\n\n"
+        f"Escreva a narração de um corte vertical (TikTok/Shorts) a partir dela, em português do Brasil "
+        f"(traduza se a transcrição estiver em outro idioma).\n"
+        f"Regras:\n"
+        f"1. Seja fiel ao conteúdo: não invente fatos, nomes, números ou resultados que não estejam no texto.\n"
+        f"2. Estrutura: gancho forte na primeira frase, desenvolvimento curto e fechamento com uma chamada para ação breve.\n"
+        f"3. Frases curtas, com pontuação (vírgulas, pontos, exclamações) para a voz respirar.\n"
+        f"4. No máximo {max_words} palavras.\n"
+        f"5. Sem emojis, markdown, aspas ou títulos.\n"
+        f"Responda APENAS com o texto da narração."
+    )
+    answer = groq_chat([{"role": "user", "content": prompt}], api_key, get_text_model())
+    return clean_script(answer, max_words)
+
+
+def _describe_frame_batch(batch, api_key, model):
+    """Pede ao modelo de visão a descrição e a nota de cada frame de um lote (até 3 imagens).
+
+    Retorna lista de {'timestamp', 'description', 'score', 'reason'}. O timestamp vem do
+    nosso próprio frame (a ordem das imagens), nunca de um número que o modelo invente.
+    """
+    content = [{
+        "type": "text",
+        "text": (
+            "Você analisa frames de um vídeo (provavelmente gameplay) para achar momentos bons para cortes virais. "
+            f"Vou enviar {len(batch)} imagem(ns), cada uma precedida pela sua numeração.\n"
+            "Para CADA imagem responda:\n"
+            "- frame: o número da imagem\n"
+            "- description: o que está acontecendo, em 1 frase, descrevendo SÓ o que dá para ver\n"
+            "- score: de 0 a 10, o potencial de corte viral (vitória, descoberta, reação forte, fim de desafio, "
+            "momento engraçado ou surpreendente; menu, tela de carregamento ou cena parada = 0 a 2)\n"
+            "- reason: por que essa nota, em poucas palavras\n"
+            "Responda APENAS com uma lista JSON válida, por exemplo: "
+            '[{"frame": 1, "description": "O jogador derrota o chefe final", "score": 9, "reason": "vitória épica"}]'
+        )
+    }]
+    for i, frame in enumerate(batch, 1):
+        try:
+            with open(frame['path'], 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode('utf-8')
+        except OSError as e:
+            print(f"   ⚠️  Erro ao ler frame: {e}")
+            return []
+        content.append({"type": "text", "text": f"Imagem {i}:"})
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+
+    answer = groq_chat([{"role": "user", "content": content}], api_key, model, temperature=0.3)
+    data = extract_json(answer)
+    if not isinstance(data, list):
+        print("   ⚠️  Resposta de visão sem JSON válido neste lote")
+        return []
+
+    described = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get('frame')) - 1
+            score = max(0.0, min(10.0, float(item.get('score', 0))))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(batch):
+            described.append({
+                'timestamp': batch[idx]['timestamp'],
+                'description': str(item.get('description', '')).strip(),
+                'score': score,
+                'reason': str(item.get('reason', '')).strip() or 'clímax visual',
+            })
+    return described
+
+
+def _pick_climax_frames(described, num_clips=3, min_gap=TARGET_DURATION_MAX, min_score=MIN_CLIMAX_SCORE):
+    """Escolhe os frames de maior nota, afastados entre si (os cortes não se sobrepõem)."""
+    chosen = []
+    for frame in sorted(described, key=lambda f: f['score'], reverse=True):
+        if frame['score'] < min_score:
+            break
+        if all(abs(frame['timestamp'] - c['timestamp']) >= min_gap for c in chosen):
+            chosen.append(frame)
+            if len(chosen) >= num_clips:
+                break
+    return sorted(chosen, key=lambda f: f['timestamp'])
+
+
+def _write_script_for_moment(moment, described, api_key):
+    """Escreve a narração de um clímax usando SÓ as descrições reais dos frames do vídeo."""
+    timeline = "\n".join(
+        f"[{int(f['timestamp'] // 60):02d}:{int(f['timestamp'] % 60):02d}] {f['description']}"
+        for f in sorted(described, key=lambda f: f['timestamp']) if f['description']
+    )
+    ts = moment['timestamp']
+    max_words = int(TARGET_DURATION_MAX * SCRIPT_WORDS_PER_SECOND * 0.85)
+    prompt = (
+        f"Abaixo está a linha do tempo de um vídeo, descrita frame a frame:\n{timeline}\n\n"
+        f"Escreva a narração de um corte vertical (TikTok/Shorts) de cerca de 40 segundos centrado em "
+        f"[{int(ts // 60):02d}:{int(ts % 60):02d}] ({moment['reason']}), em português do Brasil.\n"
+        f"Regras:\n"
+        f"1. Baseie-se SÓ no que a linha do tempo mostra: não invente fatos, nomes, números ou resultados.\n"
+        f"2. Estrutura: gancho forte na primeira frase, desenvolvimento e fechamento com uma chamada para ação breve.\n"
+        f"3. Frases curtas, com pontuação (vírgulas, pontos, exclamações) para a voz respirar.\n"
+        f"4. Entre 80 e {max_words} palavras.\n"
+        f"5. Sem emojis, markdown, aspas ou títulos.\n"
+        f"Responda APENAS com o texto da narração."
+    )
+    answer = groq_chat([{"role": "user", "content": prompt}], api_key, get_text_model())
+    return clean_script(answer, max_words)
+
+
+def analyze_frames_with_ai(frame_paths, api_key):
+    """
+    Passo C: analisa os frames com IA e escolhe os clímax do vídeo.
+
+    1. Manda os frames em lotes de até MAX_IMAGES_PER_REQUEST imagens (limite do Groq)
+       e recebe descrição + nota de cada um.
+    2. Escolhe os frames de maior nota (mínimo MIN_CLIMAX_SCORE), afastados entre si.
+    3. Escreve o roteiro de cada clímax a partir das descrições reais.
+
+    Retorna lista de {'timestamp', 'reason', 'script'}, ou [] se não der para gerar
+    cortes confiáveis. Não existe roteiro "genérico" de reserva: sem IA não há corte.
+    """
+    if not api_key:
+        print("   ❌ Passo C precisa da GROQ_API_KEY (configure no .env).")
+        return []
     if not frame_paths:
         return []
 
-    # Seleciona até 3 frames bem distribuídos (início, meio, fim)
-    num_climax = min(3, len(frame_paths))
-    indices = []
-    if num_climax == 1:
-        indices = [len(frame_paths) // 2]
-    elif num_climax == 2:
-        indices = [len(frame_paths) // 3, 2 * len(frame_paths) // 3]
-    else:
-        indices = [len(frame_paths) // 4, len(frame_paths) // 2, 3 * len(frame_paths) // 4]
+    model = get_vision_model()
+    batches = [frame_paths[i:i + MAX_IMAGES_PER_REQUEST]
+               for i in range(0, len(frame_paths), MAX_IMAGES_PER_REQUEST)]
+    print(f"🤖 Analisando {len(frame_paths)} frames com {model} ({len(batches)} lotes de até {MAX_IMAGES_PER_REQUEST})...")
+
+    described = []
+    for n, batch in enumerate(batches, 1):
+        print(f"   Lote {n}/{len(batches)}...")
+        described.extend(_describe_frame_batch(batch, api_key, model))
+
+    if not described:
+        print("   ❌ A IA não devolveu nenhuma descrição de frame.")
+        return []
+
+    chosen = _pick_climax_frames(described)
+    if not chosen:
+        best = max(f['score'] for f in described)
+        print(f"   ⚠️  Nenhum frame passou da nota mínima ({MIN_CLIMAX_SCORE}); a melhor foi {best:.0f}.")
+        return []
 
     climax_moments = []
-    for idx in indices:
-        frame = frame_paths[idx]
-        ts = frame['timestamp']
-        mins = int(ts // 60)
-        secs = int(ts % 60)
-
-        # Gera roteiro padrão baseado na posição
-        if idx < len(frame_paths) * 0.33:
-            reason = "início promissor / gancho visual"
-            script = (
-                "Olha só esse início incrível! Nos primeiros minutos já acontece algo inesperado. "
-                "Você vai querer ver como isso se desenvolve. Fica a dica: o começo define tudo!"
-            )
-        elif idx < len(frame_paths) * 0.66:
-            reason = "meio do gameplay / desenvolvimento"
-            script = (
-                "No meio da partida, a estratégia muda completamente! "
-                "Uma mecânica secreta é revelada e tudo vira de cabeça para baixo. "
-                "Você precisa ver isso para acreditar. Inscreva-se para mais!"
-            )
+    for moment in chosen:
+        script = _write_script_for_moment(moment, described, api_key)
+        if script:
+            climax_moments.append({
+                'timestamp': moment['timestamp'],
+                'reason': moment['reason'],
+                'script': script,
+            })
         else:
-            reason = "final / clímax do gameplay"
-            script = (
-                "O final é de arrepiar! Após toda a jornada, o momento da vitória chega. "
-                "A recompensa valeu cada segundo de esforço. "
-                "Compartilhe se você também vibrou! Fica a dica!"
-            )
-
-        # Ajusta duração do script para ~40s (~100 palavras)
-        max_words = 100
-        script_words = script.split()
-        if len(script_words) > max_words:
-            script = ' '.join(script_words[:max_words])
-            if not script.endswith(('.', '!', '?', '...')):
-                script += "."
-
-        climax_moments.append({
-            'timestamp': ts,
-            'reason': reason,
-            'script': script
-        })
-
+            print(f"   ⚠️  Sem roteiro para o clímax em {moment['timestamp']:.0f}s; pulando.")
     return climax_moments
 
 
@@ -673,6 +776,14 @@ def load_subtitles_with_fallback(subtitle_path, video_path, temp_dir, api_key=No
 
     print("   ⚠️  Passo A falhou: Nenhuma legenda do YouTube encontrada")
 
+    # Os passos B e C dependem da API do Groq. Sem chave não há como seguir: o código não
+    # inventa roteiro de reserva (cortes sem relação com o vídeo).
+    if not api_key:
+        print("   ❌ Sem legendas do YouTube e sem GROQ_API_KEY: não dá para transcrever o áudio (Passo B)")
+        print("      nem analisar os frames (Passo C). Configure a chave no .env (veja .env.example)")
+        print("      ou use um vídeo com legendas automáticas.")
+        return [], "failed", None
+
     # === PASSO B: Transcrição de Áudio via Groq ===
     if api_key:
         print("   Passo B: Tentando transcrição de áudio via Groq Whisper API...")
@@ -702,8 +813,6 @@ def load_subtitles_with_fallback(subtitle_path, video_path, temp_dir, api_key=No
                 return all_segments, "groq_audio", None
         else:
             print("   ⚠️  Passo B falhou: Transcrição não retornou segmentos")
-    else:
-        print("   ⚠️  Passo B pulado: GROQ_API_KEY não configurada no .env")
 
     # === PASSO C: Modo Visual Gameplay ===
     print("   Passo C: Modo Visual Gameplay - extraindo frames para análise...")
@@ -717,11 +826,7 @@ def load_subtitles_with_fallback(subtitle_path, video_path, temp_dir, api_key=No
     climax_moments = analyze_frames_with_ai(frame_paths, api_key)
 
     if not climax_moments:
-        print("   ⚠️  Nenhum clímax identificado, usando fallback distribuído")
-        climax_moments = _fallback_visual_analysis(frame_paths)
-
-    if not climax_moments:
-        print("   ❌ Falha total no Passo C")
+        print("   ❌ Passo C não encontrou clímax confiáveis. Nenhum corte será gerado.")
         return [], "failed", None
 
     print(f"   ✅ Passo C OK: {len(climax_moments)} clímax identificados")
@@ -1590,7 +1695,15 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
         print(f"🤖 Gerando roteiro viral e narração com edge-tts ({TTS_VOICE})...")
 
         # Gerar roteiro viral baseado no texto do clip
-        viral_script = generate_viral_script(clip['text'], clip['duration'])
+        viral_script = None
+        api_key = get_groq_key()
+        if api_key:
+            print(f"🧠 Reescrevendo o roteiro com IA ({get_text_model()})...")
+            viral_script = generate_viral_script_ai(clip['text'], clip['duration'], api_key)
+            if not viral_script:
+                print("⚠️  IA indisponível, usando o roteiro por regras...")
+        if not viral_script:
+            viral_script = generate_viral_script(clip['text'], clip['duration'])
         print(f"📝 Roteiro gerado ({len(viral_script.split())} palavras): {viral_script[:150]}...")
 
         # Gerar áudio TTS com eventos WordBoundary para sincronia exata
@@ -1828,24 +1941,14 @@ def main():
             print("❌ edge-tts não encontrado. Rode: pip install edge-tts")
             sys.exit(1)
 
-    # Carregar API key do Groq do .env
-    groq_api_key = None
-    env_path = Path(".env")
-    if env_path.exists():
-        try:
-            with open(env_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith('GROQ_API_KEY='):
-                        groq_api_key = line.split('=', 1)[1].strip().strip('"\'')
-                        break
-        except Exception:
-            pass
+    # Carregar .env (GROQ_API_KEY e, opcionalmente, GROQ_VISION_MODEL / GROQ_TEXT_MODEL)
+    load_env_file()
+    groq_api_key = get_groq_key()
 
     if groq_api_key:
-        print("🔑 GROQ_API_KEY carregada do .env")
+        print(f"🔑 GROQ_API_KEY carregada (visão: {get_vision_model()} | texto: {get_text_model()})")
     else:
-        print("⚠️  GROQ_API_KEY não encontrada no .env (Passo B será pulado)")
+        print("⚠️  GROQ_API_KEY não encontrada no .env: sem ela não há roteiro por IA (Passo B/C) nem fallback sem legendas")
 
     ensure_dirs()
 
