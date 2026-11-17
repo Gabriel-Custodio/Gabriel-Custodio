@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Verificador e instalador automático de dependências para Windows.
 Verifica Python, pip, yt-dlp, ffmpeg e instala automaticamente se necessário.

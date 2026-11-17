@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Gerador de cortes virais para TikTok/YouTube Shorts.
 Baixa vídeo, extrai áudio, transcreve com legendas do YouTube,
@@ -10,6 +10,11 @@ Modos de áudio:
                       cria roteiro viral resumido com gancho forte, remove áudio
                       original (-an), ajusta duração do vídeo ao MP3 gerado e
                       sincroniza legendas .ass com a narração.
+
+Sistema de Fallback de Legendas (3 passos):
+  Passo A: Legendas automáticas do YouTube (.vtt/.json3)
+  Passo B: Transcrição de áudio via Groq Whisper API (whisper-large-v3-turbo)
+  Passo C: Modo Visual Gameplay - análise de frames + narração IA
 """
 import subprocess
 import json
@@ -21,8 +26,11 @@ import shutil
 import textwrap
 import asyncio
 import argparse
+import base64
+import hashlib
 from pathlib import Path
 from datetime import timedelta
+from urllib.parse import urlparse, parse_qs
 
 
 # ========== CONFIGURAÇÕES ==========
@@ -42,7 +50,686 @@ FONT_SIZE = 70
 TTS_VOICE = "pt-BR-AntonioNeural"
 TTS_RATE = "+0%"
 TTS_VOLUME = "+0%"
+
+# Configurações de Fallback de Legendas
+GROQ_API_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+GROQ_MODEL = "whisper-large-v3-turbo"
+AUDIO_CHUNK_DURATION = 15 * 60  # 15 minutos em segundos
+MAX_VIDEO_DURATION_FOR_SINGLE_CHUNK = 20 * 60  # 20 minutos
+MIN_WORDS_FOR_AUDIO_TRANSCRIPTION = 30
+VISUAL_FRAME_INTERVAL = 30  # Extrair frame a cada 30 segundos
+MAX_VISUAL_FRAMES = 20
+
 # ====================================
+
+
+def clean_youtube_url(url):
+    """
+    Limpa a URL do YouTube mantendo apenas o ID principal do vídeo.
+    Remove parâmetros de tracking, playlist, timestamp, etc.
+    """
+    # Padrões de URL do YouTube
+    patterns = [
+        r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})',
+        r'youtube\.com/shorts/([a-zA-Z0-9_-]{11})',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            video_id = match.group(1)
+            return f"https://www.youtube.com/watch?v={video_id}"
+
+    # Se já for uma URL limpa, retorna como está
+    if re.match(r'https://www\.youtube\.com/watch\?v=[a-zA-Z0-9_-]{11}$', url):
+        return url
+
+    # Fallback: retorna original se não conseguir parsear
+    return url
+
+
+def extract_audio_for_transcription(video_path, output_dir, chunk_duration=AUDIO_CHUNK_DURATION):
+    """
+    Extrai áudio do vídeo em MP3 mono 64kbps.
+    Se vídeo > 20 min, divide em chunks de 15 min.
+    Retorna lista de caminhos dos arquivos de áudio.
+    """
+    print(f"🎵 Extraindo áudio para transcrição...")
+
+    # Primeiro, obtém duração do vídeo
+    video_duration = get_video_duration(video_path)
+    print(f"   Duração do vídeo: {video_duration/60:.1f} min")
+
+    audio_files = []
+
+    if video_duration <= MAX_VIDEO_DURATION_FOR_SINGLE_CHUNK:
+        # Vídeo curto: extrai áudio completo
+        audio_path = output_dir / "audio_full.mp3"
+        cmd = [
+            FFMPEG.as_posix(), "-y",
+            "-i", str(video_path),
+            "-vn",  # Sem vídeo
+            "-ac", "1",  # Mono
+            "-ar", "16000",  # 16kHz (ideal para Whisper)
+            "-b:a", "64k",  # 64kbps
+            "-f", "mp3",
+            str(audio_path)
+        ]
+        ok, out, err = run_cmd(cmd)
+        if ok and audio_path.exists():
+            audio_files.append(audio_path)
+            print(f"   ✅ Áudio extraído: {audio_path}")
+        else:
+            print(f"   ❌ Falha ao extrair áudio: {err[:200]}")
+    else:
+        # Vídeo longo: divide em chunks de 15 min
+        num_chunks = math.ceil(video_duration / chunk_duration)
+        print(f"   Vídeo longo detectado. Dividindo em {num_chunks} chunks de {chunk_duration/60:.0f} min...")
+
+        for i in range(num_chunks):
+            start_time = i * chunk_duration
+            chunk_duration_actual = min(chunk_duration, video_duration - start_time)
+
+            audio_path = output_dir / f"audio_chunk_{i:03d}.mp3"
+            cmd = [
+                FFMPEG.as_posix(), "-y",
+                "-ss", str(start_time),
+                "-t", str(chunk_duration_actual),
+                "-i", str(video_path),
+                "-vn",
+                "-ac", "1",
+                "-ar", "16000",
+                "-b:a", "64k",
+                "-f", "mp3",
+                str(audio_path)
+            ]
+            ok, out, err = run_cmd(cmd)
+            if ok and audio_path.exists():
+                audio_files.append(audio_path)
+                print(f"   ✅ Chunk {i+1}/{num_chunks}: {audio_path} ({chunk_duration_actual/60:.1f} min)")
+            else:
+                print(f"   ❌ Falha no chunk {i+1}: {err[:200]}")
+
+    return audio_files
+
+
+def transcribe_audio_groq(audio_path, api_key):
+    """
+    Transcreve áudio usando Groq API (whisper-large-v3-turbo).
+    Retorna lista de segmentos com timestamps no formato padrão do projeto.
+    """
+    try:
+        import requests
+    except ImportError:
+        print("❌ requests não instalado. Rode: pip install requests")
+        return []
+
+    print(f"🔄 Transcrevendo via Groq Whisper API: {audio_path.name}")
+
+    try:
+        with open(audio_path, 'rb') as f:
+            files = {'file': (audio_path.name, f, 'audio/mpeg')}
+            data = {
+                'model': GROQ_MODEL,
+                'response_format': 'verbose_json',
+                'timestamp_granularities[]': 'segment',
+                'language': 'pt'
+            }
+            headers = {'Authorization': f'Bearer {api_key}'}
+
+            response = requests.post(GROQ_API_URL, files=files, data=data, headers=headers, timeout=120)
+
+        if response.status_code != 200:
+            print(f"   ❌ Erro na API Groq: {response.status_code} - {response.text[:200]}")
+            return []
+
+        result = response.json()
+        segments = []
+
+        for seg in result.get('segments', []):
+            text = seg.get('text', '').strip()
+            if text:
+                segments.append({
+                    'start': seg.get('start', 0),
+                    'end': seg.get('end', 0),
+                    'text': text
+                })
+
+        print(f"   ✅ Transcrição concluída: {len(segments)} segmentos")
+        return segments
+
+    except Exception as e:
+        print(f"   ❌ Erro na transcrição: {e}")
+        return []
+
+
+def extract_key_frames(video_path, output_dir, interval=VISUAL_FRAME_INTERVAL, max_frames=MAX_VISUAL_FRAMES):
+    """
+    Extrai frames-chave do vídeo para análise visual (modo gameplay).
+    Retorna lista de caminhos dos frames extraídos.
+    """
+    print(f"🖼️  Extraindo frames-chave para análise visual...")
+
+    video_duration = get_video_duration(video_path)
+    frame_paths = []
+
+    # Calcula intervalo real para não exceder max_frames
+    actual_interval = max(interval, video_duration / max_frames)
+    num_frames = min(max_frames, int(video_duration / actual_interval) + 1)
+
+    for i in range(num_frames):
+        timestamp = i * actual_interval
+        if timestamp >= video_duration:
+            break
+
+        frame_path = output_dir / f"frame_{i:03d}_{timestamp:.0f}s.jpg"
+        cmd = [
+            FFMPEG.as_posix(), "-y",
+            "-ss", str(timestamp),
+            "-i", str(video_path),
+            "-vframes", "1",
+            "-q:v", "2",  # Alta qualidade
+            "-vf", "scale=1280:720",  # Reduzir para economia
+            str(frame_path)
+        ]
+        ok, out, err = run_cmd(cmd)
+        if ok and frame_path.exists():
+            frame_paths.append({
+                'path': frame_path,
+                'timestamp': timestamp
+            })
+        else:
+            print(f"   ⚠️  Falha ao extrair frame em {timestamp:.0f}s")
+
+    print(f"   ✅ {len(frame_paths)} frames extraídos")
+    return frame_paths
+
+
+def analyze_frames_with_ai(frame_paths, api_key):
+    """
+    Analisa frames com IA (via API) para identificar clímax e momentos virais.
+    Retorna lista de dicionários com timestamps de clímax selecionados.
+    Cada item: {'timestamp': float, 'reason': str, 'script': str}
+    """
+    try:
+        import requests
+    except ImportError:
+        return []
+
+    if not frame_paths or not api_key:
+        # Fallback sem API: retorna frames distribuídos como clímax candidatos
+        return _fallback_visual_analysis(frame_paths)
+
+    print(f"🤖 Analisando {len(frame_paths)} frames com IA para identificar clímax...")
+
+    # Prepara imagens em base64 (máximo 8 para análise)
+    images_b64 = []
+    for frame_info in frame_paths[:8]:
+        try:
+            with open(frame_info['path'], 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode('utf-8')
+                images_b64.append({
+                    'timestamp': frame_info['timestamp'],
+                    'data': b64
+                })
+        except Exception as e:
+            print(f"   ⚠️  Erro ao ler frame: {e}")
+
+    if not images_b64:
+        return _fallback_visual_analysis(frame_paths)
+
+    try:
+        # Chama API de visão (Groq suporta modelos multimodais)
+        # Se não houver modelo de visão disponível, usa fallback
+        climax_moments = _call_vision_api(images_b64, api_key)
+        if climax_moments:
+            return climax_moments
+
+        # Fallback se API falhar
+        return _fallback_visual_analysis(frame_paths)
+
+    except Exception as e:
+        print(f"   ⚠️  Erro na análise visual via API: {e}")
+        return _fallback_visual_analysis(frame_paths)
+
+
+def _call_vision_api(images_b64, api_key):
+    """
+    Chama API de visão (Groq) para identificar momentos de clímax.
+    Retorna lista de {'timestamp': float, 'reason': str, 'script': str}
+    """
+    try:
+        import requests
+    except ImportError:
+        return None
+
+    # Prepara payload para modelo de visão
+    # Groq tem suporte a modelos multimodais como llama-3.2-90b-vision-preview
+    content = [
+        {
+            "type": "text",
+            "text": (
+                "Analise estes frames de um vídeo de gameplay. "
+                "Identifique os 1 a 3 melhores momentos de CLÍMAX VISUAL que dariam bons cortes virais (30-45s cada). "
+                "Critérios: vitória, descoberta, reação forte, conclusão de desafio, momento 'wow', fail engraçado, "
+                "easter egg, boss defeat, achievement unlock, final de speedrun.\n\n"
+                "Para CADA clímax identificado, retorne JSON com:\n"
+                "- timestamp: segundo exato do frame (número)\n"
+                "- reason: por que é viral (ex: 'vitória contra boss final', 'descoberta secreta', 'reação de susto')\n"
+                "- script: roteiro narrado viral de 35-45s em pt-BR com gancho, desenvolvimento e CTA, "
+                "com pontuação rigorosa (vírgulas, pontos, exclamações) para TTS natural.\n\n"
+                "Responda APENAS com array JSON válido. Exemplo:\n"
+                "[{\"timestamp\": 342.5, \"reason\": \"vitória contra boss final\", "
+                "\"script\": \"Você não vai acreditar! Após 50 tentativas, finalmente derrotei o boss final! "
+                "O segredo era atacar na fase 2. Fica a dica: persistência vence!\"}]"
+            )
+        }
+    ]
+
+    for img in images_b64:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{img['data']}"}
+        })
+
+    payload = {
+        "model": "llama-3.2-90b-vision-preview",
+        "messages": [{"role": "user", "content": content}],
+        "temperature": 0.7,
+        "max_tokens": 2000
+    }
+
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json'
+    }
+
+    response = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        json=payload,
+        headers=headers,
+        timeout=60
+    )
+
+    if response.status_code != 200:
+        print(f"   ⚠️  API visão falhou: {response.status_code}")
+        return None
+
+    result = response.json()
+    content_text = result['choices'][0]['message']['content'].strip()
+
+    # Extrai JSON da resposta
+    import json
+    try:
+        # Tenta parsear JSON direto
+        climax_moments = json.loads(content_text)
+    except json.JSONDecodeError:
+        # Tenta extrair JSON de dentro de markdown ou texto
+        import re
+        json_match = re.search(r'\[.*\]', content_text, re.DOTALL)
+        if json_match:
+            climax_moments = json.loads(json_match.group())
+        else:
+            print(f"   ⚠️  Resposta da API não contém JSON válido")
+            return None
+
+    # Valida e filtra resultados
+    valid_moments = []
+    for moment in climax_moments:
+        if isinstance(moment, dict) and 'timestamp' in moment and 'script' in moment:
+            ts = float(moment['timestamp'])
+            # Garante que timestamp está dentro da duração do vídeo (aproximado)
+            if ts >= 0:
+                valid_moments.append({
+                    'timestamp': ts,
+                    'reason': moment.get('reason', 'clímax visual'),
+                    'script': moment['script']
+                })
+
+    # Ordena por timestamp e pega top 3
+    valid_moments.sort(key=lambda x: x['timestamp'])
+    return valid_moments[:3]
+
+
+def _fallback_visual_analysis(frame_paths):
+    """
+    Fallback sem API: seleciona frames bem distribuídos como clímax candidatos.
+    Gera roteiros padrão para cada um.
+    """
+    print("   📋 Usando análise visual de fallback (sem API de visão)...")
+
+    if not frame_paths:
+        return []
+
+    # Seleciona até 3 frames bem distribuídos (início, meio, fim)
+    num_climax = min(3, len(frame_paths))
+    indices = []
+    if num_climax == 1:
+        indices = [len(frame_paths) // 2]
+    elif num_climax == 2:
+        indices = [len(frame_paths) // 3, 2 * len(frame_paths) // 3]
+    else:
+        indices = [len(frame_paths) // 4, len(frame_paths) // 2, 3 * len(frame_paths) // 4]
+
+    climax_moments = []
+    for idx in indices:
+        frame = frame_paths[idx]
+        ts = frame['timestamp']
+        mins = int(ts // 60)
+        secs = int(ts % 60)
+
+        # Gera roteiro padrão baseado na posição
+        if idx < len(frame_paths) * 0.33:
+            reason = "início promissor / gancho visual"
+            script = (
+                "Olha só esse início incrível! Nos primeiros minutos já acontece algo inesperado. "
+                "Você vai querer ver como isso se desenvolve. Fica a dica: o começo define tudo!"
+            )
+        elif idx < len(frame_paths) * 0.66:
+            reason = "meio do gameplay / desenvolvimento"
+            script = (
+                "No meio da partida, a estratégia muda completamente! "
+                "Uma mecânica secreta é revelada e tudo vira de cabeça para baixo. "
+                "Você precisa ver isso para acreditar. Inscreva-se para mais!"
+            )
+        else:
+            reason = "final / clímax do gameplay"
+            script = (
+                "O final é de arrepiar! Após toda a jornada, o momento da vitória chega. "
+                "A recompensa valeu cada segundo de esforço. "
+                "Compartilhe se você também vibrou! Fica a dica!"
+            )
+
+        # Ajusta duração do script para ~40s (~100 palavras)
+        max_words = 100
+        script_words = script.split()
+        if len(script_words) > max_words:
+            script = ' '.join(script_words[:max_words])
+            if not script.endswith(('.', '!', '?', '...')):
+                script += "."
+
+        climax_moments.append({
+            'timestamp': ts,
+            'reason': reason,
+            'script': script
+        })
+
+    return climax_moments
+
+
+def generate_climax_clips_from_visual(video_path, frame_paths, climax_moments, output_dir, clip_num_start=1):
+    """
+    Para cada momento de clímax identificado, gera o corte completo:
+    - Cria roteiro narrado (já vem do climax_moments)
+    - Gera áudio TTS com edge-tts
+    - Corta vídeo no FFmpeg sincronizado com áudio
+    - Salva em output_dir
+    Retorna lista de caminhos dos cortes gerados.
+    """
+    if not climax_moments:
+        print("   ⚠️  Nenhum clímax identificado para gerar cortes")
+        return []
+
+    video_duration = get_video_duration(video_path)
+    generated_clips = []
+
+    for i, climax in enumerate(climax_moments):
+        clip_idx = clip_num_start + i
+        timestamp = climax['timestamp']
+        reason = climax['reason']
+        script = climax['script']
+
+        print(f"\n🎬 Gerando corte visual {clip_idx}: clímax em {timestamp:.1f}s ({reason})")
+        print(f"   Roteiro ({len(script.split())} palavras): {script[:120]}...")
+
+        # Define janela de corte centrada no timestamp (±20s = 40s total)
+        # Ajusta para ficar dentro dos limites do vídeo
+        window_half = 20  # segundos de cada lado
+        clip_start = max(0, timestamp - window_half)
+        clip_end = min(video_duration, timestamp + window_half)
+
+        # Se o vídeo for curto, usa duração alvo padrão
+        target_duration = clip_end - clip_start
+        if target_duration < TARGET_DURATION_MIN:
+            # Estende para duração mínima
+            needed = TARGET_DURATION_MIN - target_duration
+            clip_start = max(0, clip_start - needed / 2)
+            clip_end = min(video_duration, clip_end + needed / 2)
+            target_duration = clip_end - clip_start
+        elif target_duration > TARGET_DURATION_MAX:
+            # Reduz para duração máxima
+            excess = target_duration - TARGET_DURATION_MAX
+            clip_start += excess / 2
+            clip_end -= excess / 2
+            target_duration = clip_end - clip_start
+
+        # Gera áudio TTS
+        tts_audio_path = TEMP_DIR / f"visual_clip_{clip_idx}_tts.mp3"
+        success, tts_duration, word_events = asyncio.run(
+            generate_tts_audio(script, tts_audio_path)
+        )
+
+        if not success or not tts_audio_path.exists():
+            print(f"   ❌ Falha no TTS para corte {clip_idx}")
+            continue
+
+        print(f"   🔊 Áudio TTS: {tts_duration:.1f}s ({len(word_events)} eventos WordBoundary)")
+
+        # Cria legendas sincronizadas com WordBoundary
+        ass_path = TEMP_DIR / f"visual_clip_{clip_idx}_subs.ass"
+        if not create_ass_subtitle_from_tts_events(word_events, ass_path):
+            print(f"   ⚠️  Falha ao criar legendas, continuando sem...")
+            ass_path = None
+
+        # Nome do arquivo de saída
+        safe_reason = clean_filename(reason[:40])
+        output_name = f"corte_visual_{clip_idx}_{safe_reason}.mp4"
+        output_path = output_dir / output_name
+
+        # Corta e exporta vídeo vertical sincronizado com TTS
+        # Cria um clip object compatível com cut_and_export_vertical
+        clip_obj = {
+            'start': clip_start,
+            'end': clip_end,
+            'duration': clip_end - clip_start,
+            'text': script,
+            'score': 100  # Score máximo para clímax visual
+        }
+
+        # Usa duração real do TTS para sincronia exata
+        final_duration = tts_duration
+        speed_ratio = clip_obj['duration'] / final_duration if final_duration > 0 else 1.0
+
+        # Constrói comando FFmpeg direto para modo visual (similar a cut_and_export_vertical modo IA)
+        bg_filter = (
+            f"[0:v]split=2[v1][v2];"
+            f"[v1]scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:{VERTICAL_HEIGHT},"
+            f"gblur=sigma=30[bg];"
+            f"[v2]scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:force_original_aspect_ratio=decrease[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[video]"
+        )
+
+        if ass_path and ass_path.exists():
+            filter_complex = (
+                f"{bg_filter};"
+                f"[video]setpts={1/speed_ratio:.6f}*PTS[vspeed];"
+                f"[vspeed]subtitles='{ass_path.as_posix()}'[vout]"
+            )
+            map_v = "[vout]"
+        else:
+            filter_complex = (
+                f"{bg_filter};"
+                f"[video]setpts={1/speed_ratio:.6f}*PTS[vout]"
+            )
+            map_v = "[vout]"
+
+        ffmpeg_cmd = FFMPEG.as_posix()
+        cmd = [
+            ffmpeg_cmd, "-y",
+            "-ss", str(clip_start),
+            "-t", str(final_duration),  # Duração exata do áudio TTS
+            "-i", str(video_path),
+            "-i", str(tts_audio_path),
+            "-filter_complex", filter_complex,
+            "-map", map_v,
+            "-map", "1:a",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary",
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            "-shortest",
+            str(output_path)
+        ]
+
+        print(f"   ⚙️  Executando FFmpeg (velocidade: {speed_ratio:.2f}x)...")
+        ok, out, err = run_cmd(cmd)
+
+        if not ok:
+            print(f"   ❌ Erro no FFmpeg: {err[:300]}")
+            # Tenta fallback simplificado
+            ok = _try_simple_cut(video_path, clip_start, final_duration, tts_audio_path, ass_path, output_path, speed_ratio)
+            if not ok:
+                continue
+
+        print(f"   ✅ Corte visual salvo: {output_path}")
+        generated_clips.append(str(output_path))
+
+    return generated_clips
+
+
+def _try_simple_cut(video_path, start_time, duration, tts_audio_path, ass_path, output_path, speed_ratio):
+    """Tenta corte simplificado sem fundo desfocado."""
+    print(f"   🔄 Tentando versão simplificada...")
+
+    vf = f"scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:force_original_aspect_ratio=decrease,pad={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black"
+    if ass_path and ass_path.exists():
+        vf += f",subtitles='{ass_path.as_posix()}'"
+    vf = f"setpts={1/speed_ratio:.6f}*PTS," + vf
+
+    ffmpeg_cmd = FFMPEG.as_posix()
+    cmd = [
+        ffmpeg_cmd, "-y",
+        "-ss", str(start_time),
+        "-t", str(duration),
+        "-i", str(video_path),
+        "-i", str(tts_audio_path),
+        "-vf", vf,
+        "-map", "0:v",
+        "-map", "1:a",
+        "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "20",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        "-shortest",
+        str(output_path)
+    ]
+
+    ok, out, err = run_cmd(cmd)
+    if ok:
+        print(f"   ✅ Corte salvo (simplificado): {output_path}")
+    return ok
+
+
+def load_subtitles_with_fallback(subtitle_path, video_path, temp_dir, api_key=None):
+    """
+    Carrega legendas com cascata de fallback:
+    Passo A: Legendas do YouTube (.vtt/.json3/.srt)
+    Passo B: Transcrição de áudio via Groq Whisper API
+    Passo C: Modo Visual Gameplay (frames + IA) - retorna dados especiais para fluxo dedicado
+
+    Retorna tupla: (segments, source, extra_data)
+    - Para youtube/groq_audio: segments = lista de segmentos, extra_data = None
+    - Para visual_gameplay: segments = [], extra_data = {'frame_paths': [...], 'climax_moments': [...]}
+    """
+    print("\n📝 Carregando legendas (sistema de fallback em 3 passos)...")
+
+    # === PASSO A: Legendas do YouTube ===
+    print("   Passo A: Tentando legendas automáticas do YouTube...")
+    segments = load_subtitles(subtitle_path) if subtitle_path else []
+
+    if segments:
+        total_words = sum(len(s['text'].split()) for s in segments)
+        print(f"   ✅ Passo A OK: {len(segments)} segmentos, {total_words} palavras")
+        return segments, "youtube", None
+
+    # Tenta buscar outros arquivos de legenda na pasta temp
+    for ext in ['.vtt', '.srt', '.json3']:
+        sub_files = list(temp_dir.glob(f"*subs*{ext}"))
+        if sub_files:
+            segments = load_subtitles(sub_files[0])
+            if segments:
+                total_words = sum(len(s['text'].split()) for s in segments)
+                print(f"   ✅ Passo A OK (fallback local): {len(segments)} segmentos, {total_words} palavras")
+                return segments, "youtube", None
+
+    print("   ⚠️  Passo A falhou: Nenhuma legenda do YouTube encontrada")
+
+    # === PASSO B: Transcrição de Áudio via Groq ===
+    if api_key:
+        print("   Passo B: Tentando transcrição de áudio via Groq Whisper API...")
+
+        # Extrai áudio (com chunking se necessário)
+        audio_files = extract_audio_for_transcription(video_path, temp_dir)
+
+        all_segments = []
+        for audio_file in audio_files:
+            segments = transcribe_audio_groq(audio_file, api_key)
+            all_segments.extend(segments)
+
+        if all_segments:
+            total_words = sum(len(s['text'].split()) for s in all_segments)
+            print(f"   ✅ Passo B OK: {len(all_segments)} segmentos, {total_words} palavras")
+
+            # Se tem poucas palavras (< 30), pode ser gameplay sem fala
+            if total_words < MIN_WORDS_FOR_AUDIO_TRANSCRIPTION:
+                print(f"   ⚠️  Poucas palavras ({total_words} < {MIN_WORDS_FOR_AUDIO_TRANSCRIPTION}). Possível gameplay sem narração.")
+                # Não retorna ainda - tenta Passo C
+            else:
+                return all_segments, "groq_audio", None
+        else:
+            print("   ⚠️  Passo B falhou: Transcrição não retornou segmentos")
+    else:
+        print("   ⚠️  Passo B pulado: GROQ_API_KEY não configurada no .env")
+
+    # === PASSO C: Modo Visual Gameplay ===
+    print("   Passo C: Modo Visual Gameplay - extraindo frames para análise...")
+
+    frame_paths = extract_key_frames(video_path, temp_dir)
+    if not frame_paths:
+        print("   ❌ Falha ao extrair frames")
+        return [], "failed", None
+
+    # Analisa frames com IA para identificar clímax
+    climax_moments = analyze_frames_with_ai(frame_paths, api_key)
+
+    if not climax_moments:
+        print("   ⚠️  Nenhum clímax identificado, usando fallback distribuído")
+        climax_moments = _fallback_visual_analysis(frame_paths)
+
+    if not climax_moments:
+        print("   ❌ Falha total no Passo C")
+        return [], "failed", None
+
+    print(f"   ✅ Passo C OK: {len(climax_moments)} clímax identificados")
+    for cm in climax_moments:
+        mins = int(cm['timestamp'] // 60)
+        secs = int(cm['timestamp'] % 60)
+        print(f"      - {mins:02d}:{secs:02d} ({cm['reason']})")
+    print(f"      Modo: Visual Gameplay (fluxo dedicado: IA → TTS → FFmpeg)")
+
+    # Retorna dados especiais para o fluxo visual_gameplay
+    extra_data = {
+        'frame_paths': frame_paths,
+        'climax_moments': climax_moments
+    }
+    return [], "visual_gameplay", extra_data
 
 
 def run_cmd(cmd, cwd=None):
@@ -87,6 +774,13 @@ def clean_filename(name):
 
 def download_video(url, output_prefix):
     """Baixa vídeo (1080p max) e áudio usando yt-dlp."""
+    # Limpa URL mantendo apenas o ID do vídeo
+    clean_url = clean_youtube_url(url)
+    if clean_url != url:
+        print(f"\n🔗 URL original: {url}")
+        print(f"🔗 URL limpa: {clean_url}")
+    url = clean_url
+
     print(f"\n📥 Baixando vídeo: {url}")
     # Onde o yt-dlp encontra o ffmpeg (necessário para juntar vídeo + áudio)
     ffmpeg_loc = ["--ffmpeg-location", str(FFMPEG.parent)]
@@ -99,13 +793,32 @@ def download_video(url, output_prefix):
         "--no-playlist",
         "--merge-output-format", "mp4",
         "-f", "bv*[height<=1080]+ba/b[height<=1080]",
+        "--js-runtimes", "node",
+        "--rm-cache-dir",
+        "--extractor-args", "youtube:player_client=android,web",
         "-o", str(video_path),
         url
     ]
     ok, out, err = run_cmd(cmd)
     if not ok or not video_path.exists():
-        print(f"❌ Falha ao baixar vídeo: {err}")
-        return None, None
+        print(f"⚠️  Falha no download principal, tentando fallback com player_client=web...")
+        # Fallback: tentar apenas web client
+        cmd_fallback = [
+            sys.executable, "-m", "yt_dlp",
+            *ffmpeg_loc,
+            "--no-playlist",
+            "--merge-output-format", "mp4",
+            "-f", "bv*[height<=1080]+ba/b[height<=1080]",
+            "--js-runtimes", "node",
+            "--rm-cache-dir",
+            "--extractor-args", "youtube:player_client=web",
+            "-o", str(video_path),
+            url
+        ]
+        ok, out, err = run_cmd(cmd_fallback)
+        if not ok or not video_path.exists():
+            print(f"❌ Falha ao baixar vídeo: {err}")
+            return None, None
 
     # Baixar áudio separado (para transcrição via legendas do YouTube)
     audio_path = TEMP_DIR / f"{output_prefix}_audio.m4a"
@@ -114,6 +827,9 @@ def download_video(url, output_prefix):
         *ffmpeg_loc,
         "--no-playlist",
         "-f", "bestaudio[ext=m4a]/bestaudio",
+        "--js-runtimes", "node",
+        "--rm-cache-dir",
+        "--extractor-args", "youtube:player_client=android,web",
         "-o", str(audio_path),
         url
     ]
@@ -121,16 +837,19 @@ def download_video(url, output_prefix):
     if not ok:
         print(f"⚠️  Falha ao baixar áudio separado: {err}")
 
-    # Baixar legendas do YouTube (com timestamps)
+    # Baixar legendas do YouTube (com timestamps) - EXPANDIDO para incluir inglês
     sub_path = TEMP_DIR / f"{output_prefix}_subs.json3"
     cmd = [
         sys.executable, "-m", "yt_dlp",
         *ffmpeg_loc,
         "--no-playlist",
         "--write-auto-sub",
-        "--sub-lang", "pt,pt-BR,pt-PT",
+        "--sub-lang", "pt,pt-BR,pt-PT,en",  # Inclui inglês como fallback
         "--sub-format", "json3",
         "--skip-download",
+        "--js-runtimes", "node",
+        "--rm-cache-dir",
+        "--extractor-args", "youtube:player_client=android,web",
         "-o", str(TEMP_DIR / f"{output_prefix}_subs.%(ext)s"),
         url
     ]
@@ -146,7 +865,7 @@ def download_video(url, output_prefix):
     subtitle_path = sub_files[0] if sub_files else None
 
     print(f"✅ Vídeo: {video_path}")
-    print(f"✅ Legendas: {subtitle_path if subtitle_path else 'NÃO ENCONTRADAS'}")
+    print(f"✅ Legendas: {subtitle_path if subtitle_path else 'NÃO ENCONTRADAS (fallback será tentado)'}")
 
     return video_path, subtitle_path
 
@@ -475,13 +1194,19 @@ def generate_viral_script(original_text, target_duration):
     """
     Gera um roteiro viral resumido a partir do texto original.
     Cria gancho forte, desenvolvimento conciso e conclusão clara.
+    GARANTE pontuação natural rigorosa (vírgulas, pontos, exclamações)
+    para que o edge-tts gere respiração correta na narração.
     """
     # Limpar e preparar texto
     text = original_text.strip()
     words = text.split()
 
     if len(words) < 20:
-        return text  # Texto muito curto, usar original
+        # Texto muito curto: garantir pontuação final
+        result = text
+        if not re.search(r'[.!?…]$', result):
+            result += "."
+        return result
 
     # Estratégia: pegar início (gancho), meio (pontos-chave) e fim (conclusão)
     # Proporção: 20% gancho, 60% desenvolvimento, 20% conclusão
@@ -492,118 +1217,193 @@ def generate_viral_script(original_text, target_duration):
     middle_part = ' '.join(words[hook_end:conclusion_start])
     conclusion_part = ' '.join(words[conclusion_start:])
 
-    # Identificar palavras-chave de valor no meio
+    # Identificar frases completas com palavras-chave de valor no meio
     value_keywords = ['passo', 'passos', 'etapa', 'etapas', 'como', 'porque', 'porquê',
                       'resultado', 'resultados', 'antes', 'depois', 'transformou',
                       'mudei', 'aprendi', 'descobri', 'testei', 'funciona', 'prova',
                       'provas', 'números', 'dados', 'estudo', 'pesquisa', 'ciência',
                       'técnica', 'método', 'estratégia', 'segredo', 'truque', 'dica']
 
-    middle_words = middle_part.split()
+    # Dividir middle_part em frases preservando pontuação
+    sentences = re.split(r'(?<=[.!?…])\s+', middle_part)
     key_sentences = []
-    current_sentence = []
-
-    for word in middle_words:
-        current_sentence.append(word)
-        if word.endswith('.') or word.endswith('!') or word.endswith('?'):
-            sentence = ' '.join(current_sentence)
-            if any(kw in sentence.lower() for kw in value_keywords):
-                key_sentences.append(sentence)
-            current_sentence = []
-
-    if current_sentence:
-        sentence = ' '.join(current_sentence)
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        # Garantir que cada frase tenha pontuação final
+        if not re.search(r'[.!?…]$', sentence):
+            sentence += "."
         if any(kw in sentence.lower() for kw in value_keywords):
             key_sentences.append(sentence)
 
-    # Construir roteiro viral
-    # Gancho: primeiras palavras com tom de urgência/curiosidade
-    hook = hook_part
-    if not re.search(r'[?!]', hook):
+    # Construir roteiro viral com pontuação rigorosa
+    # Gancho: primeiras palavras com tom de urgência/curiosidade + pontuação
+    hook = hook_part.strip()
+    if not re.search(r'[.!?…]$', hook):
         hook = hook.rstrip('.') + "!"
 
-    # Desenvolvimento: frases-chave (máx 3-4)
-    development = ' '.join(key_sentences[:4]) if key_sentences else middle_part[:300]
+    # Desenvolvimento: frases-chave completas (máx 3-4), cada uma com pontuação
+    if key_sentences:
+        development = ' '.join(key_sentences[:4])
+    else:
+        # Fallback: pegar primeiras frases do middle_part garantindo pontuação
+        fallback_sentences = re.split(r'(?<=[.!?…])\s+', middle_part[:300])
+        fallback_sentences = [s.strip() for s in fallback_sentences if s.strip()]
+        if fallback_sentences:
+            development = ' '.join(fallback_sentences[:3])
+            if not re.search(r'[.!?…]$', development):
+                development += "."
+        else:
+            development = ""
 
-    # Conclusão: última parte com call-to-action
-    conclusion = conclusion_part
+    # Conclusão: última parte com call-to-action e pontuação
+    conclusion = conclusion_part.strip()
     if not re.search(r'\b(inscreva|like|comente|siga|compartilhe|baixe|link)\b', conclusion.lower()):
         conclusion = conclusion.rstrip('.') + " — Fica a dica!"
+    if not re.search(r'[.!?…]$', conclusion):
+        conclusion += "."
 
-    script = f"{hook} {development} {conclusion}".strip()
+    # Montar script completo
+    parts = [hook]
+    if development:
+        parts.append(development)
+    parts.append(conclusion)
+    script = ' '.join(parts)
 
     # Limitar tamanho aproximado para duração alvo
     # Estimativa: ~150 palavras por minuto em português = 2.5 palavras/seg
     max_words = int(target_duration * 2.5)
     script_words = script.split()
+
     if len(script_words) > max_words:
-        script = ' '.join(script_words[:max_words])
-        # Garantir que termina com pontuação
-        if not script.endswith(('.', '!', '?', '...')):
-            script += "."
+        # Cortar no limite de palavras mas PRESERVAR pontuação da última frase completa
+        truncated = ' '.join(script_words[:max_words])
+        # Encontrar última pontuação final válida
+        last_punct = max(
+            truncated.rfind('.'),
+            truncated.rfind('!'),
+            truncated.rfind('?'),
+            truncated.rfind('…')
+        )
+        if last_punct > max_words * 0.5:  # Se encontrou pontuação na segunda metade
+            script = truncated[:last_punct + 1]
+        else:
+            # Sem pontuação boa: adicionar ponto final
+            script = truncated.rstrip('.!?…') + "."
+
+    # Garantia final: script deve terminar com pontuação
+    if not re.search(r'[.!?…]$', script):
+        script += "."
 
     return script
 
 
 async def generate_tts_audio(text, output_path, voice=TTS_VOICE, rate=TTS_RATE, volume=TTS_VOLUME):
-    """Gera áudio com edge-tts."""
+    """
+    Gera áudio com edge-tts e retorna (sucesso, duração, eventos_word_boundary).
+    Os eventos WordBoundary contêm timestamps exatos de cada palavra para legendas perfeitas.
+
+    IMPORTANTE (edge-tts 7.x): .stream() só pode ser chamado UMA VEZ por instância.
+    Fazemos um único loop que escreve o áudio no arquivo E captura WordBoundary/SentenceBoundary.
+    """
     try:
         import edge_tts
     except ImportError:
         print("❌ edge-tts não instalado. Rode: pip install edge-tts")
-        return False
+        return False, 0, []
 
     try:
         communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume)
-        await communicate.save(str(output_path))
-        return output_path.exists()
+
+        # Um único loop: escreve áudio no arquivo E captura eventos de fronteira
+        # open() nativo não suporta async with; usa with sincronizado dentro do loop assíncrono
+        word_boundary_events = []
+        with open(output_path, "wb") as f:
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    f.write(chunk["data"])
+                elif chunk["type"] in ("WordBoundary", "SentenceBoundary"):
+                    word_boundary_events.append({
+                        "text": chunk["text"],
+                        "offset": chunk["offset"] / 10_000_000,  # ticks (100ns) → segundos
+                        "duration": chunk["duration"] / 10_000_000,
+                        "type": chunk["type"]
+                    })
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            return False, 0, []
+
+        # Obter duração real do áudio gerado
+        audio_duration = get_audio_duration(output_path)
+        return True, audio_duration, word_boundary_events
     except Exception as e:
         print(f"❌ Erro ao gerar TTS: {e}")
+        return False, 0, []
+
+
+def create_ass_subtitle_from_tts_events(word_events, output_path):
+    """
+    Cria arquivo ASS usando eventos WordBoundary REAIS do edge-tts.
+    - Um estilo único (Alignment=2, MarginV=320) para nunca subir ao meio da tela
+    - Zero sobreposição: cada evento termina exatamente onde o próximo começa
+    - Agrupa palavras em blocos de 3-5 palavras mantendo pontuação natural
+    """
+    if not word_events:
         return False
 
-
-def create_ass_subtitle_from_script(script_text, audio_duration, output_path):
-    """
-    Cria arquivo ASS sincronizado com o áudio da narração.
-    Divide o texto em blocos de 3-5 palavras distribuídos ao longo da duração do áudio.
-    """
-    words = script_text.strip().split()
-    if not words:
-        return False
-
-    # Configuração: 3-5 palavras por bloco
+    # Agrupar eventos em blocos de 3-5 palavras (estilo TikTok/Shorts)
     WORDS_PER_CHUNK = 4
     chunks = []
+    current_chunk_words = []
+    current_chunk_start = None
 
-    for i in range(0, len(words), WORDS_PER_CHUNK):
-        chunk_words = words[i:i + WORDS_PER_CHUNK]
-        chunks.append(' '.join(chunk_words))
+    for event in word_events:
+        word_text = event["text"].strip()
+        if not word_text:
+            continue
+
+        if current_chunk_start is None:
+            current_chunk_start = event["offset"]
+
+        current_chunk_words.append(word_text)
+
+        # Verificar se deve fechar o chunk: atingiu limite OU palavra tem pontuação final
+        is_end_of_sentence = word_text.endswith(('.', '!', '?', '...'))
+        if len(current_chunk_words) >= WORDS_PER_CHUNK or is_end_of_sentence:
+            chunk_text = ' '.join(current_chunk_words)
+            chunk_end = event["offset"] + event["duration"]
+            chunks.append({
+                'start': current_chunk_start,
+                'end': chunk_end,
+                'text': chunk_text
+            })
+            current_chunk_words = []
+            current_chunk_start = None
+
+    # Último chunk se houver palavras restantes
+    if current_chunk_words:
+        last_event = word_events[-1]
+        chunk_end = last_event["offset"] + last_event["duration"]
+        chunks.append({
+            'start': current_chunk_start,
+            'end': chunk_end,
+            'text': ' '.join(current_chunk_words)
+        })
 
     if not chunks:
         return False
 
-    # Distribuir tempo proporcionalmente (cada chunk tem duração similar)
-    chunk_duration = audio_duration / len(chunks)
+    # Garantir zero sobreposição: end do atual = start do próximo
+    for i in range(len(chunks) - 1):
+        if chunks[i]['end'] > chunks[i + 1]['start']:
+            chunks[i]['end'] = chunks[i + 1]['start']
 
-    word_chunks = []
-    for i, chunk_text in enumerate(chunks):
-        start = i * chunk_duration
-        end = min((i + 1) * chunk_duration, audio_duration)
-        word_chunks.append({
-            'start': start,
-            'end': end,
-            'text': chunk_text
-        })
+    # Remover chunks muito curtos (< 0.3s)
+    chunks = [c for c in chunks if c['end'] - c['start'] >= 0.3]
 
-    # Garantir sem sobreposição
-    for i in range(len(word_chunks) - 1):
-        if word_chunks[i]['end'] > word_chunks[i + 1]['start']:
-            word_chunks[i]['end'] = word_chunks[i + 1]['start']
-
-    # Remover chunks muito curtos
-    word_chunks = [c for c in word_chunks if c['end'] - c['start'] >= 0.4]
-
-    # Estilo ASS - Positionado mais para baixo (Alignment=2 = bottom-center, MarginV=320)
+    # Estilo ASS - UM ÚNICO ESTILO: Alignment=2 (bottom-center), MarginV=320
+    # Sem alternância de estilos - texto sempre na mesma posição, nunca sobe
     ass_header = f"""[Script Info]
 Title: Cortes Virais - Narrado por IA
 ScriptType: v4.00+
@@ -615,7 +1415,6 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,Arial,62,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,40,40,320,1
-Style: Highlight,Arial,{FONT_SIZE},&H00FFFF00,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,5,50,50,320,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -630,14 +1429,107 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return f"{hours}:{minutes:02d}:{int(secs):02d}.{centiseconds:02d}"
 
     events = []
-    for i, chunk in enumerate(word_chunks):
+    for chunk in chunks:
         start_str = format_ass_time(chunk['start'])
         end_str = format_ass_time(chunk['end'])
         text = chunk['text'].strip()
+        # UM ÚNICO ESTILO - sem alternância, sem karaoke
+        events.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{text}")
 
-        # Alternar estilo para efeito de "karaoke"
-        style = "Highlight" if i % 2 == 0 else "Default"
-        events.append(f"Dialogue: 0,{start_str},{end_str},{style},,0,0,0,,{text}")
+    ass_content = ass_header + "\n".join(events)
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(ass_content)
+
+    return True
+
+
+def create_ass_subtitle(segments, clip_start, clip_end, output_path):
+    """
+    Cria arquivo ASS para modo original (legendas do YouTube).
+    Mesmo padrão: Alignment=2, MarginV=320, zero sobreposição.
+    """
+    # Filtrar segmentos que caem dentro do clip
+    clip_segments = []
+    for seg in segments:
+        if seg['end'] <= clip_start:
+            continue
+        if seg['start'] >= clip_end:
+            break
+        # Ajustar tempos relativos ao início do clip
+        adj_start = max(0, seg['start'] - clip_start)
+        adj_end = min(clip_end - clip_start, seg['end'] - clip_start)
+        if adj_end > adj_start and seg['text'].strip():
+            clip_segments.append({
+                'start': adj_start,
+                'end': adj_end,
+                'text': seg['text'].strip()
+            })
+
+    if not clip_segments:
+        return False
+
+    # Agrupar em blocos de 3-5 palavras
+    WORDS_PER_CHUNK = 4
+    chunks = []
+
+    for seg in clip_segments:
+        words = seg['text'].split()
+        if not words:
+            continue
+        seg_duration = seg['end'] - seg['start']
+        word_duration = seg_duration / len(words) if words else 0
+
+        for i in range(0, len(words), WORDS_PER_CHUNK):
+            chunk_words = words[i:i + WORDS_PER_CHUNK]
+            chunk_start = seg['start'] + i * word_duration
+            chunk_end = min(seg['start'] + (i + len(chunk_words)) * word_duration, seg['end'])
+            chunks.append({
+                'start': chunk_start,
+                'end': chunk_end,
+                'text': ' '.join(chunk_words)
+            })
+
+    if not chunks:
+        return False
+
+    # Zero sobreposição
+    for i in range(len(chunks) - 1):
+        if chunks[i]['end'] > chunks[i + 1]['start']:
+            chunks[i]['end'] = chunks[i + 1]['start']
+
+    chunks = [c for c in chunks if c['end'] - c['start'] >= 0.3]
+
+    # Mesmo estilo único: Alignment=2, MarginV=320
+    ass_header = f"""[Script Info]
+Title: Cortes Virais - Áudio Original
+ScriptType: v4.00+
+PlayResX: {VERTICAL_WIDTH}
+PlayResY: {VERTICAL_HEIGHT}
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,62,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,40,40,320,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    def format_ass_time(seconds):
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = seconds % 60
+        centiseconds = int((secs - int(secs)) * 100)
+        return f"{hours}:{minutes:02d}:{int(secs):02d}.{centiseconds:02d}"
+
+    events = []
+    for chunk in chunks:
+        start_str = format_ass_time(chunk['start'])
+        end_str = format_ass_time(chunk['end'])
+        text = chunk['text'].strip()
+        events.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{text}")
 
     ass_content = ass_header + "\n".join(events)
 
@@ -657,7 +1549,7 @@ def get_audio_duration(audio_path):
     return 0
 
 
-def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, audio_mode="original", script_text=None):
+def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, audio_mode="original"):
     """Corta vídeo, converte para vertical 9:16, adiciona legendas e normaliza áudio."""
     print(f"\n🎬 Processando corte {clip_num}: {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s) [Modo: {audio_mode}]")
 
@@ -665,6 +1557,7 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
     tts_audio_path = None
     final_duration = clip['duration']
     video_trim_start = clip['start']
+    tts_word_events = []
 
     if audio_mode == "ia":
         # Modo IA: gerar narração e sincronizar
@@ -674,24 +1567,23 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
         viral_script = generate_viral_script(clip['text'], clip['duration'])
         print(f"📝 Roteiro gerado ({len(viral_script.split())} palavras): {viral_script[:150]}...")
 
-        # Gerar áudio TTS
+        # Gerar áudio TTS com eventos WordBoundary para sincronia exata
         tts_audio_path = TEMP_DIR / f"clip_{clip_num}_tts.mp3"
-        success = asyncio.run(generate_tts_audio(viral_script, tts_audio_path))
+        success, tts_duration, word_events = asyncio.run(generate_tts_audio(viral_script, tts_audio_path))
 
         if not success or not tts_audio_path.exists():
             print("⚠️  Falha no TTS, usando áudio original...")
             audio_mode = "original"
         else:
-            # Obter duração real do áudio gerado
-            tts_duration = get_audio_duration(tts_audio_path)
-            print(f"🔊 Áudio TTS gerado: {tts_duration:.1f}s")
+            print(f"🔊 Áudio TTS gerado: {tts_duration:.1f}s ({len(word_events)} eventos WordBoundary)")
             final_duration = tts_duration
-            video_trim_start = clip['start']  # Começar do início do clip original
+            video_trim_start = clip['start']
+            tts_word_events = word_events
 
-            # Criar legendas sincronizadas com a narração
+            # Criar legendas sincronizadas com eventos REAIS do edge-tts
             ass_path = TEMP_DIR / f"clip_{clip_num}_subs.ass"
-            if not create_ass_subtitle_from_script(viral_script, tts_duration, ass_path):
-                print("⚠️  Falha ao criar legendas sincronizadas")
+            if not create_ass_subtitle_from_tts_events(tts_word_events, ass_path):
+                print("⚠️  Falha ao criar legendas sincronizadas com WordBoundary")
                 ass_path = None
 
     if audio_mode == "original":
@@ -714,7 +1606,7 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
 
     if audio_mode == "ia" and tts_audio_path and tts_audio_path.exists():
         # Usar áudio TTS externo, remover áudio original do vídeo (-an na entrada de vídeo)
-        # O vídeo será esticado/acelerado para durar o mesmo que o áudio TTS
+        # O vídeo será esticado/acelerado para durar EXATAMENTE o mesmo que o áudio TTS
         speed_ratio = clip['duration'] / final_duration if final_duration > 0 else 1.0
 
         if ass_path and ass_path.exists():
@@ -732,10 +1624,12 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
             map_v = "[vout]"
 
         ffmpeg_cmd = FFMPEG.as_posix()
+        # IMPORTANTE: -t usa a duração REAL do áudio TTS (final_duration), não a do clip original
+        # Isso garante que o vídeo cortado tenha exatamente a duração do áudio narrado
         cmd = [
             ffmpeg_cmd, "-y",
             "-ss", str(video_trim_start),
-            "-t", str(clip['duration']),
+            "-t", str(final_duration),  # Duração exata do áudio TTS
             "-i", str(video_path),
             "-i", str(tts_audio_path),
             "-filter_complex", filter_complex,
@@ -789,13 +1683,13 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
 
     if not ok:
         print(f"❌ Erro no ffmpeg: {err[:500]}")
-        return cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num, audio_mode, tts_audio_path)
+        return cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num, audio_mode, tts_audio_path, final_duration)
 
     print(f"✅ Corte salvo: {output_path}")
     return True
 
 
-def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num, audio_mode="original", tts_audio_path=None):
+def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num, audio_mode="original", tts_audio_path=None, tts_duration=None):
     """Versão simplificada sem fundo desfocado (fallback)."""
     print(f"🔄 Tentando versão simplificada...")
 
@@ -806,12 +1700,16 @@ def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_
     ffmpeg_cmd = FFMPEG.as_posix()
 
     if audio_mode == "ia" and tts_audio_path and tts_audio_path.exists():
-        speed_ratio = clip['duration'] / get_audio_duration(tts_audio_path) if get_audio_duration(tts_audio_path) > 0 else 1.0
+        # Usar duração REAL do TTS para -t (sincronia exata)
+        actual_tts_duration = tts_duration if tts_duration else get_audio_duration(tts_audio_path)
+        if actual_tts_duration <= 0:
+            actual_tts_duration = clip['duration']
+        speed_ratio = clip['duration'] / actual_tts_duration if actual_tts_duration > 0 else 1.0
         vf = f"setpts={1/speed_ratio:.6f}*PTS," + vf
         cmd = [
             ffmpeg_cmd, "-y",
             "-ss", str(clip['start']),
-            "-t", str(clip['duration']),
+            "-t", str(actual_tts_duration),  # Duração exata do áudio TTS
             "-i", str(video_path),
             "-i", str(tts_audio_path),
             "-vf", vf,
@@ -902,6 +1800,25 @@ def main():
             print("❌ edge-tts não encontrado. Rode: pip install edge-tts")
             sys.exit(1)
 
+    # Carregar API key do Groq do .env
+    groq_api_key = None
+    env_path = Path(".env")
+    if env_path.exists():
+        try:
+            with open(env_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('GROQ_API_KEY='):
+                        groq_api_key = line.split('=', 1)[1].strip().strip('"\'')
+                        break
+        except Exception:
+            pass
+
+    if groq_api_key:
+        print("🔑 GROQ_API_KEY carregada do .env")
+    else:
+        print("⚠️  GROQ_API_KEY não encontrada no .env (Passo B será pulado)")
+
     ensure_dirs()
 
     # Prefixo para arquivos temporários
@@ -920,25 +1837,63 @@ def main():
         sys.exit(1)
     print(f"📹 Duração do vídeo: {video_duration:.1f}s ({video_duration/60:.1f} min)")
 
-    # 3. Carregar legendas
-    segments = load_subtitles(subtitle_path) if subtitle_path else []
-    if not segments:
-        print("⚠️  Nenhuma legenda encontrada. Tentando extrair do vídeo...")
-        # Fallback: yt-dlp pode ter baixado legenda embutida
-        for ext in ['.vtt', '.srt', '.json3']:
-            sub_files = list(TEMP_DIR.glob(f"{prefix}_subs*{ext}"))
-            if sub_files:
-                segments = load_subtitles(sub_files[0])
-                if segments:
-                    subtitle_path = sub_files[0]
-                    break
+    # 3. Carregar legendas com sistema de fallback em 3 passos
+    segments, subtitle_source, extra_data = load_subtitles_with_fallback(subtitle_path, video_path, TEMP_DIR, groq_api_key)
 
+    # === FLUXO ESPECIAL: VISUAL GAMEPLAY ===
+    if subtitle_source == "visual_gameplay":
+        print("\n" + "=" * 60)
+        print("🎮 MODO VISUAL GAMEPLAY ATIVADO")
+        print("   Fluxo: Frames → IA seleciona clímax → TTS → FFmpeg")
+        print("=" * 60)
+
+        # Força modo IA para gameplay visual
+        audio_mode = "ia"
+
+        # Gera cortes diretamente dos clímax identificados
+        climax_moments = extra_data.get('climax_moments', [])
+        generated_paths = generate_climax_clips_from_visual(
+            video_path,
+            extra_data.get('frame_paths', []),
+            climax_moments,
+            OUTPUT_DIR,
+            clip_num_start=1
+        )
+
+        # Limpeza
+        print("\n🧹 Limpando arquivos temporários...")
+        import shutil
+        if TEMP_DIR.exists():
+            shutil.rmtree(TEMP_DIR)
+
+        # Resumo final
+        print("\n" + "=" * 60)
+        print(f"✅ CONCLUÍDO (Visual Gameplay): {len(generated_paths)} cortes gerados")
+        for p in generated_paths:
+            print(f"   📹 {p}")
+        print(f"📁 Pasta de saída: {OUTPUT_DIR.absolute()}")
+        print("=" * 60)
+
+        if generated_paths:
+            print("\n📋 Próximos passos:")
+            print("  1. Revise os cortes na pasta 'cortes_prontos/'")
+            print("  2. Adicione hashtags e descrição para TikTok/Shorts")
+            print("  3. Publique nos melhores horários (18-21h costuma funcionar bem)")
+        return
+
+    # === FLUXO NORMAL: TRANSCRIÇÃO/LEGENDAS ===
     if not segments:
-        print("❌ Não foi possível obter transcrição/legendas do vídeo.")
-        print("   Dica: use vídeos com legendas automáticas do YouTube ativadas.")
+        print("❌ Não foi possível obter transcrição/legendas do vídeo após todos os fallbacks.")
+        print("   Dica: use vídeos com legendas automáticas do YouTube ativadas ou configure GROQ_API_KEY no .env")
         sys.exit(1)
 
-    print(f"📝 Legendas carregadas: {len(segments)} segmentos")
+    print(f"📝 Legendas carregadas: {len(segments)} segmentos (fonte: {subtitle_source})")
+
+    # Se modo IA e fonte for groq_audio com poucas palavras, avisa
+    if subtitle_source == "groq_audio" and audio_mode == "original":
+        total_words = sum(len(s['text'].split()) for s in segments)
+        if total_words < MIN_WORDS_FOR_AUDIO_TRANSCRIPTION * 2:
+            print(f"⚠️  Poucas palavras detectadas ({total_words}). Considere usar --audio ia")
 
     # 4. Encontrar melhores clips
     print(f"\n🧠 Analisando conteúdo para encontrar {NUM_CLIPS} melhores trechos ({TARGET_DURATION_MIN}-{TARGET_DURATION_MAX}s)...")
