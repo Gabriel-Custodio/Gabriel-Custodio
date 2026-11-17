@@ -20,6 +20,9 @@
       2. **Voz sem respiro**: `generate_viral_script()` garante pontuação natural rigorosa (vírgulas, pontos, exclamações a cada frase curta) e NÃO remove pontuação antes de enviar ao `edge-tts`.
       3. **Sincronia exata áudio/vídeo**: o `-t` da ENTRADA do vídeo é a duração do trecho original (`clip['duration']`), e o `setpts` (`final_duration / clip['duration']`, ou seja `1/speed_ratio`) é quem ajusta o trecho para durar a duração REAL do MP3 (`final_duration`). NUNCA usar `final_duration` no `-t` de entrada: a escala seria aplicada duas vezes e o `-shortest` cortaria a narração.
 
+      4. **Narração curta = corte curto**: no modo IA a duração do arquivo final é a do MP3. Um roteiro de ~12 palavras gerou um corte de 5 s (o trecho de 30-55 s foi espremido). Por isso: `generate_viral_script_ai` exige no mínimo `MIN_SCRIPT_FILL` (60%) do máximo de palavras e tenta 2 vezes; depois do TTS, `narration_too_short()` recusa narração menor que `max(MIN_NARRATION_SECONDS, duração_do_trecho / MAX_VIDEO_SPEEDUP)`. No modo normal o corte volta ao áudio original; no Passo C o corte é descartado. NUNCA aceitar a duração do TTS sem essa checagem.
+      5. **Fade no final**: todos os comandos ffmpeg de saída aplicam `fade_out_filters(duração_do_arquivo_final)` (vídeo `fade` + áudio `afade`, `FADE_OUT_SECONDS`=0,5). A duração passada é a do ARQUIVO FINAL (áudio TTS no modo IA, `clip['duration']` no modo original). Ao criar um novo comando ffmpeg de saída, inclua o fade.
+
 ## Sistema de Fallback de Legendas (3 Passos) — NOVO 2025
 Para resolver "Legendas: NÃO ENCONTRADAS" em vídeos longos de gameplay:
 

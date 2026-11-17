@@ -69,6 +69,12 @@ DEFAULT_GROQ_TEXT_MODEL = "openai/gpt-oss-120b"
 MAX_IMAGES_PER_REQUEST = 3  # limite de imagens por chamada do modelo de visão
 MIN_CLIMAX_SCORE = 5  # nota mínima (0-10) para um frame virar corte
 SCRIPT_WORDS_PER_SECOND = 2.5  # ~150 palavras por minuto em português
+# Narração curta demais vira corte de poucos segundos (o vídeo é esticado/acelerado para durar
+# o mesmo que o áudio). Abaixo disso o corte é recusado.
+MIN_NARRATION_SECONDS = 15
+MAX_VIDEO_SPEEDUP = 2.0  # o trecho original nunca é acelerado mais que isso para caber na narração
+MIN_SCRIPT_FILL = 0.6  # a IA deve escrever pelo menos 60% do máximo de palavras do trecho
+FADE_OUT_SECONDS = 0.5  # fade de áudio e vídeo no final, para o corte não terminar seco
 ENV_PATH = Path(__file__).parent / ".env"
 
 # ====================================
@@ -369,18 +375,42 @@ def extract_json(text):
     return None
 
 
-def clean_script(text, max_words):
+def narration_too_short(tts_duration, clip_duration):
+    """True se a narração é curta demais para o trecho (o corte sairia com poucos segundos).
+
+    Duração 0 ou negativa significa "não consegui medir": não bloqueia.
+    """
+    if not tts_duration or tts_duration <= 0:
+        return False
+    minimum = max(MIN_NARRATION_SECONDS, clip_duration / MAX_VIDEO_SPEEDUP)
+    return tts_duration < minimum
+
+
+def fade_out_filters(total_duration):
+    """Devolve (filtro_de_video, filtro_de_audio) de fade-out nos últimos FADE_OUT_SECONDS.
+
+    Vazios se o corte for curto demais para ter fade. A duração é a do ARQUIVO FINAL
+    (a do áudio TTS no modo IA, a do trecho no modo original).
+    """
+    if not total_duration or total_duration < 2 * FADE_OUT_SECONDS + 1:
+        return "", ""
+    start = total_duration - FADE_OUT_SECONDS
+    return (f"fade=t=out:st={start:.2f}:d={FADE_OUT_SECONDS}",
+            f"afade=t=out:st={start:.2f}:d={FADE_OUT_SECONDS}")
+
+
+def clean_script(text, max_words, min_words=15):
     """Limpa o roteiro devolvido pela IA e garante tamanho e pontuação final.
 
     Remove markdown/aspas, junta linhas e, se passar de max_words, corta na última
-    frase completa. Retorna None se sobrar texto de menos para uma narração.
+    frase completa. Retorna None se sobrar menos de min_words (narração curta demais).
     """
     if not text:
         return None
     text = re.sub(r'[*_#`>]+', '', text)
     text = re.sub(r'\s+', ' ', text).strip().strip('"“”\'')
     words = text.split()
-    if len(words) < 15:
+    if len(words) < min_words:
         return None
     if len(words) > max_words:
         truncated = ' '.join(words[:max_words])
@@ -399,6 +429,7 @@ def generate_viral_script_ai(original_text, target_duration, api_key):
     Retorna None se a IA falhar (quem chama usa generate_viral_script, por regras).
     """
     max_words = int(target_duration * SCRIPT_WORDS_PER_SECOND)
+    min_words = max(15, int(max_words * MIN_SCRIPT_FILL))
     prompt = (
         f"O texto abaixo é a transcrição automática (sem pontuação, pode ter erros de reconhecimento) "
         f"de um trecho de cerca de {target_duration:.0f} segundos de um vídeo.\n\n"
@@ -409,12 +440,18 @@ def generate_viral_script_ai(original_text, target_duration, api_key):
         f"1. Seja fiel ao conteúdo: não invente fatos, nomes, números ou resultados que não estejam no texto.\n"
         f"2. Estrutura: gancho forte na primeira frase, desenvolvimento curto e fechamento com uma chamada para ação breve.\n"
         f"3. Frases curtas, com pontuação (vírgulas, pontos, exclamações) para a voz respirar.\n"
-        f"4. No máximo {max_words} palavras.\n"
+        f"4. Entre {min_words} e {max_words} palavras (a narração precisa durar quase o trecho todo).\n"
         f"5. Sem emojis, markdown, aspas ou títulos.\n"
         f"Responda APENAS com o texto da narração."
     )
-    answer = groq_chat([{"role": "user", "content": prompt}], api_key, get_text_model())
-    return clean_script(answer, max_words)
+    # Uma segunda tentativa: modelos às vezes devolvem só uma frase.
+    for _ in range(2):
+        answer = groq_chat([{"role": "user", "content": prompt}], api_key, get_text_model())
+        script = clean_script(answer, max_words, min_words=min_words)
+        if script:
+            return script
+        print(f"   ⚠️  Roteiro da IA curto demais (mínimo {min_words} palavras); tentando de novo...")
+    return None
 
 
 def _describe_frame_batch(batch, api_key, model):
@@ -507,7 +544,7 @@ def _write_script_for_moment(moment, described, api_key):
         f"Responda APENAS com o texto da narração."
     )
     answer = groq_chat([{"role": "user", "content": prompt}], api_key, get_text_model())
-    return clean_script(answer, max_words)
+    return clean_script(answer, max_words, min_words=int(TARGET_DURATION_MIN * SCRIPT_WORDS_PER_SECOND * 0.6))
 
 
 def analyze_frames_with_ai(frame_paths, api_key):
@@ -620,6 +657,11 @@ def generate_climax_clips_from_visual(video_path, frame_paths, climax_moments, o
 
         print(f"   🔊 Áudio TTS: {tts_duration:.1f}s ({len(word_events)} eventos WordBoundary)")
 
+        if narration_too_short(tts_duration, target_duration):
+            print(f"   ❌ Narração curta demais ({tts_duration:.1f}s para um trecho de {target_duration:.0f}s); "
+                  f"corte {clip_idx} descartado em vez de gerar um vídeo de poucos segundos.")
+            continue
+
         # Cria legendas sincronizadas com WordBoundary
         ass_path = TEMP_DIR / f"visual_clip_{clip_idx}_subs.ass"
         if not create_ass_subtitle_from_tts_events(word_events, ass_path):
@@ -644,6 +686,9 @@ def generate_climax_clips_from_visual(video_path, frame_paths, climax_moments, o
         # Usa duração real do TTS para sincronia exata
         final_duration = tts_duration
         speed_ratio = clip_obj['duration'] / final_duration if final_duration > 0 else 1.0
+        v_fade, a_fade = fade_out_filters(final_duration)
+        v_fade = f",{v_fade}" if v_fade else ""
+        af_chain = "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary" + (f",{a_fade}" if a_fade else "")
 
         # Constrói comando FFmpeg direto para modo visual (similar a cut_and_export_vertical modo IA)
         bg_filter = (
@@ -659,13 +704,13 @@ def generate_climax_clips_from_visual(video_path, frame_paths, climax_moments, o
             filter_complex = (
                 f"{bg_filter};"
                 f"[video]setpts={1/speed_ratio:.6f}*PTS[vspeed];"
-                f"[vspeed]subtitles='{ass_path.as_posix()}'[vout]"
+                f"[vspeed]subtitles='{ass_path.as_posix()}'{v_fade}[vout]"
             )
             map_v = "[vout]"
         else:
             filter_complex = (
                 f"{bg_filter};"
-                f"[video]setpts={1/speed_ratio:.6f}*PTS[vout]"
+                f"[video]setpts={1/speed_ratio:.6f}*PTS{v_fade}[vout]"
             )
             map_v = "[vout]"
 
@@ -679,7 +724,7 @@ def generate_climax_clips_from_visual(video_path, frame_paths, climax_moments, o
             "-filter_complex", filter_complex,
             "-map", map_v,
             "-map", "1:a",
-            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary",
+            "-af", af_chain,
             "-c:v", "libx264",
             "-preset", "medium",
             "-crf", "20",
@@ -696,7 +741,7 @@ def generate_climax_clips_from_visual(video_path, frame_paths, climax_moments, o
         if not ok:
             print(f"   ❌ Erro no FFmpeg: {err[:300]}")
             # Tenta fallback simplificado
-            ok = _try_simple_cut(video_path, clip_start, clip_obj['duration'], tts_audio_path, ass_path, output_path, speed_ratio)
+            ok = _try_simple_cut(video_path, clip_start, clip_obj['duration'], tts_audio_path, ass_path, output_path, speed_ratio, final_duration)
             if not ok:
                 continue
 
@@ -706,7 +751,7 @@ def generate_climax_clips_from_visual(video_path, frame_paths, climax_moments, o
     return generated_clips
 
 
-def _try_simple_cut(video_path, start_time, duration, tts_audio_path, ass_path, output_path, speed_ratio):
+def _try_simple_cut(video_path, start_time, duration, tts_audio_path, ass_path, output_path, speed_ratio, final_duration=None):
     """Tenta corte simplificado sem fundo desfocado."""
     print(f"   🔄 Tentando versão simplificada...")
 
@@ -714,6 +759,10 @@ def _try_simple_cut(video_path, start_time, duration, tts_audio_path, ass_path, 
     if ass_path and ass_path.exists():
         vf += f",subtitles='{ass_path.as_posix()}'"
     vf = f"setpts={1/speed_ratio:.6f}*PTS," + vf
+    v_fade, a_fade = fade_out_filters(final_duration if final_duration else duration / speed_ratio)
+    if v_fade:
+        vf += f",{v_fade}"
+    af_chain = "loudnorm=I=-16:TP=-1.5:LRA=11" + (f",{a_fade}" if a_fade else "")
 
     ffmpeg_cmd = FFMPEG.as_posix()
     cmd = [
@@ -725,7 +774,7 @@ def _try_simple_cut(video_path, start_time, duration, tts_audio_path, ass_path, 
         "-vf", vf,
         "-map", "0:v",
         "-map", "1:a",
-        "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+        "-af", af_chain,
         "-c:v", "libx264",
         "-preset", "medium",
         "-crf", "20",
@@ -1738,6 +1787,13 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
         if not success or not tts_audio_path.exists():
             print("⚠️  Falha no TTS, usando áudio original...")
             audio_mode = "original"
+        elif narration_too_short(tts_duration, clip['duration']):
+            # Sem esta trava o trecho de 30-55s seria espremido em poucos segundos.
+            print(f"🔊 Áudio TTS gerado: {tts_duration:.1f}s")
+            print(f"⚠️  Narração curta demais para um trecho de {clip['duration']:.0f}s "
+                  f"(mínimo {max(MIN_NARRATION_SECONDS, clip['duration'] / MAX_VIDEO_SPEEDUP):.0f}s); "
+                  f"usando o áudio original deste corte.")
+            audio_mode = "original"
         else:
             print(f"🔊 Áudio TTS gerado: {tts_duration:.1f}s ({len(word_events)} eventos WordBoundary)")
             final_duration = tts_duration
@@ -1772,18 +1828,21 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
         # Usar áudio TTS externo, remover áudio original do vídeo (-an na entrada de vídeo)
         # O vídeo será esticado/acelerado para durar EXATAMENTE o mesmo que o áudio TTS
         speed_ratio = clip['duration'] / final_duration if final_duration > 0 else 1.0
+        v_fade, a_fade = fade_out_filters(final_duration)
+        v_fade = f",{v_fade}" if v_fade else ""
+        af_chain = "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary" + (f",{a_fade}" if a_fade else "")
 
         if ass_path and ass_path.exists():
             filter_complex = (
                 f"{bg_filter};"
                 f"[video]setpts={1/speed_ratio:.6f}*PTS[vspeed];"
-                f"[vspeed]subtitles='{ass_path.as_posix()}'[vout]"
+                f"[vspeed]subtitles='{ass_path.as_posix()}'{v_fade}[vout]"
             )
             map_v = "[vout]"
         else:
             filter_complex = (
                 f"{bg_filter};"
-                f"[video]setpts={1/speed_ratio:.6f}*PTS[vout]"
+                f"[video]setpts={1/speed_ratio:.6f}*PTS{v_fade}[vout]"
             )
             map_v = "[vout]"
 
@@ -1801,7 +1860,7 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
             "-filter_complex", filter_complex,
             "-map", map_v,
             "-map", "1:a",
-            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary",
+            "-af", af_chain,
             "-c:v", "libx264",
             "-preset", "medium",
             "-crf", "20",
@@ -1813,17 +1872,22 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
         ]
     else:
         # Modo original: usar áudio do vídeo
+        v_fade, a_fade = fade_out_filters(clip['duration'])
+        v_fade = f",{v_fade}" if v_fade else ""
         if ass_path and ass_path.exists():
             filter_complex = (
                 f"{bg_filter};"
-                f"[video]subtitles='{ass_path.as_posix()}'[vout]"
+                f"[video]subtitles='{ass_path.as_posix()}'{v_fade}[vout]"
             )
+            map_v = "[vout]"
+        elif v_fade:
+            filter_complex = f"{bg_filter};[video]null{v_fade}[vout]"
             map_v = "[vout]"
         else:
             filter_complex = f"{bg_filter}"
             map_v = "[video]"
 
-        af_filter = "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary"
+        af_filter = "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary" + (f",{a_fade}" if a_fade else "")
 
         ffmpeg_cmd = FFMPEG.as_posix()
         cmd = [
@@ -1872,6 +1936,10 @@ def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_
             actual_tts_duration = clip['duration']
         speed_ratio = clip['duration'] / actual_tts_duration if actual_tts_duration > 0 else 1.0
         vf = f"setpts={1/speed_ratio:.6f}*PTS," + vf
+        v_fade, a_fade = fade_out_filters(actual_tts_duration)
+        if v_fade:
+            vf += f",{v_fade}"
+        af_chain = "loudnorm=I=-16:TP=-1.5:LRA=11" + (f",{a_fade}" if a_fade else "")
         cmd = [
             ffmpeg_cmd, "-y",
             "-ss", str(clip['start']),
@@ -1881,7 +1949,7 @@ def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_
             "-vf", vf,
             "-map", "0:v",
             "-map", "1:a",
-            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-af", af_chain,
             "-c:v", "libx264",
             "-preset", "medium",
             "-crf", "20",
@@ -1892,13 +1960,16 @@ def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_
             str(output_path)
         ]
     else:
+        v_fade, a_fade = fade_out_filters(clip['duration'])
+        if v_fade:
+            vf += f",{v_fade}"
         cmd = [
             ffmpeg_cmd, "-y",
             "-ss", str(clip['start']),
             "-t", str(clip['duration']),
             "-i", str(video_path),
             "-vf", vf,
-            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11" + (f",{a_fade}" if a_fade else ""),
             "-c:v", "libx264",
             "-preset", "medium",
             "-crf", "20",
