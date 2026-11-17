@@ -12,7 +12,7 @@
 - `iniciar.bat`: Menu principal em Batch (manter codificação ASCII sem acentos nos `echo` para não quebrar no CMD). Usa `.venv\Scripts\python.exe` e oferece 3 opções: buscar tendências, gerar cortes com áudio original, gerar cortes com narração IA.
 - `buscar_tendencias.py`: Busca vídeos em alta no YouTube via `yt-dlp`.
 - `gerar_cortes.py`: Baixa legendas automáticas do YouTube (`.vtt`/`.json3`), seleciona os melhores trechos via IA e renderiza cortes verticais `1080x1920` na pasta `cortes_prontos/`.
-  - **Proteção contra erros 403/JS runtime:** Todos os comandos `yt-dlp` usam `--js-runtimes node --rm-cache-dir --extractor-args "youtube:player_client=android,web"` com fallback automático para `player_client=web` se o primeiro falhar.
+  - **Proteção contra erros 403/JS runtime:** O YouTube exige um runtime JavaScript (Node.js, Deno ou Bun) e o pacote `yt-dlp-ejs` (vem com `yt-dlp[default]` no `requirements.txt`; o `verificar_dependencias.py` instala o Node via `winget install OpenJS.NodeJS.LTS`). Os comandos `yt-dlp` usam `*ytdlp_js_args()` (acrescenta `--js-runtimes node` só se o Node existir; nunca fixar `--js-runtimes node` no código), `--rm-cache-dir --extractor-args "youtube:player_client=android,web"` com fallback automático para `player_client=web` se o primeiro falhar.
   - **Modo `--audio original`**: Mantém áudio original do vídeo, usa legendas do YouTube sincronizadas com o corte.
   - **Modo `--audio ia`**: Gera narração com `edge-tts` (voz `pt-BR-AntonioNeural`), cria roteiro viral resumido com gancho forte, remove áudio original (`-an`), ajusta duração do vídeo ao MP3 gerado (acelera/desacelera vídeo via `setpts`) e sincroniza legendas `.ass` com a narração.
     - **Bug fixes aplicados (2025):**

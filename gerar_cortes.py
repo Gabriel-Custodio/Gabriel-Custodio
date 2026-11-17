@@ -873,6 +873,31 @@ def resolve_ffmpeg():
     return False
 
 
+def find_js_runtime():
+    """Procura um runtime JavaScript que o yt-dlp usa para resolver os desafios do YouTube.
+
+    O yt-dlp precisa de um deles (junto com o pacote yt-dlp-ejs) para baixar do YouTube sem
+    erro 403 / formatos faltando. Retorna o nome do primeiro encontrado ou None.
+    """
+    for name in ("deno", "node", "bun"):
+        if shutil.which(name):
+            return name
+    return None
+
+
+def ytdlp_js_args():
+    """Argumentos de runtime JavaScript para o yt-dlp, conforme o que está instalado.
+
+    O deno já vem habilitado por padrão no yt-dlp. Node e Bun precisam de --js-runtimes.
+    Sem nenhum instalado não passamos nada (apontar para um programa que não existe só
+    esconde o problema real, que main() já avisa).
+    """
+    for name in ("deno", "node", "bun"):
+        if shutil.which(name):
+            return [] if name == "deno" else ["--js-runtimes", name]
+    return []
+
+
 def ensure_dirs():
     """Cria diretórios necessários."""
     OUTPUT_DIR.mkdir(exist_ok=True)
@@ -927,7 +952,7 @@ def download_video(url, output_prefix):
         "--no-playlist",
         "--merge-output-format", "mp4",
         "-f", "bv*[height<=1080]+ba/b[height<=1080]",
-        "--js-runtimes", "node",
+        *ytdlp_js_args(),
         "--rm-cache-dir",
         "--extractor-args", "youtube:player_client=android,web",
         "-o", str(video_path),
@@ -943,7 +968,7 @@ def download_video(url, output_prefix):
             "--no-playlist",
             "--merge-output-format", "mp4",
             "-f", "bv*[height<=1080]+ba/b[height<=1080]",
-            "--js-runtimes", "node",
+            *ytdlp_js_args(),
             "--rm-cache-dir",
             "--extractor-args", "youtube:player_client=web",
             "-o", str(video_path),
@@ -961,7 +986,7 @@ def download_video(url, output_prefix):
         *ffmpeg_loc,
         "--no-playlist",
         "-f", "bestaudio[ext=m4a]/bestaudio",
-        "--js-runtimes", "node",
+        *ytdlp_js_args(),
         "--rm-cache-dir",
         "--extractor-args", "youtube:player_client=android,web",
         "-o", str(audio_path),
@@ -981,7 +1006,7 @@ def download_video(url, output_prefix):
         "--sub-lang", "pt,pt-BR,pt-PT,en",  # Inclui inglês como fallback
         "--sub-format", "json3",
         "--skip-download",
-        "--js-runtimes", "node",
+        *ytdlp_js_args(),
         "--rm-cache-dir",
         "--extractor-args", "youtube:player_client=android,web",
         "-o", str(TEMP_DIR / f"{output_prefix}_subs.%(ext)s"),
@@ -1934,6 +1959,16 @@ def main():
     if not ok:
         print("❌ yt-dlp não encontrado. Rode: pip install -r requirements.txt")
         sys.exit(1)
+
+    # O YouTube exige um runtime JavaScript + o pacote yt-dlp-ejs no yt-dlp (senão: 403/formatos faltando)
+    if not find_js_runtime():
+        print("⚠️  Nenhum runtime JavaScript (Node.js, Deno ou Bun) encontrado: o download do YouTube pode falhar.")
+        print("   Instale o Node.js LTS:  winget install OpenJS.NodeJS.LTS  (e reabra o terminal)")
+    else:
+        ok, _, _ = run_cmd([sys.executable, "-c", "import yt_dlp_ejs"])
+        if not ok:
+            print("⚠️  Pacote yt-dlp-ejs não instalado: o download do YouTube pode falhar.")
+            print("   Rode: pip install -r requirements.txt")
 
     if audio_mode == "ia":
         ok, _, _ = run_cmd([sys.executable, "-c", "import edge_tts"])

@@ -77,6 +77,28 @@ def check_ffmpeg():
     return False
 
 
+def check_js_runtime():
+    """Verifica se há um runtime JavaScript (Deno, Node.js ou Bun) para o yt-dlp usar no YouTube."""
+    for name in ("deno", "node", "bun"):
+        path = shutil.which(name)
+        if path:
+            ok, out, _ = run_command(f'"{path}" --version')
+            print(f"✅ {name} encontrado: {out.splitlines()[0] if ok and out else path}")
+            return True
+    print("❌ Nenhum runtime JavaScript (Node.js, Deno ou Bun) encontrado")
+    return False
+
+
+def check_yt_dlp_ejs():
+    """Verifica se o pacote yt-dlp-ejs (instalado por yt-dlp[default]) está presente."""
+    ok, _, _ = run_command(f'"{sys.executable}" -c "import yt_dlp_ejs"')
+    if ok:
+        print("✅ yt-dlp-ejs encontrado")
+        return True
+    print("❌ yt-dlp-ejs não encontrado (o requirements.txt instala)")
+    return False
+
+
 def install_via_winget(package):
     """Instala pacote via winget."""
     print(f"📦 Instalando {package} via winget...")
@@ -106,7 +128,7 @@ def install_requirements():
     req_file = Path(__file__).parent / "requirements.txt"
     if req_file.exists():
         print("📦 Instalando dependências do requirements.txt...")
-        ok, out, err = run_command(f"pip install -r {req_file}")
+        ok, out, err = run_command(f'pip install -r "{req_file}"')
         if ok:
             print("✅ Dependências Python instaladas")
             return True
@@ -156,9 +178,20 @@ def main():
             print("   Tentando alternativa...")
             install_via_winget("FFmpeg")
 
-    # 5. Dependências Python
+    # 5. Runtime JavaScript (o yt-dlp precisa para baixar do YouTube sem erro 403)
+    if not check_js_runtime():
+        all_ok = False
+        print("\n🔧 Instalando Node.js LTS via winget...")
+        if install_via_winget("OpenJS.NodeJS.LTS"):
+            print("   Feche e reabra o terminal para o Node.js entrar no PATH.")
+        else:
+            print("   Instale manualmente em: https://nodejs.org (versão LTS)")
+
+    # 6. Dependências Python
     print("\n📦 Verificando dependências Python...")
     install_requirements()
+    if not check_yt_dlp_ejs():
+        all_ok = False
 
     print("\n" + "=" * 60)
     if all_ok:
