@@ -13,5 +13,11 @@ temp/
 __pycache__/
 *.pyc
 
+# Ambiente virtual do Python (o iniciar.bat usa .venv) e pastas temporarias
+.venv/
+venv/
+temp_downloads/
+temp_watch/
+
 # Configuracao local do Claude Code (tem caminhos e permissoes da maquina de cada um)
 .claude/settings.local.json

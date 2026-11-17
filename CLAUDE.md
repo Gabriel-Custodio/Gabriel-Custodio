@@ -17,7 +17,7 @@
     - **Bug fixes aplicados (2025):**
       1. **Legenda pulando/duplicada**: Modo IA usa EXCLUSIVAMENTE eventos `WordBoundary` do `edge_tts.Communicate.stream()` — NUNCA usa `.vtt` do YouTube. Estilo `.ass` único (`Alignment=2`, `MarginV=320`), zero sobreposição, sem alternância de estilos (sem karaoke).
       2. **Voz sem respiro**: `generate_viral_script()` garante pontuação natural rigorosa (vírgulas, pontos, exclamações a cada frase curta) e NÃO remove pontuação antes de enviar ao `edge-tts`.
-      3. **Sincronia exata áudio/vídeo**: FFmpeg usa `-t` com duração REAL do MP3 gerado (`final_duration`), não a duração do clip original. `setpts` calculado com `clip['duration'] / final_duration`.
+      3. **Sincronia exata áudio/vídeo**: o `-t` da ENTRADA do vídeo é a duração do trecho original (`clip['duration']`), e o `setpts` (`final_duration / clip['duration']`, ou seja `1/speed_ratio`) é quem ajusta o trecho para durar a duração REAL do MP3 (`final_duration`). NUNCA usar `final_duration` no `-t` de entrada: a escala seria aplicada duas vezes e o `-shortest` cortaria a narração.
 
 ## Sistema de Fallback de Legendas (3 Passos) — NOVO 2025
 Para resolver "Legendas: NÃO ENCONTRADAS" em vídeos longos de gameplay:
@@ -48,6 +48,10 @@ Para resolver "Legendas: NÃO ENCONTRADAS" em vídeos longos de gameplay:
 
 ## Geração de Áudio com edge-tts (Regra Obrigatória)
 **edge-tts 7.x**: O método `.stream()` de `edge_tts.Communicate` **só pode ser iterado uma única vez** — não se pode chamar `.stream()` e depois `.save()` na mesma instância.
+
+**WordBoundary é obrigatório**: no edge-tts 7.x o padrão é `SentenceBoundary` (um evento por frase). Crie sempre `edge_tts.Communicate(text, voice, ..., boundary="WordBoundary")` para ter um evento por palavra e legendas de 3-5 palavras.
+
+**Idioma das legendas**: ao escolher entre vários arquivos baixados, use `pick_subtitle_file()` (português antes de inglês). Nunca `glob(...)[0]`: a ordem alfabética põe `en` antes de `pt`.
 
 **Padrão correto**: Use um único loop `async for chunk in communicate.stream():` que simultaneamente:
 1. Escreve `chunk["data"]` (bytes de áudio) diretamente no arquivo `.mp3` via `open(output_mp3, "wb")`

@@ -92,7 +92,9 @@ def extract_audio_for_transcription(video_path, output_dir, chunk_duration=AUDIO
     """
     Extrai áudio do vídeo em MP3 mono 64kbps.
     Se vídeo > 20 min, divide em chunks de 15 min.
-    Retorna lista de caminhos dos arquivos de áudio.
+    Retorna lista de tuplas (caminho_do_audio, deslocamento_em_segundos): o deslocamento é
+    o início do chunk no vídeo, somado depois aos tempos que a transcrição devolve (que
+    sempre começam em 0 dentro de cada arquivo).
     """
     print(f"🎵 Extraindo áudio para transcrição...")
 
@@ -117,7 +119,7 @@ def extract_audio_for_transcription(video_path, output_dir, chunk_duration=AUDIO
         ]
         ok, out, err = run_cmd(cmd)
         if ok and audio_path.exists():
-            audio_files.append(audio_path)
+            audio_files.append((audio_path, 0.0))
             print(f"   ✅ Áudio extraído: {audio_path}")
         else:
             print(f"   ❌ Falha ao extrair áudio: {err[:200]}")
@@ -145,7 +147,7 @@ def extract_audio_for_transcription(video_path, output_dir, chunk_duration=AUDIO
             ]
             ok, out, err = run_cmd(cmd)
             if ok and audio_path.exists():
-                audio_files.append(audio_path)
+                audio_files.append((audio_path, float(start_time)))
                 print(f"   ✅ Chunk {i+1}/{num_chunks}: {audio_path} ({chunk_duration_actual/60:.1f} min)")
             else:
                 print(f"   ❌ Falha no chunk {i+1}: {err[:200]}")
@@ -568,7 +570,7 @@ def generate_climax_clips_from_visual(video_path, frame_paths, climax_moments, o
         cmd = [
             ffmpeg_cmd, "-y",
             "-ss", str(clip_start),
-            "-t", str(final_duration),  # Duração exata do áudio TTS
+            "-t", str(clip_obj['duration']),  # Trecho original; setpts ajusta para a duração do TTS
             "-i", str(video_path),
             "-i", str(tts_audio_path),
             "-filter_complex", filter_complex,
@@ -591,7 +593,7 @@ def generate_climax_clips_from_visual(video_path, frame_paths, climax_moments, o
         if not ok:
             print(f"   ❌ Erro no FFmpeg: {err[:300]}")
             # Tenta fallback simplificado
-            ok = _try_simple_cut(video_path, clip_start, final_duration, tts_audio_path, ass_path, output_path, speed_ratio)
+            ok = _try_simple_cut(video_path, clip_start, clip_obj['duration'], tts_audio_path, ass_path, output_path, speed_ratio)
             if not ok:
                 continue
 
@@ -661,7 +663,7 @@ def load_subtitles_with_fallback(subtitle_path, video_path, temp_dir, api_key=No
 
     # Tenta buscar outros arquivos de legenda na pasta temp
     for ext in ['.vtt', '.srt', '.json3']:
-        sub_files = list(temp_dir.glob(f"*subs*{ext}"))
+        sub_files = sorted(temp_dir.glob(f"*subs*{ext}"), key=_subtitle_lang_rank)
         if sub_files:
             segments = load_subtitles(sub_files[0])
             if segments:
@@ -679,9 +681,14 @@ def load_subtitles_with_fallback(subtitle_path, video_path, temp_dir, api_key=No
         audio_files = extract_audio_for_transcription(video_path, temp_dir)
 
         all_segments = []
-        for audio_file in audio_files:
+        for audio_file, offset in audio_files:
             segments = transcribe_audio_groq(audio_file, api_key)
+            # A API devolve tempos relativos ao chunk; soma o início do chunk no vídeo
+            for seg in segments:
+                seg['start'] += offset
+                seg['end'] += offset
             all_segments.extend(segments)
+        all_segments.sort(key=lambda s: s['start'])
 
         if all_segments:
             total_words = sum(len(s['text'].split()) for s in all_segments)
@@ -765,6 +772,28 @@ def ensure_dirs():
     """Cria diretórios necessários."""
     OUTPUT_DIR.mkdir(exist_ok=True)
     TEMP_DIR.mkdir(exist_ok=True)
+
+
+# Ordem de preferência dos idiomas das legendas baixadas (português antes de inglês).
+# Sem isso o glob devolve em ordem alfabética e "en" vem antes de "pt".
+SUB_LANG_PRIORITY = ["pt-BR", "pt", "pt-PT", "en"]
+
+
+def _subtitle_lang_rank(path):
+    """Prioridade do idioma pelo nome do arquivo (video_subs.pt-BR.json3 -> 'pt-BR')."""
+    lang = Path(path.stem).suffix.lstrip('.')
+    if lang in SUB_LANG_PRIORITY:
+        return SUB_LANG_PRIORITY.index(lang)
+    return len(SUB_LANG_PRIORITY)
+
+
+def pick_subtitle_file(directory, name_glob):
+    """Escolhe o arquivo de legenda: formato json3 > vtt > srt e, dentro do formato, pt antes de en."""
+    for ext in (".json3", ".vtt", ".srt"):
+        files = sorted(directory.glob(f"{name_glob}{ext}"), key=_subtitle_lang_rank)
+        if files:
+            return files[0]
+    return None
 
 
 def clean_filename(name):
@@ -856,13 +885,7 @@ def download_video(url, output_prefix):
     ok, out, err = run_cmd(cmd)
 
     # Procurar arquivo de legenda baixado
-    sub_files = list(TEMP_DIR.glob(f"{output_prefix}_subs*.json3"))
-    if not sub_files:
-        sub_files = list(TEMP_DIR.glob(f"{output_prefix}_subs*.vtt"))
-    if not sub_files:
-        sub_files = list(TEMP_DIR.glob(f"{output_prefix}_subs*.srt"))
-
-    subtitle_path = sub_files[0] if sub_files else None
+    subtitle_path = pick_subtitle_file(TEMP_DIR, f"{output_prefix}_subs*")
 
     print(f"✅ Vídeo: {video_path}")
     print(f"✅ Legendas: {subtitle_path if subtitle_path else 'NÃO ENCONTRADAS (fallback será tentado)'}")
@@ -1314,7 +1337,10 @@ async def generate_tts_audio(text, output_path, voice=TTS_VOICE, rate=TTS_RATE, 
         return False, 0, []
 
     try:
-        communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume)
+        # edge-tts 7.x emite só SentenceBoundary por padrão; as legendas de 3-5 palavras
+        # precisam de eventos por palavra, então pedimos WordBoundary explicitamente.
+        communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume,
+                                           boundary="WordBoundary")
 
         # Um único loop: escreve áudio no arquivo E captura eventos de fronteira
         # open() nativo não suporta async with; usa with sincronizado dentro do loop assíncrono
@@ -1624,12 +1650,14 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
             map_v = "[vout]"
 
         ffmpeg_cmd = FFMPEG.as_posix()
-        # IMPORTANTE: -t usa a duração REAL do áudio TTS (final_duration), não a do clip original
-        # Isso garante que o vídeo cortado tenha exatamente a duração do áudio narrado
+        # IMPORTANTE: o -t da ENTRADA é a duração do trecho original (clip['duration']).
+        # O setpts (clip/final) é que encolhe/estica esse trecho para durar final_duration,
+        # a duração real do áudio TTS. Usar final_duration aqui aplicaria a escala duas vezes
+        # e o vídeo (com -shortest) cortaria a narração.
         cmd = [
             ffmpeg_cmd, "-y",
             "-ss", str(video_trim_start),
-            "-t", str(final_duration),  # Duração exata do áudio TTS
+            "-t", str(clip['duration']),  # Trecho original; setpts ajusta para a duração do TTS
             "-i", str(video_path),
             "-i", str(tts_audio_path),
             "-filter_complex", filter_complex,
@@ -1709,7 +1737,7 @@ def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_
         cmd = [
             ffmpeg_cmd, "-y",
             "-ss", str(clip['start']),
-            "-t", str(actual_tts_duration),  # Duração exata do áudio TTS
+            "-t", str(clip['duration']),  # Trecho original; o setpts do vf ajusta para a duração do TTS
             "-i", str(video_path),
             "-i", str(tts_audio_path),
             "-vf", vf,
