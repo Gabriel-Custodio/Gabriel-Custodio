@@ -24,14 +24,11 @@ import re
 import math
 import shutil
 import time
-import textwrap
 import asyncio
 import argparse
 import base64
 import hashlib
 from pathlib import Path
-from datetime import timedelta
-from urllib.parse import urlparse, parse_qs
 
 
 # ========== CONFIGURAÇÕES ==========
@@ -146,7 +143,7 @@ def extract_audio_for_transcription(video_path, output_dir, chunk_duration=AUDIO
             "-f", "mp3",
             str(audio_path)
         ]
-        ok, out, err = run_cmd(cmd)
+        ok, _, err = run_cmd(cmd)
         if ok and audio_path.exists():
             audio_files.append((audio_path, 0.0))
             print(f"   ✅ Áudio extraído: {audio_path}")
@@ -174,7 +171,7 @@ def extract_audio_for_transcription(video_path, output_dir, chunk_duration=AUDIO
                 "-f", "mp3",
                 str(audio_path)
             ]
-            ok, out, err = run_cmd(cmd)
+            ok, _, err = run_cmd(cmd)
             if ok and audio_path.exists():
                 audio_files.append((audio_path, float(start_time)))
                 print(f"   ✅ Chunk {i+1}/{num_chunks}: {audio_path} ({chunk_duration_actual/60:.1f} min)")
@@ -263,7 +260,7 @@ def extract_key_frames(video_path, output_dir, interval=VISUAL_FRAME_INTERVAL, m
             "-vf", "scale=1280:720",  # Reduzir para economia
             str(frame_path)
         ]
-        ok, out, err = run_cmd(cmd)
+        ok, _, _ = run_cmd(cmd)
         if ok and frame_path.exists():
             frame_paths.append({
                 'path': frame_path,
@@ -611,7 +608,7 @@ def analyze_frames_with_ai(frame_paths, api_key):
     return climax_moments
 
 
-def generate_climax_clips_from_visual(video_path, frame_paths, climax_moments, output_dir, clip_num_start=1):
+def generate_climax_clips_from_visual(video_path, _frame_paths, climax_moments, output_dir, clip_num_start=1):
     """
     Para cada momento de clímax identificado, gera o corte completo:
     - Cria roteiro narrado (já vem do climax_moments)
@@ -748,7 +745,7 @@ def generate_climax_clips_from_visual(video_path, frame_paths, climax_moments, o
         ]
 
         print(f"   ⚙️  Executando FFmpeg (velocidade: {speed_ratio:.2f}x)...")
-        ok, out, err = run_cmd(cmd)
+        ok, _, err = run_cmd(cmd)
 
         if not ok:
             print(f"   ❌ Erro no FFmpeg: {err[:300]}")
@@ -797,7 +794,7 @@ def _try_simple_cut(video_path, start_time, duration, tts_audio_path, ass_path, 
         str(output_path)
     ]
 
-    ok, out, err = run_cmd(cmd)
+    ok, _, _ = run_cmd(cmd)
     if ok:
         print(f"   ✅ Corte salvo (simplificado): {output_path}")
     return ok
@@ -1019,7 +1016,7 @@ def download_video(url, output_prefix):
         "-o", str(video_path),
         url
     ]
-    ok, out, err = run_cmd(cmd)
+    ok, _, err = run_cmd(cmd)
     if not ok or not video_path.exists():
         print(f"⚠️  Falha no download principal, tentando fallback com player_client=web...")
         # Fallback: tentar apenas web client
@@ -1035,7 +1032,7 @@ def download_video(url, output_prefix):
             "-o", str(video_path),
             url
         ]
-        ok, out, err = run_cmd(cmd_fallback)
+        ok, _, err = run_cmd(cmd_fallback)
         if not ok or not video_path.exists():
             print(f"❌ Falha ao baixar vídeo: {err}")
             return None, None
@@ -1053,12 +1050,11 @@ def download_video(url, output_prefix):
         "-o", str(audio_path),
         url
     ]
-    ok, out, err = run_cmd(cmd)
+    ok, _, err = run_cmd(cmd)
     if not ok:
         print(f"⚠️  Falha ao baixar áudio separado: {err}")
 
     # Baixar legendas do YouTube (com timestamps) - EXPANDIDO para incluir inglês
-    sub_path = TEMP_DIR / f"{output_prefix}_subs.json3"
     cmd = [
         sys.executable, "-m", "yt_dlp",
         *ffmpeg_loc,
@@ -1073,7 +1069,7 @@ def download_video(url, output_prefix):
         "-o", str(TEMP_DIR / f"{output_prefix}_subs.%(ext)s"),
         url
     ]
-    ok, out, err = run_cmd(cmd)
+    ok, _, err = run_cmd(cmd)
 
     # Procurar arquivo de legenda baixado
     subtitle_path = pick_subtitle_file(TEMP_DIR, f"{output_prefix}_subs*")
@@ -1249,7 +1245,7 @@ def merge_subtitle_segments(segments, max_chars=500):
     return merged
 
 
-def score_segment(text, start, end, duration, total_duration):
+def score_segment(text, start, _end, duration, total_duration):
     """
     Pontua um segmento para potencial viral.
     Critérios: gancho forte (início), conclusão clara (fim), duração ideal, posição.
@@ -1921,7 +1917,7 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
         ]
 
     print(f"⚙️  Executando ffmpeg...")
-    ok, out, err = run_cmd(cmd)
+    ok, _, err = run_cmd(cmd)
 
     if not ok:
         print(f"❌ Erro no ffmpeg: {err[:500]}")
@@ -1931,7 +1927,7 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
     return True
 
 
-def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num, audio_mode="original", tts_audio_path=None, tts_duration=None):
+def cut_simple_vertical(video_path, clip, _segments, ass_path, output_path, _clip_num, audio_mode="original", tts_audio_path=None, tts_duration=None):
     """Versão simplificada sem fundo desfocado (fallback)."""
     print(f"🔄 Tentando versão simplificada...")
 
@@ -1991,7 +1987,7 @@ def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_
             str(output_path)
         ]
 
-    ok, out, err = run_cmd(cmd)
+    ok, _, err = run_cmd(cmd)
     if ok:
         print(f"✅ Corte salvo (simplificado): {output_path}")
         return True
