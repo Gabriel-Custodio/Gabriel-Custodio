@@ -17,7 +17,9 @@ echo.
 echo [1] Buscar videos em alta (YouTube)
 echo [2] Gerar cortes de uma URL (audio original)
 echo [3] Gerar cortes de uma URL (narracao IA - edge-tts)
-echo [4] Sair
+echo [4] Modo Gameplay / Streamer (Tela Dividida + Audio Original)
+echo [5] Monitor de Lives (Tempo Real - Clips Automaticos)
+echo [6] Sair
 echo.
 set /p op="Escolha uma opcao: "
 
@@ -28,7 +30,9 @@ if "%op%"=="1" (
 )
 if "%op%"=="2" goto GERAR_ORIGINAL
 if "%op%"=="3" goto GERAR_IA
-if "%op%"=="4" exit
+if "%op%"=="4" goto GERAR_GAMEPLAY
+if "%op%"=="5" goto MONITOR_LIVES
+if "%op%"=="6" exit
 goto MENU
 
 :GERAR_ORIGINAL
@@ -46,5 +50,41 @@ set "url="
 set /p url="Cole a URL do video do YouTube: "
 if not defined url goto MENU
 "%VENV_PYTHON%" gerar_cortes.py "%url%" --audio ia
+pause
+goto MENU
+
+:GERAR_GAMEPLAY
+echo.
+set "url="
+set /p url="Cole a URL do video do YouTube: "
+if not defined url goto MENU
+"%VENV_PYTHON%" gerar_cortes.py "%url%" --audio gameplay
+pause
+goto MENU
+
+:MONITOR_LIVES
+echo.
+echo ==========================================
+echo   MONITOR DE LIVES - TEMPO REAL
+echo ==========================================
+echo.
+echo Suporta: YouTube, Twitch, Kick
+echo.
+set "url="
+set /p url="Cole a URL da live: "
+if not defined url goto MENU
+echo.
+echo Posicao da webcam:
+echo [1] Canto inferior esquerdo (x=0.02, y=0.70, w=0.25, h=0.28)
+echo [2] Canto superior esquerdo (x=0.02, y=0.02, w=0.25, h=0.28)
+echo [3] Canto inferior direito (x=0.73, y=0.70, w=0.25, h=0.28)
+echo [4] Canto superior direito (x=0.73, y=0.02, w=0.25, h=0.28)
+echo [5] Meio-direita / acima do minimapa (x=0.772, y=0.450, w=0.222, h=0.242)
+echo [6] Detectar automaticamente com IA (Groq Vision)
+echo [7] Sem webcam (apenas zoom central 9:16)
+echo.
+set /p wc="Escolha [1-7] (padrao 1): "
+if not defined wc set wc=1
+"%VENV_PYTHON%" monitor_lives.py "%url%" --webcam %wc%
 pause
 goto MENU

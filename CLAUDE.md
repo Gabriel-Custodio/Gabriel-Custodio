@@ -9,13 +9,42 @@
   - `GROQ_VISION_MODEL` / `GROQ_TEXT_MODEL` (opcionais): trocam os modelos padrão sem editar o código.
 
 ## Arquitetura dos Arquivos
-- `iniciar.bat`: Menu principal em Batch (manter codificação ASCII sem acentos nos `echo` para não quebrar no CMD). Usa `.venv\Scripts\python.exe` e oferece 3 opções: buscar tendências, gerar cortes com áudio original, gerar cortes com narração IA.
+- `iniciar.bat`: Menu principal em Batch (manter codificação ASCII sem acentos nos `echo` para não quebrar no CMD). Usa `.venv\Scripts\python.exe` e oferece 4 opções: buscar tendências, gerar cortes com áudio original, gerar cortes com narração IA, gerar cortes modo Gameplay/Streamer (tela dividida).
 - `buscar_tendencias.py`: Busca vídeos em alta no YouTube via `yt-dlp`.
 - `gerar_cortes.py`: Baixa legendas automáticas do YouTube (`.vtt`/`.json3`), seleciona os melhores trechos via IA e renderiza cortes verticais `1080x1920` na pasta `cortes_prontos/`.
   - **Proteção contra erros 403/JS runtime:** O YouTube exige um runtime JavaScript (Node.js, Deno ou Bun) e o pacote `yt-dlp-ejs` (vem com `yt-dlp[default]` no `requirements.txt`; o `verificar_dependencias.py` instala o Node via `winget install OpenJS.NodeJS.LTS`). Os comandos `yt-dlp` usam `*ytdlp_js_args()` (acrescenta `--js-runtimes node` só se o Node existir; nunca fixar `--js-runtimes node` no código), `--rm-cache-dir --extractor-args "youtube:player_client=android,web"` com fallback automático para `player_client=web` se o primeiro falhar.
   - **Modo `--audio original`**: Mantém áudio original do vídeo, usa legendas do YouTube sincronizadas com o corte.
   - **Modo `--audio ia`**: Gera narração com `edge-tts` (voz `pt-BR-AntonioNeural`), cria roteiro viral resumido com gancho forte, remove áudio original (`-an`), ajusta duração do vídeo ao MP3 gerado (acelera/desacelera vídeo via `setpts`) e sincroniza legendas `.ass` com a narração.
     - **Bug fixes aplicados (2025):**
+- **Modo `--audio gameplay` (NOVO)**: Modo Gameplay / Streamer com tela dividida (split-screen).
+  - **Quantidade de cortes configurável**: Pergunta interativa no terminal (padrão 5, aceita 1-10).
+  - **Seleção de momentos por IA distribuída (NOVO)**: Para resolver concentração de cortes no início de lives longas (1-3h):
+    * Divide o vídeo em `GAMEPLAY_TIME_BANDS` (6) faixas temporais iguais do início ao fim
+    * Cada faixa envia transcrição compacta com timestamps [HH:MM:SS] para Groq (modelo de texto)
+    * IA retorna até `GAMEPLAY_CLIPS_PER_BAND` (2) melhores clímax por faixa com score 0-10
+    * Agrega todos os candidatos, ordena por score, aplica filtro anti-repetição: mínimo `GAMEPLAY_MIN_GAP_SECONDS` (300s = 5min) entre inícios de cortes
+    * Relaxa progressivamente o espaçamento (3min, 2min, 1min, sem filtro) se não atingir a quantidade desejada
+    * Fallback para método tradicional (sliding window) se sem GROQ_API_KEY
+  - **Seleção de posição da webcam**: Pergunta interativa no terminal (7 opções):
+    [1] Canto inferior esquerdo (padrão, x=0.0, y=0.72, w=0.26, h=0.28)
+    [2] Canto superior esquerdo (x=0.0, y=0.0, w=0.26, h=0.28)
+    [3] Canto inferior direito (x=0.74, y=0.72, w=0.26, h=0.28)
+    [4] Canto superior direito (x=0.74, y=0.0, w=0.26, h=0.28)
+    [5] Meio-direita / acima do minimapa (x=0.772, y=0.450, w=0.222, h=0.242)
+    [6] Detectar automaticamente com IA (Groq Vision: extrai 1 frame, retorna x,y,w,h normalizados 0.0-1.0; fallback para sem webcam se não encontrar)
+    [7] Sem webcam (apenas zoom central 9:16 no gameplay)
+  - **Enquadramento vertical 1080x1920 via FFmpeg (filter_complex)**:
+    * Com webcam (opções 1-6): Dois recortes (crop) empilhados com `vstack`:
+      - Topo (webcam): Crop com coordenadas da opção escolhida → `scale=1080:620:force_original_aspect_ratio=increase,crop=1080:620`
+        - Para opção [5] (meio-direita): `crop=iw*0.222:ih*0.242:iw*0.772:ih*0.450,scale=1080:620:force_original_aspect_ratio=increase,crop=1080:620`
+      - Base (gameplay): Recorte central 9:16 (`crop=ih*9/16:ih:(iw-ih*9/16)/2:0`) → `scale=1080:1300`
+      - Junção: `vstack=inputs=2` = exatamente 1080x1920
+    * Sem webcam (opção 7): Crop central 9:16 + `scale=1080:1920`
+  - **Áudio original**: Mantém faixa do streamer, aplica `loudnorm=I=-16:TP=-1.5:LRA=11` + `fade-out` de 1.5s (vídeo e áudio).
+  - **Legendas**: `.ass` na linha divisória (`MarginV=1240`), fonte negrito, borda preta 5px, cor amarela (`&H00FFFF00`).
+  - **Prefixo de saída**: `corte_gameplay_` na pasta `cortes_prontos/`.
+  - **Detecção automática (opção 6)**: Função `detect_webcam_position_ai()` extrai frame em 10% da duração do vídeo, envia para Groq Vision (`qwen/qwen3.8-27b` por padrão) com prompt estruturado para retornar JSON com coordenadas normalizadas. Validação: coordenadas devem estar em 0.0-1.0 e crop não pode sair dos limites. Se falhar ou não encontrar webcam → fallback para opção 7 (sem webcam).
+  - **Funções novas**: `find_best_clips_gameplay_ai()`, `analyze_band_with_ai()`. Constantes: `GAMEPLAY_TIME_BANDS=6`, `GAMEPLAY_CLIPS_PER_BAND=2`, `GAMEPLAY_MIN_GAP_SECONDS=300`, `GAMEPLAY_DEFAULT_CLIPS=5`, `GAMEPLAY_MIN_CLIPS=1`, `GAMEPLAY_MAX_CLIPS=10`.
       1. **Legenda pulando/duplicada**: Modo IA usa EXCLUSIVAMENTE eventos `WordBoundary` do `edge_tts.Communicate.stream()` — NUNCA usa `.vtt` do YouTube. Estilo `.ass` único (`Alignment=2`, `MarginV=320`), zero sobreposição, sem alternância de estilos (sem karaoke).
       2. **Voz sem respiro**: `generate_viral_script()` garante pontuação natural rigorosa (vírgulas, pontos, exclamações a cada frase curta) e NÃO remove pontuação antes de enviar ao `edge-tts`.
       3. **Sincronia exata áudio/vídeo**: o `-t` da ENTRADA do vídeo é a duração do trecho original (`clip['duration']`), e o `setpts` (`final_duration / clip['duration']`, ou seja `1/speed_ratio`) é quem ajusta o trecho para durar a duração REAL do MP3 (`final_duration`). NUNCA usar `final_duration` no `-t` de entrada: a escala seria aplicada duas vezes e o `-shortest` cortaria a narração.

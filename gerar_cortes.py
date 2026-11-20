@@ -86,6 +86,26 @@ MIN_SCRIPT_FILL = 0.6  # a IA deve escrever pelo menos 60% do máximo de palavra
 FADE_OUT_SECONDS = 0.5  # fade de áudio e vídeo no final, para o corte não terminar seco
 ENV_PATH = Path(__file__).parent / ".env"
 
+# ========== CONFIGURAÇÕES GAMEPLAY ==========
+GAMEPLAY_TIME_BANDS = 6  # Dividir vídeo em 6 faixas temporais
+GAMEPLAY_CLIPS_PER_BAND = 2  # Clipes máximos por faixa
+GAMEPLAY_MIN_GAP_SECONDS = 300  # 5 minutos mínimo entre cortes
+GAMEPLAY_DEFAULT_CLIPS = 5  # Padrão de cortes a gerar
+GAMEPLAY_MIN_CLIPS = 1
+GAMEPLAY_MAX_CLIPS = 10
+
+# Otimizações de retenção/gancho (NOVO 2025)
+GAMEPLAY_CLIP_DURATION_MIN = 32  # Duração ideal mínima (era 30)
+GAMEPLAY_CLIP_DURATION_MAX = 45  # Duração ideal máxima (era 55)
+GAMEPLAY_FADE_OUT_SECONDS = 0.2  # Fade rápido apenas áudio (era 1.5s vídeo+áudio)
+GAMEPLAY_HOOK_BANNER_Y = 140  # Posição Y da faixa superior (terço superior)
+GAMEPLAY_HOOK_BANNER_HEIGHT = 120  # Altura da faixa
+GAMEPLAY_HOOK_BANNER_DURATION = 4  # Duração da faixa em segundos
+GAMEPLAY_SUBTITLE_WORDS_PER_CHUNK = 3  # Palavras por bloco de legenda (era 4)
+GAMEPLAY_WATERMARK_PATH = "assets/logo.png"  # Logo/watermark opcional
+# ====================================
+
+
 # ====================================
 
 
@@ -406,6 +426,18 @@ def fade_out_filters(total_duration):
     start = total_duration - FADE_OUT_SECONDS
     return (f"fade=t=out:st={start:.2f}:d={FADE_OUT_SECONDS}",
             f"afade=t=out:st={start:.2f}:d={FADE_OUT_SECONDS}")
+
+
+def fade_out_filters_gameplay(total_duration):
+    """Devolve (filtro_de_video, filtro_de_audio) para modo gameplay.
+
+    NOVO 2025: Apenas fade rápido no ÁUDIO (0.2s), SEM fade no vídeo
+    para incentivar loop contínuo no TikTok/Shorts/Reels.
+    """
+    if not total_duration or total_duration < GAMEPLAY_FADE_OUT_SECONDS + 0.5:
+        return "", ""
+    start = total_duration - GAMEPLAY_FADE_OUT_SECONDS
+    return ("", f"afade=t=out:st={start:.2f}:d={GAMEPLAY_FADE_OUT_SECONDS}")
 
 
 def clean_script(text, max_words, min_words=15):
@@ -1400,6 +1432,230 @@ def find_best_clips(segments, video_duration, num_clips=NUM_CLIPS):
     return selected[:num_clips]
 
 
+def find_best_clips_gameplay_ai(segments, video_duration, api_key, num_clips=GAMEPLAY_DEFAULT_CLIPS):
+    """
+    Seleciona os melhores trechos para cortes virais no modo Gameplay usando IA.
+
+    Estratégia:
+    1. Divide o vídeo em GAMEPLAY_TIME_BANDS faixas temporais iguais (do início ao fim)
+    2. Para cada faixa, extrai a transcrição com timestamps [HH:MM:SS]
+    3. Envia cada faixa para a IA (Groq) para identificar os melhores GAMEPLAY_CLIPS_PER_BAND clímax
+    4. Coleta todos os candidatos, ordena por score e aplica filtro anti-repetição (min 300s gap)
+    5. Retorna os top N clipes
+
+    Retorna lista de dicts com: start, end, duration, text, score, reason
+    """
+    if not segments or not api_key:
+        print("   ⚠️  Sem segmentos ou API key, usando método tradicional...")
+        return find_best_clips(segments, video_duration, num_clips)
+
+    print(f"\n🤖 Modo Gameplay IA: Analisando vídeo em {GAMEPLAY_TIME_BANDS} faixas temporais...")
+
+    # Dividir vídeo em faixas temporais
+    band_duration = video_duration / GAMEPLAY_TIME_BANDS
+    all_candidates = []
+
+    for band_idx in range(GAMEPLAY_TIME_BANDS):
+        band_start = band_idx * band_duration
+        band_end = min((band_idx + 1) * band_duration, video_duration)
+
+        print(f"   📍 Faixa {band_idx + 1}/{GAMEPLAY_TIME_BANDS}: {band_start/60:.1f}min - {band_end/60:.1f}min")
+
+        # Extrair segmentos desta faixa
+        band_segments = []
+        for seg in segments:
+            if seg['end'] <= band_start:
+                continue
+            if seg['start'] >= band_end:
+                break
+            # Calcular sobreposição
+            overlap_start = max(seg['start'], band_start)
+            overlap_end = min(seg['end'], band_end)
+            if overlap_end > overlap_start:
+                prop = (overlap_end - overlap_start) / (seg['end'] - seg['start'])
+                words = seg['text'].split()
+                n_words = max(1, int(len(words) * prop))
+                band_segments.append({
+                    'start': overlap_start,
+                    'end': overlap_end,
+                    'text': ' '.join(words[:n_words])
+                })
+
+        if not band_segments:
+            print(f"      ⚠️  Sem transcrição nesta faixa")
+            continue
+
+        # Compactar transcrição da faixa (limite ~3000 chars para não estourar tokens)
+        band_text_parts = []
+        total_chars = 0
+        for seg in band_segments:
+            timestamp = f"[{int(seg['start']//3600):02d}:{int((seg['start']%3600)//60):02d}:{int(seg['start']%60):02d}]"
+            seg_text = f"{timestamp} {seg['text']}"
+            if total_chars + len(seg_text) > 3000:
+                break
+            band_text_parts.append(seg_text)
+            total_chars += len(seg_text)
+
+        band_text = "\n".join(band_text_parts)
+
+        # Chamar IA para analisar esta faixa
+        candidates = analyze_band_with_ai(band_text, band_start, band_end, api_key)
+        all_candidates.extend(candidates)
+
+    if not all_candidates:
+        print("   ⚠️  IA não retornou candidatos, usando método tradicional...")
+        return find_best_clips(segments, video_duration, num_clips)
+
+    # Ordenar por score (maior primeiro)
+    all_candidates.sort(key=lambda x: x['score'], reverse=True)
+
+    # Filtro anti-repetição: mínimo 300s (5 min) entre cortes
+    print(f"\n🔍 Aplicando filtro anti-repetição (mínimo {GAMEPLAY_MIN_GAP_SECONDS}s entre cortes)...")
+    selected = []
+    for c in all_candidates:
+        # Verificar se está muito próximo de algum já selecionado
+        too_close = False
+        for s in selected:
+            if abs(c['start'] - s['start']) < GAMEPLAY_MIN_GAP_SECONDS:
+                too_close = True
+                print(f"      ⏭️  Descartado: {c['start']/60:.1f}min (próximo de {s['start']/60:.1f}min)")
+                break
+        if not too_close:
+            selected.append(c)
+            print(f"      ✅ Selecionado: {c['start']/60:.1f}min - Score: {c['score']:.1f} - {c.get('reason', '')}")
+            if len(selected) >= num_clips:
+                break
+
+    # Se não conseguiu selecionar o suficiente, relaxa o filtro progressivamente
+    if len(selected) < num_clips:
+        print(f"   ⚠️  Apenas {len(selected)} cortes com espaçamento de 5min. Relaxando filtro...")
+        for gap in [180, 120, 60, 0]:  # 3min, 2min, 1min, sem filtro
+            selected = []
+            for c in all_candidates:
+                too_close = False
+                for s in selected:
+                    if abs(c['start'] - s['start']) < gap:
+                        too_close = True
+                        break
+                if not too_close:
+                    selected.append(c)
+                    if len(selected) >= num_clips:
+                        break
+            if len(selected) >= num_clips:
+                print(f"   ✅ Conseguiu {len(selected)} cortes com espaçamento de {gap}s")
+                break
+
+    # Garantir duração alvo (32-45s para gameplay)
+    for c in selected:
+        if c['duration'] < GAMEPLAY_CLIP_DURATION_MIN:
+            c['end'] = c['start'] + GAMEPLAY_CLIP_DURATION_MIN
+            c['duration'] = GAMEPLAY_CLIP_DURATION_MIN
+        elif c['duration'] > GAMEPLAY_CLIP_DURATION_MAX:
+            c['end'] = c['start'] + GAMEPLAY_CLIP_DURATION_MAX
+            c['duration'] = GAMEPLAY_CLIP_DURATION_MAX
+
+    print(f"\n🎯 {len(selected)} cortes finais selecionados:")
+    for i, c in enumerate(selected, 1):
+        print(f"  {i}. {c['start']:.1f}s - {c['end']:.1f}s ({c['duration']:.1f}s) | Score: {c['score']:.1f}")
+        print(f"     Motivo: {c.get('reason', 'N/A')}")
+        print(f"     Gancho: {c.get('hook_title', 'N/A')}")
+        print(f"     Texto: {c['text'][:120]}...")
+
+    return selected[:num_clips]
+
+
+def analyze_band_with_ai(band_text, band_start, band_end, api_key):
+    """
+    Analisa uma faixa temporal com a IA para encontrar clímax.
+    Retorna lista de candidatos com start, end, duration, text, score, reason, hook_title.
+    """
+    band_duration = band_end - band_start
+
+    prompt = (
+        f"Você é um editor especialista em Shorts/TikTok/Reels de games. "
+        f"Analise a transcrição de uma live/stream de gameplay (duração da faixa: {band_duration/60:.1f}min).\n"
+        f"O texto abaixo tem timestamps [HH:MM:SS].\n\n"
+        f"TRANSCRIÇÃO DA FAIXA:\n{band_text}\n\n"
+        f"Identifique os melhores {GAMEPLAY_CLIPS_PER_BAND} momentos para CORTES VIRAIS de {GAMEPLAY_CLIP_DURATION_MIN} a {GAMEPLAY_CLIP_DURATION_MAX} segundos.\n\n"
+        f"🎯 REGRA DE OURO DA RETENÇÃO:\n"
+        f"- O corte DEVE COMEÇAR NO CLÍMAX IMEDIATO (primeiros 2s = gancho total)\n"
+        f"- REJEITE: introduções lentas, saudações ('salve rapaziada', 'e aí galera', 'olha aí'), "
+        f"explicações demoradas, setup de contexto, 'vamos lá', 'então pessoal'\n"
+        f"- ACEITE APENAS: reação explosiva, pergunta intrigante aberta, clutch/vitória no exato momento, "
+        f"fail épico, descoberta chocante, frase de impacto, risada incontrolável\n"
+        f"- O corte DEVE TERMINAR LOGO APÓS O DESFECHO da frase/reação principal (sem silêncio morto)\n\n"
+        f"Procure por: reações fortes, risadas, jogadas incríveis, vitórias, descobertas, momentos engraçados, "
+        f"fails épicos, clutches, conclusões de desafios, interações com chat de alto impacto.\n\n"
+        f"Responda APENAS com JSON válido, lista de objetos:\n"
+        f'[\n'
+        f'  {{"start_offset": 125.5, "duration": 38, "score": 9.0, '
+        f'"reason": "clutch 1v3 no último segundo", "text": "trecho da transcrição", '
+        f'"hook_title": "ELE VENCEU O IMPOSSÍVEL"}},\n'
+        f'  {{"start_offset": 380.0, "duration": 35, "score": 8.5, '
+        f'"reason": "reação de choque ao drop raro", "text": "trecho da transcrição", '
+        f'"hook_title": "NÃO ACREDITEI NO QUE VI"}}\n'
+        f']\n\n'
+        f"Regras OBRIGATÓRIAS:\n"
+        f"- start_offset: segundos desde o INÍCIO DA FAIXA (não do vídeo)\n"
+        f"- duration: entre {GAMEPLAY_CLIP_DURATION_MIN} e {GAMEPLAY_CLIP_DURATION_MAX} segundos (ideal: 32-45s)\n"
+        f"- score: 0 a 10 (potencial viral)\n"
+        f"- reason: descrição curta do porquê (máx 50 chars)\n"
+        f"- text: trecho relevante da transcrição (máx 200 chars)\n"
+        f"- hook_title: TÍTULO DE IMPACTO em CAIXA ALTA, 5-6 palavras máx (ex: 'ELE NÃO ESPERAVA POR ISSO', 'O MELHOR CLUTCH DA HISTÓRIA')\n"
+        f"- Se não houver bons momentos com gancho imediato, retorne lista vazia []"
+    )
+
+    answer = groq_chat([{"role": "user", "content": prompt}], api_key, get_text_model(), temperature=0.3, max_tokens=2000)
+
+    if not answer:
+        return []
+
+    data = extract_json(answer)
+    if not isinstance(data, list):
+        return []
+
+    candidates = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start_offset = float(item.get('start_offset', 0))
+            duration = float(item.get('duration', 40))
+            score = float(item.get('score', 0))
+            reason = str(item.get('reason', '')).strip()
+            text = str(item.get('text', '')).strip()
+            hook_title = str(item.get('hook_title', '')).strip().upper()
+        except (TypeError, ValueError):
+            continue
+
+        # Validar
+        if not (0 <= start_offset <= band_duration):
+            continue
+        if not (GAMEPLAY_CLIP_DURATION_MIN <= duration <= GAMEPLAY_CLIP_DURATION_MAX):
+            duration = max(GAMEPLAY_CLIP_DURATION_MIN, min(GAMEPLAY_CLIP_DURATION_MAX, duration))
+        if score < 3.0:  # Score mínimo para considerar
+            continue
+
+        abs_start = band_start + start_offset
+        abs_end = min(abs_start + duration, band_end)
+        actual_duration = abs_end - abs_start
+
+        if actual_duration < GAMEPLAY_CLIP_DURATION_MIN:
+            continue
+
+        candidates.append({
+            'start': abs_start,
+            'end': abs_end,
+            'duration': actual_duration,
+            'text': text,
+            'score': score,
+            'reason': reason,
+            'hook_title': hook_title
+        })
+
+    return candidates
+
+
 def generate_viral_script(original_text, target_duration):
     """
     Gera um roteiro viral resumido a partir do texto original.
@@ -1996,6 +2252,507 @@ def cut_simple_vertical(video_path, clip, _segments, ass_path, output_path, _cli
         return False
 
 
+def ask_webcam_position(video_path=None, api_key=None):
+    """
+    Pergunta ao usuário onde fica a facecam do streamer no vídeo 16:9 original.
+    Retorna um dicionário com as coordenadas do crop para a webcam (x, y, w, h normalizados 0.0-1.0),
+    ou None para opção 7 (sem webcam).
+
+    Opções:
+    [1] Canto inferior esquerdo (padrão)
+    [2] Canto superior esquerdo
+    [3] Canto inferior direito
+    [4] Canto superior direito
+    [5] Meio-direita / acima do minimapa (x=0.772, y=0.450, w=0.222, h=0.242)
+    [6] Detectar automaticamente com IA (usa Groq Vision)
+    [7] Sem webcam (apenas zoom central 9:16 no gameplay)
+    """
+    print("\n🎮 Posicionamento da Webcam (Facecam do Streamer)")
+    print("   O vídeo original é 16:9 (horizontal). Onde fica a câmera do streamer?")
+    print()
+    print("   [1] Canto inferior esquerdo (padrão)")
+    print("   [2] Canto superior esquerdo")
+    print("   [3] Canto inferior direito")
+    print("   [4] Canto superior direito")
+    print("   [5] Meio-direita / acima do minimapa (x=0.772, y=0.450, w=0.222, h=0.242)")
+    print("   [6] Detectar automaticamente com IA (analisa 1 frame via Groq Vision)")
+    print("   [7] Sem webcam (apenas zoom central 9:16 no gameplay)")
+    print()
+
+    while True:
+        try:
+            choice = input("   Escolha uma opção [1-7]: ").strip()
+            if choice in ('1', '2', '3', '4', '5', '6', '7'):
+                break
+            print("   ❌ Opção inválida. Digite 1, 2, 3, 4, 5, 6 ou 7.")
+        except (EOFError, KeyboardInterrupt):
+            print("\n   Cancelado pelo usuário.")
+            return None
+
+    if choice == '7':
+        print("   ✅ Modo: Apenas gameplay (crop central 9:16)")
+        return None
+
+    # Posições predefinidas (coordenadas normalizadas 0.0-1.0: x, y, w, h)
+    # x, y = canto superior esquerdo do crop da webcam
+    # w, h = largura e altura do crop da webcam
+    predefined_positions = {
+        '1': {'name': 'Canto inferior esquerdo', 'x': 0.0, 'y': 0.72, 'w': 0.26, 'h': 0.28},
+        '2': {'name': 'Canto superior esquerdo', 'x': 0.0, 'y': 0.0, 'w': 0.26, 'h': 0.28},
+        '3': {'name': 'Canto inferior direito', 'x': 0.74, 'y': 0.72, 'w': 0.26, 'h': 0.28},
+        '4': {'name': 'Canto superior direito', 'x': 0.74, 'y': 0.0, 'w': 0.26, 'h': 0.28},
+        '5': {'name': 'Meio-direita / acima do minimapa', 'x': 0.772, 'y': 0.450, 'w': 0.222, 'h': 0.242},
+    }
+
+    if choice in predefined_positions:
+        pos = predefined_positions[choice]
+        print(f"   ✅ Modo: Tela dividida com webcam no {pos['name']}")
+        return pos
+
+    # Opção 6: Detecção automática com IA
+    if choice == '6':
+        if not api_key:
+            print("   ⚠️  GROQ_API_KEY não configurada. Fallback para sem webcam.")
+            return None
+        if not video_path:
+            print("   ⚠️  Caminho do vídeo não disponível. Fallback para sem webcam.")
+            return None
+
+        print("   🤖 Detectando posição da webcam com IA (Groq Vision)...")
+        detected_pos = detect_webcam_position_ai(video_path, api_key)
+        if detected_pos:
+            print(f"   ✅ Webcam detectada: x={detected_pos['x']:.3f}, y={detected_pos['y']:.3f}, w={detected_pos['w']:.3f}, h={detected_pos['h']:.3f}")
+            return detected_pos
+        else:
+            print("   ⚠️  IA não encontrou webcam. Fallback para sem webcam.")
+            return None
+
+    return None
+
+
+def detect_webcam_position_ai(video_path, api_key):
+    """
+    Extrai 1 frame do vídeo (no tempo 10% da duração) e usa Groq Vision
+    para detectar a posição da webcam do streamer.
+
+    Retorna dict com x, y, w, h normalizados (0.0-1.0) ou None se não encontrar.
+    """
+    import tempfile
+
+    try:
+        # Obter duração do vídeo
+        video_duration = get_video_duration(video_path)
+        if video_duration <= 0:
+            return None
+
+        # Extrair frame em 10% da duração (evita telas de loading/início)
+        timestamp = video_duration * 0.1
+
+        # Criar arquivo temporário para o frame
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+            frame_path = tmp.name
+
+        # Extrair frame com ffmpeg
+        cmd = [
+            FFMPEG.as_posix(), "-y",
+            "-ss", str(timestamp),
+            "-i", str(video_path),
+            "-vframes", "1",
+            "-q:v", "2",
+            "-vf", "scale=1280:720",
+            frame_path
+        ]
+        ok, _, _ = run_cmd(cmd)
+        if not ok:
+            return None
+
+        try:
+            # Ler e codificar frame em base64
+            with open(frame_path, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode('utf-8')
+        finally:
+            # Limpar arquivo temporário
+            try:
+                os.unlink(frame_path)
+            except:
+                pass
+
+        # Prompt para detecção de webcam
+        prompt = (
+            "Analise esta imagem de um vídeo de gameplay/streamer (16:9). "
+            "Procure pela facecam/webcam do streamer - uma janela retangular menor "
+            "sobreposta ao gameplay, geralmente mostrando o rosto do jogador.\n\n"
+            "Se ENCONTRAR uma facecam/webcam, responda APENAS com JSON:\n"
+            '{"found": true, "x": 0.XX, "y": 0.YY, "w": 0.WW, "h": 0.HH}\n'
+            "Onde x,y são o canto superior esquerdo normalizado (0.0 a 1.0) e w,h são "
+            "largura e altura normalizadas da facecam.\n\n"
+            "Se NÃO ENCONTRAR facecam/webcam visível (apenas gameplay puro, sem câmera do streamer), "
+            'responda APENAS: {"found": false}\n\n'
+            "Não adicione texto extra, markdown ou explicações."
+        )
+
+        content = [{
+            "type": "text",
+            "text": prompt
+        }, {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+        }]
+
+        model = get_vision_model()
+        answer = groq_chat([{"role": "user", "content": content}], api_key, model, temperature=0.1, max_tokens=200)
+
+        if not answer:
+            return None
+
+        result = extract_json(answer)
+        if not result or not isinstance(result, dict):
+            return None
+
+        if not result.get('found', False):
+            return None
+
+        # Validar coordenadas
+        x = float(result.get('x', 0))
+        y = float(result.get('y', 0))
+        w = float(result.get('w', 0))
+        h = float(result.get('h', 0))
+
+        if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0):
+            return None
+
+        # Garantir que o crop não saia dos limites
+        if x + w > 1.0 or y + h > 1.0:
+            return None
+
+        return {'x': x, 'y': y, 'w': w, 'h': h, 'name': 'Detecção automática (IA)'}
+
+    except Exception as e:
+        print(f"   ⚠️  Erro na detecção automática: {e}")
+        return None
+
+
+def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, webcam_pos):
+    """
+    Corta vídeo no modo Gameplay/Streamer (tela dividida) com otimizações de retenção.
+
+    - Se webcam_pos não for None: cria split-screen com vstack
+      * Topo: webcam recortada (crop com coordenadas normalizadas) → scale 1080x620
+      * Base: gameplay central (crop 9:16) → scale 1080x1300
+      * Juntados com vstack = 1080x1920
+    - Se webcam_pos for None: crop central 9:16 + scale 1080x1920
+
+    Otimizações NOVO 2025:
+    - Gancho visual: faixa superior com título de impacto (drawtext) nos primeiros 4s
+    - Corte seco para loop: fade-out rápido 0.2s apenas áudio (sem fade vídeo)
+    - Legendas: 2-3 palavras, centro, negrito, contorno preto 6px
+    - Watermark: logo PNG discreto no canto (se assets/logo.png existir)
+
+    Áudio: original com loudnorm + fade-out rápido 0.2s (apenas áudio)
+    Legendas: .ass centralizada (Alignment=5), MarginV=1100
+
+    webcam_pos pode ser:
+    - None: sem webcam
+    - dict com chaves: x, y, w, h (normalizados 0.0-1.0), name (opcional)
+
+    clip pode conter: hook_title (título de impacto para banner superior)
+    """
+    webcam_name = "Sem webcam (gameplay only)" if webcam_pos is None else webcam_pos.get('name', 'Posição personalizada')
+    hook_title = clip.get('hook_title', '').strip()
+    print(f"\n🎬 Processando corte GAMEPLAY {clip_num}: {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s)")
+    print(f"   Webcam: {webcam_name}")
+    if hook_title:
+        print(f"   🎯 Gancho: {hook_title}")
+    if webcam_pos and 'x' in webcam_pos:
+        print(f"   Coordenadas: x={webcam_pos['x']:.3f}, y={webcam_pos['y']:.3f}, w={webcam_pos['w']:.3f}, h={webcam_pos['h']:.3f}")
+
+    # Criar legendas .ass sincronizadas com as falas
+    ass_path = TEMP_DIR / f"gameplay_clip_{clip_num}_subs.ass"
+    if not create_ass_subtitle_gameplay(segments, clip['start'], clip['end'], ass_path):
+        print("⚠️  Falha ao criar legendas, exportando sem...")
+        ass_path = None
+
+    # Construir filtro de vídeo para o modo gameplay
+    # NOVO: Fade rápido apenas no áudio (0.2s), sem fade no vídeo para incentivar loop
+    v_fade, a_fade = fade_out_filters_gameplay(clip['duration'])
+    v_fade = f",{v_fade}" if v_fade else ""
+    af_chain = "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary" + (f",{a_fade}" if a_fade else "")
+
+    ffmpeg_cmd = FFMPEG.as_posix()
+
+    # Verificar se existe logo/watermark
+    watermark_path = Path(GAMEPLAY_WATERMARK_PATH)
+    has_watermark = watermark_path.exists()
+    if has_watermark:
+        print(f"   🏷️  Watermark: {watermark_path}")
+
+    if webcam_pos is None:
+        # Modo sem webcam: apenas gameplay - crop central 9:16
+        vf = (
+            f"crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
+            f"scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}"
+        )
+
+        # Adicionar gancho visual (banner superior) se houver hook_title
+        if hook_title:
+            # drawtext: faixa amarela vibrante no topo, texto preto negrito centralizado
+            # y=140 (terço superior), altura ~120px, duração 4s
+            escaped_title = hook_title.replace("'", "\\'").replace(":", "\\:")
+            vf += (f",drawtext=text='{escaped_title}':"
+                   f"fontfile='C\\:/Windows/Fonts/arialbd.ttf':"
+                   f"fontsize=52:fontcolor=black:fontcolor_expr=black:"
+                   f"box=1:boxcolor=yellow@0.95:boxborderw=20:"
+                   f"x=(w-text_w)/2:y={GAMEPLAY_HOOK_BANNER_Y}:"
+                   f"enable='lt(t,{GAMEPLAY_HOOK_BANNER_DURATION})'")
+
+        # Adicionar watermark se existir
+        if has_watermark:
+            vf += f",movie='{watermark_path.as_posix()}'[wm];[in][wm]overlay=20:20[out]"
+
+        if ass_path and ass_path.exists():
+            vf += f",subtitles='{ass_path.as_posix()}'"
+        vf += v_fade
+
+        cmd = [
+            ffmpeg_cmd, "-y",
+            "-ss", str(clip['start']),
+            "-t", str(clip['duration']),
+            "-i", str(video_path),
+            "-vf", vf,
+            "-af", af_chain,
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(output_path)
+        ]
+    else:
+        # Tela dividida com webcam (usando coordenadas normalizadas do dict)
+        wc_x = f"iw*{webcam_pos['x']:.6f}"
+        wc_y = f"ih*{webcam_pos['y']:.6f}"
+        wc_w = f"iw*{webcam_pos['w']:.6f}"
+        wc_h = f"ih*{webcam_pos['h']:.6f}"
+
+        # Filter complex para tela dividida
+        # [0:v]crop=wc_w:wc_h:wc_x:wc_y,scale=1080:620:force_original_aspect_ratio=increase,crop=1080:620[cam]
+        # [0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1300:force_original_aspect_ratio=increase,crop=1080:1300[game]
+        # [cam][game]vstack=inputs=2[vout]
+        filter_complex = (
+            f"[0:v]crop={wc_w}:{wc_h}:{wc_x}:{wc_y},"
+            f"scale={VERTICAL_WIDTH}:620:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:620[cam];"
+            f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
+            f"scale={VERTICAL_WIDTH}:1300:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:1300[game];"
+            f"[cam][game]vstack=inputs=2[vout]"
+        )
+
+        # Adicionar gancho visual (banner superior) se houver hook_title
+        if hook_title:
+            escaped_title = hook_title.replace("'", "\\'").replace(":", "\\:")
+            filter_complex += (
+                f";[vout]drawtext=text='{escaped_title}':"
+                f"fontfile='C\\:/Windows/Fonts/arialbd.ttf':"
+                f"fontsize=52:fontcolor=black:"
+                f"box=1:boxcolor=yellow@0.95:boxborderw=20:"
+                f"x=(w-text_w)/2:y={GAMEPLAY_HOOK_BANNER_Y}:"
+                f"enable='lt(t,{GAMEPLAY_HOOK_BANNER_DURATION})'[vhook]"
+            )
+            map_v = "[vhook]"
+        else:
+            filter_complex += f";[vout]null[vhook]"
+            map_v = "[vhook]"
+
+        # Adicionar watermark se existir
+        if has_watermark:
+            filter_complex += f";movie='{watermark_path.as_posix()}'[wm];[vhook][wm]overlay=20:20[vfinal]"
+            map_v = "[vfinal]"
+
+        # Adicionar legendas
+        if ass_path and ass_path.exists():
+            filter_complex += f";[vfinal]subtitles='{ass_path.as_posix()}'{v_fade}[vfinal2]"
+            map_v = "[vfinal2]"
+
+        cmd = [
+            ffmpeg_cmd, "-y",
+            "-ss", str(clip['start']),
+            "-t", str(clip['duration']),
+            "-i", str(video_path),
+            "-filter_complex", filter_complex,
+            "-map", map_v,
+            "-map", "0:a?",
+            "-af", af_chain,
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(output_path)
+        ]
+
+    print(f"⚙️  Executando ffmpeg (modo gameplay otimizado)...")
+    ok, _, err = run_cmd(cmd)
+
+    if not ok:
+        print(f"❌ Erro no ffmpeg: {err[:500]}")
+        # Fallback simplificado
+        return cut_simple_gameplay(video_path, clip, ass_path, output_path, clip_num, webcam_pos)
+
+    print(f"✅ Corte gameplay salvo: {output_path}")
+    return True
+
+
+def cut_simple_gameplay(video_path, clip, ass_path, output_path, clip_num, webcam_pos):
+    """Versão simplificada do modo gameplay sem filter_complex (fallback)."""
+    print(f"🔄 Tentando versão simplificada (gameplay)...")
+
+    if webcam_pos is None:
+        # Apenas gameplay central
+        vf = f"crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}"
+    else:
+        # Simplificado: usa scale+pad com blur (não é split-screen real, mas funciona)
+        vf = f"scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:force_original_aspect_ratio=decrease,pad={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black"
+
+    if ass_path and ass_path.exists():
+        vf += f",subtitles='{ass_path.as_posix()}'"
+
+    v_fade, a_fade = fade_out_filters(clip['duration'])
+    if v_fade:
+        vf += f",{v_fade}"
+
+    af_chain = "loudnorm=I=-16:TP=-1.5:LRA=11" + (f",{a_fade}" if a_fade else "")
+
+    ffmpeg_cmd = FFMPEG.as_posix()
+    cmd = [
+        ffmpeg_cmd, "-y",
+        "-ss", str(clip['start']),
+        "-t", str(clip['duration']),
+        "-i", str(video_path),
+        "-vf", vf,
+        "-af", af_chain,
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "20",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(output_path)
+    ]
+
+    ok, _, err = run_cmd(cmd)
+    if ok:
+        print(f"✅ Corte salvo (simplificado): {output_path}")
+        return True
+    else:
+        print(f"❌ Falha total: {err[:500]}")
+        return False
+
+
+def create_ass_subtitle_gameplay(segments, clip_start, clip_end, output_path):
+    """
+    Cria arquivo ASS para modo gameplay.
+    Legendas posicionadas na linha divisória entre webcam e gameplay: MarginV=1240
+    (620px topo + 620px até o meio da base = 1240px do topo em 1080x1920)
+    Fonte negrito, borda preta, destaque de cor.
+    """
+    # Filtrar segmentos que caem dentro do clip
+    clip_segments = []
+    for seg in segments:
+        if seg['end'] <= clip_start:
+            continue
+        if seg['start'] >= clip_end:
+            break
+        # Ajustar tempos relativos ao início do clip
+        adj_start = max(0, seg['start'] - clip_start)
+        adj_end = min(clip_end - clip_start, seg['end'] - clip_start)
+        if adj_end > adj_start and seg['text'].strip():
+            clip_segments.append({
+                'start': adj_start,
+                'end': adj_end,
+                'text': seg['text'].strip()
+            })
+
+    if not clip_segments:
+        return False
+
+    # Agrupar em blocos curtos de 2-3 palavras (ritmo dinâmico TikTok/Shorts)
+    WORDS_PER_CHUNK = GAMEPLAY_SUBTITLE_WORDS_PER_CHUNK
+    chunks = []
+
+    for seg in clip_segments:
+        words = seg['text'].split()
+        if not words:
+            continue
+        seg_duration = seg['end'] - seg['start']
+        word_duration = seg_duration / len(words) if words else 0
+
+        for i in range(0, len(words), WORDS_PER_CHUNK):
+            chunk_words = words[i:i + WORDS_PER_CHUNK]
+            chunk_start = seg['start'] + i * word_duration
+            chunk_end = min(seg['start'] + (i + len(chunk_words)) * word_duration, seg['end'])
+            chunks.append({
+                'start': chunk_start,
+                'end': chunk_end,
+                'text': ' '.join(chunk_words)
+            })
+
+    if not chunks:
+        return False
+
+    # Zero sobreposição
+    for i in range(len(chunks) - 1):
+        if chunks[i]['end'] > chunks[i + 1]['start']:
+            chunks[i]['end'] = chunks[i + 1]['start']
+
+    chunks = [c for c in chunks if c['end'] - c['start'] >= 0.3]
+
+    # Estilo ASS para gameplay: Legendas centralizadas (Alignment=5), 2-3 palavras por bloco
+    # Fonte grande, negrito, contorno preto forte (5px), cor amarela vibrante
+    # Position: centro da tela (Alignment=5 = middle-center), MarginV ajustado para ficar na divisória
+    ass_header = f"""[Script Info]
+Title: Cortes Gameplay - Áudio Original
+ScriptType: v4.00+
+PlayResX: {VERTICAL_WIDTH}
+PlayResY: {VERTICAL_HEIGHT}
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,72,&H00FFFF00,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,3,5,40,40,1100,1
+Style: Highlight,Arial,72,&H0000FF00,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,3,5,40,40,1100,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    def format_ass_time(seconds):
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = seconds % 60
+        centiseconds = int((secs - int(secs)) * 100)
+        return f"{hours}:{minutes:02d}:{int(secs):02d}.{centiseconds:02d}"
+
+    events = []
+    for chunk in chunks:
+        start_str = format_ass_time(chunk['start'])
+        end_str = format_ass_time(chunk['end'])
+        text = chunk['text'].strip()
+        # Alternar entre estilo Default (amarelo) e Highlight (verde limão) para ênfase visual
+        style = "Default"  # Simplificado: usar apenas Default para consistência
+        events.append(f"Dialogue: 0,{start_str},{end_str},{style},,0,0,0,,{text}")
+
+    ass_content = ass_header + "\n".join(events)
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(ass_content)
+
+    return True
+
+
 def get_video_duration(video_path):
     """Obtém duração do vídeo via ffmpeg (fallback sem ffprobe)."""
     # `ffmpeg -i` sem arquivo de saída retorna erro, mas imprime a duração no stderr.
@@ -2011,8 +2768,8 @@ def get_video_duration(video_path):
 def main():
     parser = argparse.ArgumentParser(description="Gerador de cortes virais para TikTok/YouTube Shorts")
     parser.add_argument("url", help="URL do vídeo do YouTube")
-    parser.add_argument("--audio", choices=["original", "ia"], default="original",
-                        help="Modo de áudio: original (padrão) ou ia (narração com edge-tts)")
+    parser.add_argument("--audio", choices=["original", "ia", "gameplay"], default="original",
+                        help="Modo de áudio: original (padrão), ia (narração com edge-tts) ou gameplay (tela dividida streamer)")
     args = parser.parse_args()
 
     url = args.url
@@ -2020,7 +2777,12 @@ def main():
 
     print("=" * 60)
     print("✂️  GERADOR DE CORTES VIRAIS - TikTok / YouTube Shorts")
-    print(f"🔊 Modo de áudio: {'Narração IA (edge-tts)' if audio_mode == 'ia' else 'Áudio original'}")
+    audio_mode_display = {
+        'original': 'Áudio original',
+        'ia': 'Narração IA (edge-tts)',
+        'gameplay': 'Gameplay / Streamer (Tela Dividida + Áudio Original)'
+    }
+    print(f"🔊 Modo de áudio: {audio_mode_display.get(audio_mode, audio_mode)}")
     print("=" * 60)
 
     # Verificar dependências
@@ -2120,6 +2882,90 @@ def main():
         print("=" * 60)
 
         if generated_paths:
+            print("\n📋 Próximos passos:")
+            print("  1. Revise os cortes na pasta 'cortes_prontos/'")
+            print("  2. Adicione hashtags e descrição para TikTok/Shorts")
+            print("  3. Publique nos melhores horários (18-21h costuma funcionar bem)")
+        return
+
+    # === FLUXO ESPECIAL: MODO GAMEPLAY / STREAMER (TELA DIVIDIDA) ===
+    if audio_mode == "gameplay":
+        print("\n" + "=" * 60)
+        print("🎮 MODO GAMEPLAY / STREAMER (TELA DIVIDIDA + ÁUDIO ORIGINAL)")
+        print("   Fluxo: Transcrição → IA analisa faixas temporais → Seleção de clímax → Split-screen → FFmpeg")
+        print("=" * 60)
+
+        # Perguntar quantos cortes gerar
+        print(f"\n📊 Quantidade de cortes (padrão: {GAMEPLAY_DEFAULT_CLIPS}, min: {GAMEPLAY_MIN_CLIPS}, max: {GAMEPLAY_MAX_CLIPS}):")
+        while True:
+            try:
+                num_clips_input = input(f"   Quantos cortes deseja gerar? [{GAMEPLAY_DEFAULT_CLIPS}]: ").strip()
+                if not num_clips_input:
+                    num_clips = GAMEPLAY_DEFAULT_CLIPS
+                    break
+                num_clips = int(num_clips_input)
+                if GAMEPLAY_MIN_CLIPS <= num_clips <= GAMEPLAY_MAX_CLIPS:
+                    break
+                print(f"   ❌ Digite um número entre {GAMEPLAY_MIN_CLIPS} e {GAMEPLAY_MAX_CLIPS}.")
+            except (ValueError, EOFError, KeyboardInterrupt):
+                print("\n   Cancelado ou entrada inválida. Usando padrão.")
+                num_clips = GAMEPLAY_DEFAULT_CLIPS
+                break
+        print(f"   ✅ Serão gerados {num_clips} cortes")
+
+        # Perguntar posição da webcam (passa video_path e api_key para detecção automática)
+        webcam_pos = ask_webcam_position(video_path, groq_api_key)
+        if webcam_pos is None:
+            print("❌ Opção inválida. Cancelando.")
+            sys.exit(1)
+
+        # Forçar áudio original no modo gameplay
+        audio_mode = "original"
+
+        # Encontrar melhores clips usando IA distribuída pelo vídeo
+        if groq_api_key:
+            clips = find_best_clips_gameplay_ai(segments, video_duration, groq_api_key, num_clips)
+        else:
+            print("   ⚠️  Sem GROQ_API_KEY, usando método tradicional de sliding window...")
+            clips = find_best_clips(segments, video_duration, num_clips)
+
+        if not clips:
+            print("❌ Não foi possível identificar trechos viáveis.")
+            sys.exit(1)
+
+        print(f"\n🎯 {len(clips)} melhores trechos identificados:")
+        for i, clip in enumerate(clips, 1):
+            print(f"  {i}. {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s) | Score: {clip['score']:.1f}")
+            print(f"     Motivo: {clip.get('reason', 'N/A')}")
+            print(f"     Texto: {clip['text'][:120]}...")
+
+        # Processar cada corte no modo gameplay
+        print("\n" + "=" * 60)
+        print("🎬 INICIANDO EXPORTAÇÃO DOS CORTES (GAMEPLAY)")
+        print("=" * 60)
+
+        success_count = 0
+        for i, clip in enumerate(clips, 1):
+            safe_text = clean_filename(clip['text'][:50])
+            output_name = f"corte_gameplay_{i}_{safe_text}.mp4"
+            output_path = OUTPUT_DIR / output_name
+
+            if cut_and_export_gameplay(video_path, clip, segments, output_path, i, webcam_pos):
+                success_count += 1
+
+        # Limpeza
+        print("\n🧹 Limpando arquivos temporários...")
+        import shutil
+        if TEMP_DIR.exists():
+            shutil.rmtree(TEMP_DIR)
+
+        # Resumo final
+        print("\n" + "=" * 60)
+        print(f"✅ CONCLUÍDO (Gameplay): {success_count}/{len(clips)} cortes gerados com sucesso")
+        print(f"📁 Pasta de saída: {OUTPUT_DIR.absolute()}")
+        print("=" * 60)
+
+        if success_count > 0:
             print("\n📋 Próximos passos:")
             print("  1. Revise os cortes na pasta 'cortes_prontos/'")
             print("  2. Adicione hashtags e descrição para TikTok/Shorts")
