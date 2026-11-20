@@ -934,7 +934,7 @@ def load_subtitles_with_fallback(subtitle_path, video_path, temp_dir, api_key=No
     return [], "visual_gameplay", extra_data
 
 
-def run_cmd(cmd, cwd=None):
+def run_cmd(cmd, cwd=None, timeout: int | None = None):
     """Executa comando (lista de argumentos, sem shell) e retorna (sucesso, stdout, stderr).
 
     Sem shell=True, a URL e os nomes de arquivo nunca são interpretados pelo cmd.exe
@@ -942,8 +942,13 @@ def run_cmd(cmd, cwd=None):
     """
     try:
         result = subprocess.run(cmd, capture_output=True, text=True,
-                                cwd=cwd, encoding='utf-8', errors='replace')
+                                cwd=cwd, encoding='utf-8', errors='replace', timeout=timeout)
         return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
+    except subprocess.TimeoutExpired as e:
+        # Captura stdout/stderr parciais se disponíveis
+        stdout = e.stdout.decode('utf-8', errors='replace') if e.stdout else ""
+        stderr = e.stderr.decode('utf-8', errors='replace') if e.stderr else str(e)
+        return False, stdout.strip(), stderr.strip()
     except Exception as e:
         return False, "", str(e)
 
