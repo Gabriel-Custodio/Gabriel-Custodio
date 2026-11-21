@@ -269,7 +269,7 @@ def transcribe_audio_groq(audio_path, api_key):
                 'timestamp_granularities[]': 'word',
                 'timestamp_granularities[]': 'segment',
                 'language': 'pt',
-                'prompt': 'Transcrição literal da fala do streamer brasileiro jogando GTA, sem traduzir nem inventar palavras.'
+                'prompt': 'Transcrição apenas da fala em português do streamer brasileiro. Ignore falas do jogo em inglês e efeitos sonoros.'
             }
             headers = {'Authorization': f'Bearer {api_key}'}
 
@@ -2783,6 +2783,119 @@ def create_hook_banner_image(titulo_gancho: str, pergunta_cta: str, output_path:
         return False
 
 
+# Palavras típicas em inglês para filtrar (rádio da polícia, NPCs, etc.)
+ENGLISH_STOPWORDS = {
+    'the', 'and', 'you', 'your', 'is', 'are', 'to', 'of', 'in', 'on', 'for',
+    'with', 'this', 'that', 'police', 'suspect', 'driving', 'report', 'advised',
+    'officer', 'unit', 'dispatch', 'code', 'respond', 'backup', 'emergency',
+    'vehicle', 'pursuit', 'arrest', 'crime', 'scene', 'investigation', 'witness',
+    'statement', 'evidence', 'detective', 'sergeant', 'lieutenant', 'captain',
+    'call', 'calling', 'called', 'calls', 'go', 'going', 'went', 'gone',
+    'come', 'coming', 'came', 'get', 'getting', 'got', 'gotten',
+    'take', 'taking', 'took', 'taken', 'make', 'making', 'made',
+    'do', 'doing', 'did', 'done', 'say', 'saying', 'said',
+    'see', 'seeing', 'saw', 'seen', 'know', 'knowing', 'knew', 'known',
+    'think', 'thinking', 'thought', 'want', 'wanting', 'wanted',
+    'need', 'needing', 'needed', 'use', 'using', 'used',
+    'find', 'finding', 'found', 'give', 'giving', 'gave', 'given',
+    'tell', 'telling', 'told', 'ask', 'asking', 'asked',
+    'work', 'working', 'worked', 'seem', 'seeming', 'seemed',
+    'feel', 'feeling', 'felt', 'try', 'trying', 'tried',
+    'leave', 'leaving', 'left', 'call', 'calling', 'called'
+}
+
+# Termos curtos comuns de gameplay que NÃO devem ser filtrados
+GAMEPLAY_ALLOWED = {'gg', 'clip', 'fps', 'hp', 'mp', 'xp', 'lvl', 'lvlup',
+                    'op', 'nerf', 'buff', 'meta', 'build', 'combo', 'kd',
+                    'wp', 'gl', 'hf', 'ez', 'gr', 'ff', 'afk', 'dc', 'lag'}
+
+
+def filter_portuguese_segments(segments, min_segment_duration=0.5, max_segment_duration=10.0):
+    """
+    Filtra segmentos para manter APENAS fala em português do streamer.
+
+    Remove:
+    - Palavras/segmentos com termos típicos em inglês (rádio da polícia, NPCs)
+    - Segmentos muito longos sem fala real (provável ruído/alucinação)
+    - Segmentos muito curtos (ruído)
+
+    Mantém apenas trechos reais da fala do streamer centralizados na faixa vermelha.
+
+    Args:
+        segments: Lista de segmentos com 'start', 'end', 'text', opcional 'words'
+        min_segment_duration: Duração mínima de segmento válido (segundos)
+        max_segment_duration: Duração máxima de segmento válido (segundos)
+
+    Returns:
+        Lista de segmentos filtrados
+    """
+    if not segments:
+        return []
+
+    filtered = []
+
+    for seg in segments:
+        text = seg['text'].strip()
+        if not text:
+            continue
+
+        words = text.split()
+        if not words:
+            continue
+
+        seg_duration = seg['end'] - seg['start']
+
+        # Filtrar segmentos muito curtos (ruído) ou muito longos (alucinação/legenda congelada)
+        if seg_duration < min_segment_duration or seg_duration > max_segment_duration:
+            continue
+
+        # Filtrar palavras em inglês
+        filtered_words = []
+        for w in words:
+            w_lower = w.lower().strip('.,!?;:')
+            # Permite termos de gameplay curtos
+            if w_lower in GAMEPLAY_ALLOWED:
+                filtered_words.append(w)
+            # Remove palavras típicas em inglês
+            elif w_lower in ENGLISH_STOPWORDS:
+                continue
+            # Heurística: palavras que começam com maiúscula e parecem inglês (ex: "Police", "Suspect")
+            elif len(w) > 2 and w[0].isupper() and w.isalpha() and w_lower in ENGLISH_STOPWORDS:
+                continue
+            else:
+                filtered_words.append(w)
+
+        # Se sobraram menos de 30% das palavras originais, descarta o segmento
+        if len(filtered_words) < max(1, len(words) * 0.3):
+            continue
+
+        # Reconstroi o texto filtrado
+        filtered_text = ' '.join(filtered_words)
+
+        # Verificar se o texto filtrado ainda tem conteúdo em português
+        # Heurística: pelo menos uma palavra com acento ou cedilha, ou palavras comuns PT
+        pt_indicators = sum(1 for w in filtered_words if any(c in w.lower() for c in 'ãõâêôçáéíóúà'))
+        common_pt_words = {'que', 'de', 'da', 'do', 'na', 'no', 'em', 'um', 'uma', 'para', 'com', 'não', 'é', 'eu', 'você', 'ele', 'ela', 'nós', 'vocês', 'eles', 'elas', 'meu', 'minha', 'seu', 'sua', 'nosso', 'nossa', 'o', 'a', 'os', 'as', 'e', 'ou', 'mas', 'por', 'como', 'quando', 'onde', 'porque', 'porquê', 'por que'}
+        common_pt_count = sum(1 for w in filtered_words if w.lower() in common_pt_words)
+
+        # Se não tem indicadores de português e tem muitas palavras suspeitas, descarta
+        if pt_indicators == 0 and common_pt_count == 0 and len(filtered_words) > 3:
+            # Verifica se parece inglês (muitas consoantes, estrutura típica)
+            english_like = sum(1 for w in filtered_words if len(w) > 2 and w[0].isupper() and w.isalpha())
+            if english_like >= len(filtered_words) * 0.5:
+                continue
+
+        filtered.append({
+            'start': seg['start'],
+            'end': seg['end'],
+            'text': filtered_text,
+            'words': seg.get('words')  # Preserva word-level timestamps se existirem
+        })
+
+    print(f"   🔍 Filtro anti-inglês: {len(segments)} -> {len(filtered)} segmentos")
+    return filtered
+
+
 def create_karaoke_ass_subtitle(segments, clip_start, clip_end, clip_duration, output_path):
     """
     Cria legenda .ass estilo KARAOKÊ/DESTAQUE para a área do gameplay (base):
@@ -2799,6 +2912,15 @@ def create_karaoke_ass_subtitle(segments, clip_start, clip_end, clip_duration, o
     """
     if not segments:
         return False
+
+    # ===== FILTRO ANTI-INGLÊS / ANTI-OUTRO-IDIOMA =====
+    # Remove palavras/segmentos em inglês (rádio da polícia, NPCs) e ruído/alucinação
+    # Mantém apenas trechos reais da fala do streamer em português
+    segments = filter_portuguese_segments(segments)
+    if not segments:
+        print("   ⚠️  Nenhum segmento em português válido após filtro")
+        return False
+    # =================================================
 
     # Agrupa em chunks de CLIPFLOW_KARAOKE_WORDS_PER_CHUNK palavras
     WORDS_PER_CHUNK = CLIPFLOW_KARAOKE_WORDS_PER_CHUNK
@@ -3570,6 +3692,18 @@ def create_ass_subtitle_gameplay(segments, clip_start, clip_end, output_path):
     (620px topo + 620px até o meio da base = 1240px do topo em 1080x1920)
     Fonte negrito, borda preta, destaque de cor.
     """
+    if not segments:
+        return False
+
+    # ===== FILTRO ANTI-INGLÊS / ANTI-OUTRO-IDIOMA =====
+    # Remove palavras/segmentos em inglês (rádio da polícia, NPCs) e ruído/alucinação
+    # Mantém apenas trechos reais da fala do streamer em português
+    segments = filter_portuguese_segments(segments)
+    if not segments:
+        print("   ⚠️  Nenhum segmento em português válido após filtro")
+        return False
+    # =================================================
+
     # Filtrar segmentos que caem dentro do clip
     clip_segments = []
     for seg in segments:
