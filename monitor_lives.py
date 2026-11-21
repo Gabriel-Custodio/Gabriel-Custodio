@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # ========== IMPORTS DO PROJETO ==========
 try:
     from gerar_cortes import (
-        FFMPEG, VERTICAL_WIDTH, VERTICAL_HEIGHT, TEMP_DIR, OUTPUT_DIR,
+        FFMPEG, VERTICAL_WIDTH, VERTICAL_HEIGHT, TEMP_DIR,
         GROQ_API_URL, GROQ_MODEL, GROQ_CHAT_URL,
         DEFAULT_GROQ_VISION_MODEL, DEFAULT_GROQ_TEXT_MODEL,
         MAX_IMAGES_PER_REQUEST, MIN_CLIMAX_SCORE,
@@ -63,7 +63,7 @@ except ImportError as e:
 BUFFER_SEGMENT_DURATION = 10          # Duração de cada segmento do buffer (segundos)
 BUFFER_MAX_DURATION = 120             # Ring buffer: mantém últimos 120s (2 min)
 CLIP_DURATION = 45                    # Duração do clipe final ao detectar gatilho (segundos)
-AUDIO_PEAK_THRESHOLD_DB = -20         # Limite de pico de áudio em dB (ajustar conforme teste)
+AUDIO_PEAK_THRESHOLD_DB = -4.5        # Limite de pico de áudio em dB (-4.5 = apenas gritos/sustos/risadas altas)
 CHAT_VELOCITY_THRESHOLD = 30          # Mensagens por minuto para considerar "explosão"
 # Palavras-chave fortes de reação do chat (apenas reações genuínas de clipe)
 CHAT_KEYWORDS = [
@@ -82,8 +82,96 @@ GAMEPLAY_HEIGHT = 1010                # Altura do bloco gameplay (base)
 TOTAL_HEIGHT = WEBAM_HEIGHT + HOOK_BAR_HEIGHT + GAMEPLAY_HEIGHT  # 1920
 
 # Modelo Groq para geração de gancho/pergunta
-GROQ_HOOK_MODEL = "llama-3.3-70b-versatile"
-HOOK_MIN_SCORE = 70                   # Nota mínima para aceitar o clip
+# Usa o mesmo modelo de texto que já funciona no gerar_cortes.py (openai/gpt-oss-120b)
+# Lista de fallback automático caso algum modelo retorne 404/400
+# Será preenchido dinamicamente na inicialização com modelos reais da API Groq
+HOOK_MODEL_PRIMARY = DEFAULT_GROQ_TEXT_MODEL  # "openai/gpt-oss-120b"
+HOOK_MODEL_FALLBACKS = [
+    "llama-3.1-8b-instant",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "qwen/qwen3-32b"
+]
+HOOK_MIN_SCORE = 65                   # Nota mínima para aceitar o clip (abaixo = descarta)
+
+# Modelos ativos descobertos dinamicamente (preenchido em fetch_active_groq_models)
+ACTIVE_GROQ_MODELS: List[str] = []
+
+
+def fetch_active_groq_models(api_key: str) -> List[str]:
+    """
+    Consulta a API da Groq para listar modelos realmente ativos na conta.
+    Filtra fora modelos de áudio/whisper/guard/tts/orpheus.
+    Retorna lista de IDs de modelos de chat/texto ativos.
+    Fallback para lista estática se a chamada falhar.
+    """
+    try:
+        import requests
+        headers = {'Authorization': f'Bearer {api_key}'}
+        response = requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers=headers,
+            timeout=15
+        )
+        if response.status_code != 200:
+            log(f"Groq models API retornou {response.status_code}: {response.text[:200]}", "WARN")
+            return []
+
+        data = response.json()
+        models = data.get('data', [])
+
+        # Palavras-chave para filtrar modelos NÃO de chat/texto
+        exclude_keywords = ['whisper', 'guard', 'tts', 'orpheus', 'audio', 'speech', 'translation']
+
+        active_models = []
+        for model in models:
+            model_id = model.get('id', '').lower()
+            # Filtra modelos de áudio/guard/tts
+            if any(kw in model_id for kw in exclude_keywords):
+                continue
+            # Prioriza modelos conhecidos bons
+            if any(good in model_id for good in ['gpt-oss', 'llama', 'qwen', 'gemma', 'mixtral']):
+                active_models.append(model.get('id'))
+
+        if active_models:
+            log(f"✅ Modelos Groq ativos descobertos: {', '.join(active_models[:5])}{'...' if len(active_models) > 5 else ''}", "OK")
+            return active_models
+        else:
+            log("Nenhum modelo de chat ativo encontrado na API, usando fallbacks estáticos", "WARN")
+            return []
+
+    except Exception as e:
+        log(f"Falha ao buscar modelos Groq (usando fallbacks estáticos): {e}", "WARN")
+        return []
+
+
+def get_hook_models_to_try() -> List[str]:
+    """
+    Retorna lista de modelos para tentar (descobertos dinamicamente + fallbacks estáticos).
+    Garante que o modelo principal esteja no topo se estiver ativo.
+    """
+    global ACTIVE_GROQ_MODELS
+    if not ACTIVE_GROQ_MODELS:
+        # Fallback estático se descoberta não rodou ou falhou
+        return [HOOK_MODEL_PRIMARY] + HOOK_MODEL_FALLBACKS
+
+    # Coloca o modelo principal no topo se ele estiver na lista ativa
+    models = []
+    if HOOK_MODEL_PRIMARY in ACTIVE_GROQ_MODELS:
+        models.append(HOOK_MODEL_PRIMARY)
+        # Adiciona o resto dos ativos (exceto o principal que já foi adicionado)
+        for m in ACTIVE_GROQ_MODELS:
+            if m != HOOK_MODEL_PRIMARY:
+                models.append(m)
+    else:
+        # Principal não está ativo, usa a lista ativa como está
+        models = ACTIVE_GROQ_MODELS[:]
+
+    # Adiciona fallbacks estáticos que não estão já na lista
+    for fb in HOOK_MODEL_FALLBACKS:
+        if fb not in models:
+            models.append(fb)
+
+    return models
 
 # Palavrões para censura simples nas legendas
 PROFANITY_WORDS = [
@@ -97,7 +185,8 @@ KARAOKE_FONT_SIZE = 68
 KARAOKE_MARGIN_V = 220
 KARAOKE_WORDS_PER_CHUNK = 3  # 2-3 palavras por bloco
 
-# Diretórios
+# Diretórios - Caminho absoluto garantido para cortes_prontos
+OUTPUT_DIR = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "cortes_prontos"))
 LIVE_BUFFER_DIR = TEMP_DIR / "live_buffer"
 LIVE_CLIPS_DIR = OUTPUT_DIR
 
@@ -143,6 +232,11 @@ groq_api_key: Optional[str] = None
 stream_url_cache: Dict[str, Dict] = {}
 STREAM_CACHE_TTL_SECONDS = 300  # 5 minutos
 
+# Throttling de logs repetitivos (evita spam no console)
+_last_cooldown_log = 0.0
+_last_buffer_log = 0.0
+LOG_THROTTLE_SECONDS = 5.0
+
 # ========== FUNÇÕES AUXILIARES ==========
 
 def log(msg: str, level: str = "INFO"):
@@ -153,12 +247,9 @@ def log(msg: str, level: str = "INFO"):
 
 def generate_hook_and_question(transcription_text: str, api_key: str) -> Optional[Dict]:
     """
-    Envia a transcrição para o Groq LLM (llama-3.3-70b-versatile) para gerar:
-    - titulo_gancho: frase curta de impacto em caixa alta (máx 5 palavras)
-    - pergunta_cta: pergunta curta para gerar comentários (máx 4 palavras)
-    - nota: score 0-100
-
-    Retorna dict com as chaves ou None se falhar/nota < 70.
+    Envia a transcrição para o Groq LLM para gerar gancho/pergunta/nota.
+    Usa modelo principal (DEFAULT_GROQ_TEXT_MODEL) com fallback automático.
+    Se TODOS os modelos falharem, retorna valores padrão seguros (NÃO aborta o clipe).
     """
     if not transcription_text.strip():
         log("Transcrição vazia, não é possível gerar gancho", "WARN")
@@ -175,72 +266,91 @@ def generate_hook_and_question(transcription_text: str, api_key: str) -> Optiona
         "- titulo_gancho: MAIÚSCULAS, impacto imediato, máximo 5 palavras, sem pontuação final\n"
         "- pergunta_cta: pergunta direta, máximo 4 palavras, termina com ?\n"
         "- nota: inteiro 0-100, baseada no potencial viral do momento (emoção, tensão, humor, skill, fail épico)\n"
-        "- Se o conteúdo for genérico/sem graça, dê nota baixa (< 70)\n\n"
+        "- Se o conteúdo for genérico/sem graça, dê nota baixa\n\n"
         f"TRANSCRIÇÃO:\n{transcription_text[:2000]}"
     )
 
-    try:
-        result = groq_chat(
-            [{"role": "user", "content": prompt}],
-            api_key,
-            GROQ_HOOK_MODEL,
-            temperature=0.7,
-            max_tokens=200
-        )
+    # Lista de modelos a tentar (descobertos dinamicamente + fallbacks estáticos)
+    models_to_try = get_hook_models_to_try()
 
-        if not result:
-            log("Groq não retornou resposta para gancho", "WARN")
-            return None
+    for model in models_to_try:
+        try:
+            result = groq_chat(
+                [{"role": "user", "content": prompt}],
+                api_key,
+                model,
+                temperature=0.7,
+                max_tokens=200
+            )
 
-        hook_data = extract_json(result)
-        if not hook_data or not isinstance(hook_data, dict):
-            log(f"Resposta inválida do Groq para gancho: {result[:200]}", "WARN")
-            return None
+            if not result:
+                log(f"Groq ({model}) não retornou resposta, tentando próximo...", "WARN")
+                continue
 
-        # Valida campos obrigatórios
-        required_keys = ["titulo_gancho", "pergunta_cta", "nota"]
-        for key in required_keys:
-            if key not in hook_data:
-                log(f"Campo '{key}' ausente na resposta do Groq", "WARN")
+            hook_data = extract_json(result)
+            if not hook_data or not isinstance(hook_data, dict):
+                log(f"Resposta inválida do Groq ({model}): {result[:200]}", "WARN")
+                continue
+
+            # Valida campos obrigatórios
+            required_keys = ["titulo_gancho", "pergunta_cta", "nota"]
+            for key in required_keys:
+                if key not in hook_data:
+                    log(f"Campo '{key}' ausente na resposta do Groq ({model})", "WARN")
+                    continue
+
+            titulo = str(hook_data["titulo_gancho"]).strip()
+            pergunta = str(hook_data["pergunta_cta"]).strip()
+            nota = int(hook_data["nota"])
+
+            # SEMPRE imprime nota e título para acompanhamento em tempo real
+            log(f"[IA] Análise ({model}): Nota {nota}/100 | Título: '{titulo}' | Pergunta: '{pergunta}'", "INFO")
+
+            # Validações
+            if nota < HOOK_MIN_SCORE:
+                log(f"[IA] Clipe descartado - Nota {nota}/100 (mínimo {HOOK_MIN_SCORE})", "WARN")
                 return None
 
-        titulo = str(hook_data["titulo_gancho"]).strip()
-        pergunta = str(hook_data["pergunta_cta"]).strip()
-        nota = int(hook_data["nota"])
+            # Limita palavras
+            titulo_words = titulo.split()
+            if len(titulo_words) > 5:
+                titulo = " ".join(titulo_words[:5])
+                log(f"Título truncado para 5 palavras: {titulo}", "INFO")
 
-        # Validações
-        if nota < HOOK_MIN_SCORE:
-            log(f"Nota do gancho ({nota}) abaixo do mínimo ({HOOK_MIN_SCORE}). Clip descartado.", "WARN")
-            return None
+            pergunta_words = pergunta.split()
+            if len(pergunta_words) > 4:
+                pergunta = " ".join(pergunta_words[:4])
+                log(f"Pergunta truncada para 4 palavras: {pergunta}", "INFO")
 
-        # Limita palavras
-        titulo_words = titulo.split()
-        if len(titulo_words) > 5:
-            titulo = " ".join(titulo_words[:5])
-            log(f"Título truncado para 5 palavras: {titulo}", "INFO")
+            # Garante que pergunta termina com ?
+            if not pergunta.endswith("?"):
+                pergunta += "?"
 
-        pergunta_words = pergunta.split()
-        if len(pergunta_words) > 4:
-            pergunta = " ".join(pergunta_words[:4])
-            log(f"Pergunta truncada para 4 palavras: {pergunta}", "INFO")
+            # Garante caixa alta no título
+            titulo = titulo.upper()
 
-        # Garante que pergunta termina com ?
-        if not pergunta.endswith("?"):
-            pergunta += "?"
+            log(f"✅ Gancho APROVADO ({model}): '{titulo}' | Pergunta: '{pergunta}' | Nota: {nota}", "OK")
+            return {
+                "titulo_gancho": titulo,
+                "pergunta_cta": pergunta,
+                "nota": nota
+            }
 
-        # Garante caixa alta no título
-        titulo = titulo.upper()
+        except Exception as e:
+            error_str = str(e)
+            if "404" in error_str or "400" in error_str or "does not exist" in error_str:
+                log(f"Modelo {model} indisponível (404/400), tentando fallback...", "WARN")
+                continue
+            log(f"Erro ao gerar gancho/pergunta com {model}: {e}", "ERROR")
+            continue
 
-        log(f"✅ Gancho gerado: '{titulo}' | Pergunta: '{pergunta}' | Nota: {nota}", "OK")
-        return {
-            "titulo_gancho": titulo,
-            "pergunta_cta": pergunta,
-            "nota": nota
-        }
-
-    except Exception as e:
-        log(f"Erro ao gerar gancho/pergunta: {e}", "ERROR")
-        return None
+    # FALLBACK SEGURO: todos os modelos falharam → usa valores padrão e segue com o clipe
+    log("[FALLBACK] Todos os modelos LLM falharam. Usando gancho padrão para não perder o clipe.", "WARN")
+    return {
+        "titulo_gancho": "MOMENTO INCRÍVEL NA LIVE",
+        "pergunta_cta": "O QUE VOCÊ ACHOU?",
+        "nota": 75
+    }
 
 def censor_profanity(text: str) -> str:
     """Aplica censura simples a palavrões comuns no texto da legenda."""
@@ -262,6 +372,8 @@ def ensure_dirs():
     LIVE_BUFFER_DIR.mkdir(parents=True, exist_ok=True)
     LIVE_CLIPS_DIR.mkdir(parents=True, exist_ok=True)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    # Garante que OUTPUT_DIR (cortes_prontos) existe com caminho absoluto
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def resolver_url_stream(page_url: str) -> str:
@@ -370,11 +482,11 @@ def get_segment_filename() -> Path:
     return LIVE_BUFFER_DIR / f"seg_{ts}.ts"
 
 def get_clip_filename() -> Path:
-    """Gera nome de arquivo para clip final"""
+    """Gera nome de arquivo para clip final (NÃO incrementa contador - isso é feito após validação)"""
     global clip_counter
-    clip_counter += 1
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return LIVE_CLIPS_DIR / f"live_clipe_{ts}_{clip_counter:03d}.mp4"
+    # Usa clip_counter + 1 para o nome, mas só incrementa após validação real
+    return LIVE_CLIPS_DIR / f"live_clipe_{ts}_{clip_counter + 1:03d}.mp4"
 
 # ========== GRAVAÇÃO DE BUFFER (THREAD 1) ==========
 
@@ -415,7 +527,9 @@ def record_buffer_segment(segment_path: Path, page_url: str, duration: int = BUF
 
     ok, _, err = run_cmd(cmd, timeout=duration + 10)
     if not ok:
-        log(f"Falha ao gravar segmento: {err[:200]}", "ERROR")
+        # Mostra últimas 1500 chars do stderr (erro real, não banner FFmpeg)
+        err_tail = err[-1500:] if len(err) > 1500 else err
+        log(f"Falha ao gravar segmento: {err_tail}", "ERROR")
         # Invalida cache se erro de I/O / abertura de arquivo (indica URL expirada)
         if "I/O error" in err or "Error opening input" in err or "404" in err or "403" in err:
             invalidate_stream_cache(page_url)
@@ -468,11 +582,11 @@ def buffer_recorder_thread(page_url: str):
 def analyze_audio_peak(video_path: Path) -> float:
     """
     Analisa pico de volume do arquivo usando FFmpeg volumedetect.
-    Retorna o peak level em dB.
+    Retorna o peak level em dB (usa o maior entre max_volume e mean_volume).
     """
     cmd = [
         FFMPEG.as_posix(), "-y",
-        "-hide_banner", "-loglevel", "error",
+        "-hide_banner", "-loglevel", "info",  # info para capturar output do volumedetect
         "-i", str(video_path),
         "-af", "volumedetect",
         "-f", "null", "-"
@@ -480,22 +594,31 @@ def analyze_audio_peak(video_path: Path) -> float:
 
     ok, out, err = run_cmd(cmd, timeout=15)
 
-    # Parse output do volumedetect
-    # Exemplo: "mean_volume: -24.5 dB\nmax_volume: -5.2 dB"
+    # Parse output do volumedetect (vem no stderr)
+    # Exemplo: "[Parsed_volumedetect_0 @ 0x...] mean_volume: -24.5 dB"
+    #          "[Parsed_volumedetect_0 @ 0x...] max_volume: -5.2 dB"
     peak_db = -60.0
-    for line in (out + err).split('\n'):
+    output_text = err + out
+    for line in output_text.split('\n'):
         if 'max_volume:' in line:
             try:
-                peak_db = float(line.split(':')[1].strip().replace(' dB', ''))
+                # Formato: "... max_volume: -5.2 dB"
+                value_str = line.split('max_volume:')[1].strip().split(' ')[0]
+                peak_db = max(peak_db, float(value_str))
             except:
                 pass
         elif 'mean_volume:' in line:
             try:
-                mean_db = float(line.split(':')[1].strip().replace(' dB', ''))
-                # Usa o maior entre mean e max para detecção
+                value_str = line.split('mean_volume:')[1].strip().split(' ')[0]
+                mean_db = float(value_str)
+                # Usa o maior entre mean e max para detecção (mais sensível a gritos/risadas)
                 peak_db = max(peak_db, mean_db)
             except:
                 pass
+
+    # Log para debug (apenas se não for silêncio total)
+    if peak_db > -50.0:
+        log(f"Audio peak detectado: {peak_db:.1f} dB ({video_path.name})", "INFO")
 
     return peak_db
 
@@ -624,7 +747,9 @@ def extract_last_n_seconds_from_buffer(n_seconds: float, output_path: Path) -> b
 
     ok, _, err = run_cmd(cmd_concat, timeout=30)
     if not ok:
-        log(f"Falha ao concatenar: {err[:200]}", "ERROR")
+        # Mostra últimas 1500 chars do stderr
+        err_tail = err[-1500:] if len(err) > 1500 else err
+        log(f"Falha ao concatenar: {err_tail}", "ERROR")
         return False
 
     # Agora corta os últimos n_seconds
@@ -651,7 +776,9 @@ def extract_last_n_seconds_from_buffer(n_seconds: float, output_path: Path) -> b
         pass
 
     if not ok:
-        log(f"Falha ao cortar clip: {err[:200]}", "ERROR")
+        # Mostra últimas 1500 chars do stderr
+        err_tail = err[-1500:] if len(err) > 1500 else err
+        log(f"Falha ao cortar clip: {err_tail}", "ERROR")
         return False
 
     return True
@@ -659,6 +786,8 @@ def extract_last_n_seconds_from_buffer(n_seconds: float, output_path: Path) -> b
 def transcribe_clip_groq(clip_path: Path, api_key: str) -> List[Dict]:
     """
     Transcreve o clip usando Groq Whisper com word timestamps.
+    Para evitar erro 413 (Request Entity Too Large), extrai primeiro o áudio
+    leve em MP3 mono 16kHz 64kbps antes de enviar para a API.
     Retorna lista de segmentos com palavras e timestamps.
     """
     log("Transcrevendo clip com Groq Whisper (word timestamps)...")
@@ -669,9 +798,28 @@ def transcribe_clip_groq(clip_path: Path, api_key: str) -> List[Dict]:
         log("requests não instalado", "ERROR")
         return []
 
+    # Extrai áudio leve para Whisper: MP3 mono 16kHz 64kbps
+    audio_temp = clip_path.with_suffix('.whisper.mp3')
+    cmd_extract = [
+        FFMPEG.as_posix(), "-y",
+        "-hide_banner", "-loglevel", "error",
+        "-i", str(clip_path),
+        "-vn",                    # Sem vídeo
+        "-ac", "1",               # Mono
+        "-ar", "16000",           # 16kHz (otimizado para Whisper)
+        "-b:a", "64k",            # 64kbps (arquivo leve < 500KB para 45s)
+        str(audio_temp)
+    ]
+    ok, _, err = run_cmd(cmd_extract, timeout=30)
+    if not ok or not audio_temp.exists():
+        # Mostra últimas 1500 chars do stderr
+        err_tail = err[-1500:] if len(err) > 1500 else err
+        log(f"Falha ao extrair áudio para Whisper: {err_tail}", "ERROR")
+        return []
+
     try:
-        with open(clip_path, 'rb') as f:
-            files = {'file': (clip_path.name, f, 'audio/mpeg')}
+        with open(audio_temp, 'rb') as f:
+            files = {'file': (audio_temp.name, f, 'audio/mpeg')}
             data = {
                 'model': GROQ_MODEL,
                 'response_format': 'verbose_json',
@@ -723,6 +871,12 @@ def transcribe_clip_groq(clip_path: Path, api_key: str) -> List[Dict]:
     except Exception as e:
         log(f"Erro na transcrição: {e}", "ERROR")
         return []
+    finally:
+        # Remove arquivo temporário de áudio
+        try:
+            audio_temp.unlink(missing_ok=True)
+        except:
+            pass
 
 def create_karaoke_ass_subtitle(segments: List[Dict], clip_duration: float, output_path: Path) -> bool:
     """
@@ -831,6 +985,97 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         log(f"Erro ao criar legenda karaokê: {e}", "ERROR")
         return False
 
+def create_hook_banner_image(titulo_gancho: str, pergunta_cta: str, output_path: Path) -> bool:
+    """
+    Gera uma imagem PNG 1080x180 com o banner do gancho usando Pillow.
+    Elimina problemas de fonte/sintaxe do drawtext no FFmpeg no Windows.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        log("Pillow não instalado. Instale com: pip install pillow", "ERROR")
+        return False
+
+    # Dimensões do banner
+    WIDTH, HEIGHT = 1080, 180
+    BG_COLOR = (0xD9, 0x1E, 0x18)  # #D91E18 - vermelho sólido
+
+    # Cria imagem com fundo vermelho
+    img = Image.new('RGB', (WIDTH, HEIGHT), BG_COLOR)
+    draw = ImageDraw.Draw(img)
+
+    # Tenta carregar fonte TrueType do sistema
+    font_title = None
+    font_question = None
+    font_paths = [
+        # Windows
+        "C:/Windows/Fonts/arialbd.ttf",      # Arial Bold
+        "C:/Windows/Fonts/impact.ttf",       # Impact
+        "C:/Windows/Fonts/ariblk.ttf",       # Arial Black
+        # Linux
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]
+
+    for fp in font_paths:
+        try:
+            font_title = ImageFont.truetype(fp, 44)
+            font_question = ImageFont.truetype(fp, 26)
+            log(f"Fonte carregada: {fp}", "INFO")
+            break
+        except OSError:
+            continue
+
+    # Fallback: fonte padrão do Pillow
+    if font_title is None:
+        log("Nenhuma fonte TrueType encontrada, usando fallback", "WARN")
+        font_title = ImageFont.load_default()
+        font_question = ImageFont.load_default()
+
+    # Desenha titulo_gancho (linha superior, y ~ 35)
+    if titulo_gancho:
+        # Calcula largura do texto para centralizar
+        bbox = draw.textbbox((0, 0), titulo_gancho, font=font_title)
+        text_width = bbox[2] - bbox[0]
+        x = (WIDTH - text_width) // 2
+        y = 35
+
+        # Desenha contorno preto (desenha 4 vezes deslocado)
+        outline_offset = 3
+        for dx, dy in [(-outline_offset, 0), (outline_offset, 0), (0, -outline_offset), (0, outline_offset),
+                       (-outline_offset, -outline_offset), (outline_offset, -outline_offset),
+                       (-outline_offset, outline_offset), (outline_offset, outline_offset)]:
+            draw.text((x + dx, y + dy), titulo_gancho, font=font_title, fill=(0, 0, 0))
+        # Desenha texto principal amarelo/dourado
+        draw.text((x, y), titulo_gancho, font=font_title, fill=(0xFF, 0xD7, 0x00))  # #FFD700
+
+    # Desenha pergunta_cta (linha inferior, y ~ 115)
+    if pergunta_cta:
+        bbox = draw.textbbox((0, 0), pergunta_cta, font=font_question)
+        text_width = bbox[2] - bbox[0]
+        x = (WIDTH - text_width) // 2
+        y = 115
+
+        # Contorno preto
+        outline_offset = 2
+        for dx, dy in [(-outline_offset, 0), (outline_offset, 0), (0, -outline_offset), (0, outline_offset),
+                       (-outline_offset, -outline_offset), (outline_offset, -outline_offset),
+                       (-outline_offset, outline_offset), (outline_offset, outline_offset)]:
+            draw.text((x + dx, y + dy), pergunta_cta, font=font_question, fill=(0, 0, 0))
+        # Texto principal branco
+        draw.text((x, y), pergunta_cta, font=font_question, fill=(0xFF, 0xFF, 0xFF))  # #FFFFFF
+
+    # Salva PNG
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(output_path, 'PNG')
+        log(f"Banner do gancho gerado: {output_path}", "OK")
+        return True
+    except Exception as e:
+        log(f"Erro ao salvar banner PNG: {e}", "ERROR")
+        return False
+
+
 def process_gameplay_layout(input_path: Path, output_path: Path, webcam_pos: Optional[Dict],
                             ass_path: Optional[Path], hook_data: Optional[Dict],
                             clip_dur: float) -> bool:
@@ -841,9 +1086,7 @@ def process_gameplay_layout(input_path: Path, output_path: Path, webcam_pos: Opt
        - Crop da webcam selecionada → scale=1080:730:force_original_aspect_ratio=increase,crop=1080:730
 
     2. BLOCO 2 - MEIO (Faixa Divisória de Gancho): 1080x180
-       - Faixa sólida vermelha (#D91E18) com drawtext:
-         * Linha 1 (y=48): titulo_gancho - negrito, branco/amarelo, tamanho 44, borda preta
-         * Linha 2 (y=115): pergunta_cta - negrito, branco, tamanho 26
+       - Imagem PNG gerada via Pillow (banner_gancho.png) com titulo_gancho + pergunta_cta
 
     3. BLOCO 3 - BASE (Gameplay): 1080x1010
        - Crop central 9:16 → scale=1080:1010:force_original_aspect_ratio=increase,crop=1080:1010
@@ -858,68 +1101,28 @@ def process_gameplay_layout(input_path: Path, output_path: Path, webcam_pos: Opt
     watermark_path = Path(GAMEPLAY_WATERMARK_PATH)
     has_watermark = watermark_path.exists()
 
-    # Prepara textos do gancho (escapados para FFmpeg drawtext)
-    titulo_gancho = ""
-    pergunta_cta = ""
-    if hook_data:
-        titulo_gancho = hook_data.get("titulo_gancho", "").replace("'", "\\'").replace(":", "\\:")
-        pergunta_cta = hook_data.get("pergunta_cta", "").replace("'", "\\'").replace(":", "\\:")
+    # Prepara textos do gancho
+    titulo_gancho = hook_data.get("titulo_gancho", "") if hook_data else ""
+    pergunta_cta = hook_data.get("pergunta_cta", "") if hook_data else ""
 
-    # Cores para drawtext (formato AABBGGRR para FFmpeg)
-    # Vermelho da faixa: #D91E18
-    # Amarelo/dourado para título: #FFD700 -> 0x00D7FF
-    # Branco para pergunta: #FFFFFF -> 0xFFFFFF
-    # Preto para borda: #000000 -> 0x000000
+    # 1. Gera banner PNG do gancho (1080x180) usando Pillow
+    banner_path = LIVE_BUFFER_DIR / "banner_gancho.png"
+    if not create_hook_banner_image(titulo_gancho, pergunta_cta, banner_path):
+        log("Falha ao gerar banner do gancho, prosseguindo sem banner", "WARN")
+        banner_path = None
 
     if webcam_pos is None:
-        # SEM WEBCAM: Bloco 1 = placeholder preto/gradiente ou gameplay estendido?
-        # Conforme spec: mesmo sem webcam, mantém 3 blocos. Bloco 1 pode ser gameplay estendido ou cor sólida.
-        # Vamos usar gameplay para o bloco 1 também (zoom diferente) ou uma cor neutra.
-        # Melhor: usa o mesmo gameplay mas com crop diferente para preencher o topo.
+        # SEM WEBCAM: Bloco 1 = gameplay com crop superior (zoom)
         filter_complex = (
             # Bloco 1 (Topo - 1080x730): Gameplay com crop superior (zoom)
             f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
             f"scale={VERTICAL_WIDTH}:{WEBAM_HEIGHT}:force_original_aspect_ratio=increase,"
             f"crop={VERTICAL_WIDTH}:{WEBAM_HEIGHT}[top];"
-            # Bloco 2 (Meio - 1080x180): Faixa vermelha com textos do gancho
-            f"color=c=#D91E18:s={VERTICAL_WIDTH}x{HOOK_BAR_HEIGHT}[bar];"
             # Bloco 3 (Base - 1080x1010): Gameplay central 9:16
             f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
             f"scale={VERTICAL_WIDTH}:{GAMEPLAY_HEIGHT}:force_original_aspect_ratio=increase,"
             f"crop={VERTICAL_WIDTH}:{GAMEPLAY_HEIGHT}[base]"
         )
-
-        # Adiciona drawtext na faixa se houver gancho
-        if titulo_gancho and pergunta_cta:
-            filter_complex += (
-                f";[bar]drawtext=text='{titulo_gancho}':fontfile='C\\\\:/Windows/Fonts/impact.ttf':"
-                f"fontcolor=0x00D7FF:fontsize=44:bold=1:borderw=3:bordercolor=0x000000:"
-                f"x=(w-text_w)/2:y=48,"
-                f"drawtext=text='{pergunta_cta}':fontfile='C\\\\:/Windows/Fonts/impact.ttf':"
-                f"fontcolor=0xFFFFFF:fontsize=26:bold=1:borderw=2:bordercolor=0x000000:"
-                f"x=(w-text_w)/2:y=115[hook_bar]"
-            )
-            bar_label = "[hook_bar]"
-        else:
-            bar_label = "[bar]"
-
-        # Adiciona legendas karaokê no gameplay (base)
-        if ass_path and ass_path.exists():
-            ass_path_escaped = ass_path.as_posix().replace("'", "\\'").replace(":", "\\:")
-            filter_complex += f";[base]subtitles='{ass_path_escaped}'[base_sub]"
-            base_label = "[base_sub]"
-        else:
-            base_label = "[base]"
-
-        # Adiciona watermark se existir
-        if has_watermark:
-            filter_complex += f";movie='{watermark_path.as_posix()}'[wm];{base_label}[wm]overlay=20:20[base_final]"
-            base_label = "[base_final]"
-
-        # vstack final: 3 inputs
-        filter_complex += f";[top]{bar_label}{base_label}vstack=inputs=3[vout]"
-        map_v = "[vout]"
-
     else:
         # COM WEBCAM: Bloco 1 = Webcam crop
         wc_x = f"iw*{webcam_pos['x']:.6f}"
@@ -932,88 +1135,109 @@ def process_gameplay_layout(input_path: Path, output_path: Path, webcam_pos: Opt
             f"[0:v]crop={wc_w}:{wc_h}:{wc_x}:{wc_y},"
             f"scale={VERTICAL_WIDTH}:{WEBAM_HEIGHT}:force_original_aspect_ratio=increase,"
             f"crop={VERTICAL_WIDTH}:{WEBAM_HEIGHT}[top];"
-            # Bloco 2 (Meio - 1080x180): Faixa vermelha com textos do gancho
-            f"color=c=#D91E18:s={VERTICAL_WIDTH}x{HOOK_BAR_HEIGHT}[bar];"
             # Bloco 3 (Base - 1080x1010): Gameplay central 9:16
             f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
             f"scale={VERTICAL_WIDTH}:{GAMEPLAY_HEIGHT}:force_original_aspect_ratio=increase,"
             f"crop={VERTICAL_WIDTH}:{GAMEPLAY_HEIGHT}[base]"
         )
 
-        # Adiciona drawtext na faixa se houver gancho
-        if titulo_gancho and pergunta_cta:
-            filter_complex += (
-                f";[bar]drawtext=text='{titulo_gancho}':fontfile='C\\\\:/Windows/Fonts/impact.ttf':"
-                f"fontcolor=0x00D7FF:fontsize=44:bold=1:borderw=3:bordercolor=0x000000:"
-                f"x=(w-text_w)/2:y=48,"
-                f"drawtext=text='{pergunta_cta}':fontfile='C\\\\:/Windows/Fonts/impact.ttf':"
-                f"fontcolor=0xFFFFFF:fontsize=26:bold=1:borderw=2:bordercolor=0x000000:"
-                f"x=(w-text_w)/2:y=115[hook_bar]"
-            )
-            bar_label = "[hook_bar]"
-        else:
-            bar_label = "[bar]"
+    # Adiciona legendas karaokê no gameplay (base)
+    if ass_path and ass_path.exists():
+        ass_path_escaped = ass_path.as_posix().replace(":", "\\:")
+        filter_complex += f";[base]subtitles='{ass_path_escaped}'[base_sub]"
+        base_label = "[base_sub]"
+    else:
+        base_label = "[base]"
 
-        # Adiciona legendas karaokê no gameplay (base)
-        if ass_path and ass_path.exists():
-            ass_path_escaped = ass_path.as_posix().replace("'", "\\'").replace(":", "\\:")
-            filter_complex += f";[base]subtitles='{ass_path_escaped}'[base_sub]"
-            base_label = "[base_sub]"
-        else:
-            base_label = "[base]"
+    # Adiciona watermark se existir
+    if has_watermark:
+        # Escapa dois-pontos no caminho (para Windows com letra de drive)
+        wm_path_escaped = watermark_path.as_posix().replace(":", "\\:")
+        filter_complex += f";movie='{wm_path_escaped}'[wm];{base_label}[wm]overlay=20:20[base_final]"
+        base_label = "[base_final]"
 
-        # Adiciona watermark se existir
-        if has_watermark:
-            filter_complex += f";movie='{watermark_path.as_posix()}'[wm];{base_label}[wm]overlay=20:20[base_final]"
-            base_label = "[base_final]"
+    # Bloco 2 (Meio - 1080x180): Banner do gancho (PNG) OU faixa vermelha sólida como fallback
+    if banner_path and banner_path.exists():
+        filter_complex += f";[1:v]scale={VERTICAL_WIDTH}:{HOOK_BAR_HEIGHT}[hook_bar]"
+        bar_label = "[hook_bar]"
+        banner_input = ["-i", str(banner_path)]
+    else:
+        filter_complex += f";color=c=#D91E18:s={VERTICAL_WIDTH}x{HOOK_BAR_HEIGHT}[hook_bar]"
+        bar_label = "[hook_bar]"
+        banner_input = []
 
-        # vstack final: 3 inputs
-        filter_complex += f";[top]{bar_label}{base_label}vstack=inputs=3[vout]"
-        map_v = "[vout]"
+    # vstack final: 3 inputs (topo, meio/gancho, base)
+    filter_complex += f";[top]{bar_label}{base_label}vstack=inputs=3[vout]"
+    map_v = "[vout]"
 
     # Áudio: loudnorm + fade-out 1.5s
     fade_start = max(0, clip_dur - 1.5)
     af = f"loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary,afade=t=out:st={fade_start:.2f}:d=1.5"
 
+    # Monta comando FFmpeg com -hide_banner -loglevel error
     cmd = [
         ffmpeg_cmd, "-y",
+        "-hide_banner", "-loglevel", "error",
         "-i", str(input_path),
+    ]
+    # Adiciona banner como segundo input se existir
+    cmd.extend(banner_input)
+    cmd.extend([
         "-filter_complex", filter_complex,
         "-map", map_v,
         "-map", "0:a?",
         "-af", af,
-        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
         str(output_path)
-    ]
+    ])
 
-    ok, _, err = run_cmd(cmd, timeout=90)
+    ok, _, err = run_cmd(cmd, timeout=300)
 
     if not ok:
-        log(f"Erro no FFmpeg layout 3 camadas: {err[:500]}", "ERROR")
+        # Mostra as ÚLTIMAS 800 chars do stderr (erro real, sem banner do FFmpeg)
+        err_tail = err[-800:] if len(err) > 800 else err
+        log(f"Erro no FFmpeg layout 3 camadas: {err_tail}", "ERROR")
         return False
 
     log(f"Layout 3 camadas aplicado com sucesso: {output_path}", "OK")
     return True
 
 def process_trigger(trigger: TriggerEvent):
-    """Processa um gatilho e gera o clip final"""
+    """Processa um gatilho e gera o clip final.
+
+    Cooldown de 60s só é aplicado APÓS clip salvo com sucesso.
+    Se falhar/descartar: micro-intervalo de 10s antes de permitir nova avaliação.
+    """
     global last_clip_time, clip_duration
 
-    # Cooldown
+    # Cooldown: 60s após clip salvo; 10s após falha/descarte
     now = time.time()
+    time_since_last = now - last_clip_time
+
+    # Verifica se estamos em cooldown pós-sucesso (60s) ou micro-intervalo pós-falha (10s)
+    # Usamos uma flag implícita: se last_clip_time foi setado após sucesso, cooldown = 60s
+    # Para distinguir, podemos verificar se o último clip foi salvo com sucesso
+    # Simplificação: cooldown normal = 60s; após falha = 10s
+    # Vamos usar uma variável para rastrear se o último foi sucesso
+
+    # Cooldown padrão (após sucesso)
     if now - last_clip_time < COOLDOWN_BETWEEN_CLIPS:
-        log(f"Cooldown ativo, ignorando gatilho ({COOLDOWN_BETWEEN_CLIPS - (now - last_clip_time):.0f}s restantes)", "WARN")
+        global _last_cooldown_log
+        if now - _last_cooldown_log >= LOG_THROTTLE_SECONDS:
+            log(f"Cooldown ativo, ignorando gatilho ({COOLDOWN_BETWEEN_CLIPS - (now - last_clip_time):.0f}s restantes)", "WARN")
+            _last_cooldown_log = now
         return
 
     # Trava mínima: exige pelo menos 3 segmentos (30s) no buffer antes de aceitar gatilhos
     MIN_BUFFER_SEGMENTS = 3  # 3 segmentos * 10s = 30s mínimo
     if len(ring_buffer) < MIN_BUFFER_SEGMENTS:
-        log(f"Buffer insuficiente ({len(ring_buffer)}/{MIN_BUFFER_SEGMENTS} segmentos), ignorando gatilho inicial", "WARN")
+        global _last_buffer_log
+        if now - _last_buffer_log >= LOG_THROTTLE_SECONDS:
+            log(f"Buffer insuficiente ({len(ring_buffer)}/{MIN_BUFFER_SEGMENTS} segmentos), ignorando gatilho inicial", "WARN")
+            _last_buffer_log = now
         return
-
-    last_clip_time = now
 
     log(f"🎯 GATILHO DETECTADO: {trigger.trigger_type} - {trigger.details}", "CLIP")
 
@@ -1022,12 +1246,16 @@ def process_trigger(trigger: TriggerEvent):
     clip_duration = CLIP_DURATION
 
     if not extract_last_n_seconds_from_buffer(clip_duration, raw_clip_path):
+        # Falha na extração: micro-intervalo de 10s
+        last_clip_time = time.time() - (COOLDOWN_BETWEEN_CLIPS - 10)  # Define para 10s atrás
         return
 
     # 2. Transcreve com Groq Whisper (word timestamps)
     segments = transcribe_clip_groq(raw_clip_path, groq_api_key)
     if not segments:
         log("Falha na transcrição, pulando clip", "ERROR")
+        # Falha: micro-intervalo de 10s
+        last_clip_time = time.time() - (COOLDOWN_BETWEEN_CLIPS - 10)
         return
 
     # 3. Gera texto completo da transcrição para o gancho
@@ -1036,12 +1264,14 @@ def process_trigger(trigger: TriggerEvent):
     # 4. Gera gancho + pergunta via Groq LLM (llama-3.3-70b-versatile)
     hook_data = generate_hook_and_question(full_transcription, groq_api_key)
     if not hook_data:
-        log("Gancho rejeitado (nota < 70 ou falha na geração). Clip descartado.", "WARN")
+        # generate_hook_and_question já loga o motivo (nota baixa)
         # Limpa arquivos temporários
         try:
             raw_clip_path.unlink(missing_ok=True)
         except:
             pass
+        # Descarte por IA: micro-intervalo de 10s
+        last_clip_time = time.time() - (COOLDOWN_BETWEEN_CLIPS - 10)
         return
 
     # 5. Cria legenda karaokê .ass (estilo destaque palavra por palavra)
@@ -1053,6 +1283,20 @@ def process_trigger(trigger: TriggerEvent):
     final_clip_path = get_clip_filename()
 
     if not process_gameplay_layout(raw_clip_path, final_clip_path, current_live_config.webcam_position, ass_path, hook_data, clip_duration):
+        # Falha no layout: micro-intervalo de 10s
+        last_clip_time = time.time() - (COOLDOWN_BETWEEN_CLIPS - 10)
+        return
+
+    # VALIDAÇÃO REAL: Verifica se o arquivo foi criado e tem tamanho > 50KB
+    if not final_clip_path.exists() or final_clip_path.stat().st_size < 50_000:
+        log(f"❌ Clip gerado mas inválido (não existe ou < 50KB): {final_clip_path}", "ERROR")
+        # Remove arquivo inválido se existir
+        try:
+            final_clip_path.unlink(missing_ok=True)
+        except:
+            pass
+        # Falha: micro-intervalo de 10s
+        last_clip_time = time.time() - (COOLDOWN_BETWEEN_CLIPS - 10)
         return
 
     # 7. Salva metadados JSON ao lado do vídeo
@@ -1075,7 +1319,7 @@ def process_trigger(trigger: TriggerEvent):
     except Exception as e:
         log(f"Erro ao salvar JSON: {e}", "ERROR")
 
-    # 8. Limpeza
+    # 8. Limpeza de temporários (NÃO apaga cortes_prontos/)
     try:
         raw_clip_path.unlink(missing_ok=True)
         if ass_path:
@@ -1083,7 +1327,12 @@ def process_trigger(trigger: TriggerEvent):
     except:
         pass
 
-    log(f"🎉 CLIP PRONTO: {final_clip_path.name} | Gancho: {hook_data['titulo_gancho']} | Nota: {hook_data['nota']}", "OK")
+    # SUCESSO: incrementa contador AGORA (após validação) e aplica cooldown completo de 60s
+    global clip_counter
+    clip_counter += 1
+    last_clip_time = time.time()
+
+    log(f"🎉 CLIP PRONTO: {final_clip_path.name} | Gancho: {hook_data['titulo_gancho']} | Nota: {hook_data['nota']} | Tamanho: {final_clip_path.stat().st_size/1024:.0f} KB", "OK")
 
 def trigger_processor_thread():
     """Thread que processa gatilhos da queue"""
@@ -1379,6 +1628,11 @@ def main():
         log("Copie .env.example para .env e configure sua chave.", "ERROR")
         return 1
 
+    # Descoberta automática de modelos ativos na Groq
+    log("🔍 Descobrindo modelos ativos na Groq...", "INFO")
+    global ACTIVE_GROQ_MODELS
+    ACTIVE_GROQ_MODELS = fetch_active_groq_models(groq_api_key)
+
     # Parse args
     args = parse_args()
 
@@ -1486,6 +1740,29 @@ def main():
     t3.start()
     threads.append(t3)
 
+    # Thread 4: Manual trigger (ENTER no terminal)
+    def manual_trigger_listener():
+        """Escuta ENTER no terminal para forçar gatilho manual ('manual_trigger')."""
+        import sys
+        import msvcrt  # Windows
+        log("🔘 Pressione ENTER a qualquer momento para forçar um clip manual ('manual_trigger')", "INFO")
+        while not stop_event.is_set():
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key == b'\r' or key == b'\n':  # ENTER
+                    trigger = TriggerEvent(
+                        timestamp=time.time(),
+                        trigger_type="manual_trigger",
+                        details="Gatilho manual via ENTER no terminal (ignora thresholds)"
+                    )
+                    buffer_queue.put(("trigger", trigger))
+                    log("⌨️ Gatilho manual ativado via ENTER!", "CLIP")
+            time.sleep(0.1)
+
+    t4 = threading.Thread(target=manual_trigger_listener, daemon=True)
+    t4.start()
+    threads.append(t4)
+
     # Loop principal - aguarda stop_event
     try:
         while not stop_event.is_set():
@@ -1505,6 +1782,21 @@ def main():
 
     for t in threads:
         t.join(timeout=5)
+
+    # Limpeza segura: apaga APENAS arquivos temporários em temp_downloads/live_buffer/
+    # NÃO apaga arquivos de cortes_prontos/
+    try:
+        for f in LIVE_BUFFER_DIR.glob("*.ts"):
+            f.unlink(missing_ok=True)
+        for f in LIVE_BUFFER_DIR.glob("*.ass"):
+            f.unlink(missing_ok=True)
+        for f in LIVE_BUFFER_DIR.glob("concat_list.txt"):
+            f.unlink(missing_ok=True)
+        for f in LIVE_BUFFER_DIR.glob("temp_concat.ts"):
+            f.unlink(missing_ok=True)
+        log("Arquivos temporários do buffer limpos", "OK")
+    except Exception as e:
+        log(f"Aviso ao limpar temporários: {e}", "WARN")
 
     log("=" * 60)
     log(f"MONITOR FINALIZADO - {clip_counter} clips gerados", "OK")

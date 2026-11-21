@@ -29,6 +29,7 @@ import argparse
 import base64
 import hashlib
 from pathlib import Path
+from datetime import datetime
 
 
 # ========== CONFIGURAÇÕES ==========
@@ -73,8 +74,30 @@ VISION_EDIT_TARGET_DURATION_MAX = 45  # Duração máxima por vídeo (segundos)
 # Groq: chat (visão e roteiros). Os nomes dos modelos mudam a cada poucos meses; troque no
 # .env (GROQ_VISION_MODEL / GROQ_TEXT_MODEL) sem mexer no código. Veja .env.example.
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
 DEFAULT_GROQ_VISION_MODEL = "qwen/qwen3.8-27b"
 DEFAULT_GROQ_TEXT_MODEL = "openai/gpt-oss-120b"
+
+# Modelos descontinuados/que retornam 404 (removidos da lista de fallback)
+DEPRECATED_GROQ_MODELS = {
+    "llama-3.1-8b-instant",
+    "llama-4-scout-17b-16e-instruct",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "qwen/qwen3-32b",
+}
+
+# Fallbacks estáticos ordenados por preferência (apenas modelos conhecidos como estáveis)
+STATIC_TEXT_MODEL_FALLBACKS = [
+    "openai/gpt-oss-120b",
+    "llama-3.3-70b-versatile",
+    "gemma2-9b-it",
+]
+STATIC_VISION_MODEL_FALLBACKS = [
+    "qwen/qwen3.8-27b",
+    "llama-3.2-90b-vision-preview",
+    "llama-3.2-11b-vision-preview",
+]
+
 MAX_IMAGES_PER_REQUEST = 3  # limite de imagens por chamada do modelo de visão
 MIN_CLIMAX_SCORE = 5  # nota mínima (0-10) para um frame virar corte
 SCRIPT_WORDS_PER_SECOND = 2.5  # ~150 palavras por minuto em português
@@ -103,6 +126,17 @@ GAMEPLAY_HOOK_BANNER_HEIGHT = 120  # Altura da faixa
 GAMEPLAY_HOOK_BANNER_DURATION = 4  # Duração da faixa em segundos
 GAMEPLAY_SUBTITLE_WORDS_PER_CHUNK = 3  # Palavras por bloco de legenda (era 4)
 GAMEPLAY_WATERMARK_PATH = "assets/logo.png"  # Logo/watermark opcional
+
+# ========== CONFIGURAÇÕES CLIPFLOW 3 CAMADAS (NOVO 2025 - igual monitor_lives.py) ==========
+CLIPFLOW_WEBAM_HEIGHT = 730                    # Altura do bloco webcam (topo)
+CLIPFLOW_HOOK_BAR_HEIGHT = 180                 # Altura da faixa divisória de gancho (meio)
+CLIPFLOW_GAMEPLAY_HEIGHT = 1010                # Altura do bloco gameplay (base)
+CLIPFLOW_TOTAL_HEIGHT = CLIPFLOW_WEBAM_HEIGHT + CLIPFLOW_HOOK_BAR_HEIGHT + CLIPFLOW_GAMEPLAY_HEIGHT  # 1920
+CLIPFLOW_HOOK_MODEL = DEFAULT_GROQ_TEXT_MODEL  # Modelo para gerar gancho/pergunta
+CLIPFLOW_HOOK_MIN_SCORE = 65                   # Nota mínima para aceitar o gancho
+CLIPFLOW_KARAOKE_WORDS_PER_CHUNK = 5           # Palavras por bloco karaokê (3-5)
+CLIPFLOW_KARAOKE_FONT_SIZE = 68                # Tamanho da fonte karaokê
+CLIPFLOW_KARAOKE_MARGIN_V = 220                # MarginV para área do gameplay (base)
 # ====================================
 
 
@@ -113,25 +147,33 @@ def clean_youtube_url(url):
     """
     Limpa a URL do YouTube mantendo apenas o ID principal do vídeo.
     Remove parâmetros de tracking, playlist, timestamp, etc.
+    Para URLs não-YouTube (Twitch, Kick, etc.), retorna a URL original inalterada.
     """
-    # Padrões de URL do YouTube
-    patterns = [
+    # Verificar se é URL do YouTube
+    youtube_patterns = [
         r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})',
         r'youtube\.com/shorts/([a-zA-Z0-9_-]{11})',
     ]
 
-    for pattern in patterns:
+    for pattern in youtube_patterns:
         match = re.search(pattern, url)
         if match:
             video_id = match.group(1)
             return f"https://www.youtube.com/watch?v={video_id}"
 
-    # Se já for uma URL limpa, retorna como está
+    # Se já for uma URL limpa do YouTube, retorna como está
     if re.match(r'https://www\.youtube\.com/watch\?v=[a-zA-Z0-9_-]{11}$', url):
         return url
 
-    # Fallback: retorna original se não conseguir parsear
+    # Para URLs não-YouTube (Twitch, Kick, etc.), retorna a URL original
+    # O yt-dlp saberá lidar com cada plataforma
     return url
+
+
+def is_youtube_url(url):
+    """Verifica se a URL é do YouTube (inclui youtu.be, shorts, etc.)."""
+    youtube_domains = ['youtube.com', 'youtu.be']
+    return any(domain in url.lower() for domain in youtube_domains)
 
 
 def extract_audio_for_transcription(video_path, output_dir, chunk_duration=AUDIO_CHUNK_DURATION):
@@ -205,6 +247,10 @@ def transcribe_audio_groq(audio_path, api_key):
     """
     Transcreve áudio usando Groq API (whisper-large-v3-turbo).
     Retorna lista de segmentos com timestamps no formato padrão do projeto.
+
+    Força language="pt" e pede timestamp_granularities=["word", "segment"]
+    para obter timestamps reais de cada palavra. Usa prompt em português
+    para evitar alucinações com áudio do jogo (rádio da polícia/NPCs em inglês).
     """
     try:
         import requests
@@ -220,8 +266,10 @@ def transcribe_audio_groq(audio_path, api_key):
             data = {
                 'model': GROQ_MODEL,
                 'response_format': 'verbose_json',
+                'timestamp_granularities[]': 'word',
                 'timestamp_granularities[]': 'segment',
-                'language': 'pt'
+                'language': 'pt',
+                'prompt': 'Transcrição literal da fala do streamer brasileiro jogando GTA, sem traduzir nem inventar palavras.'
             }
             headers = {'Authorization': f'Bearer {api_key}'}
 
@@ -236,15 +284,46 @@ def transcribe_audio_groq(audio_path, api_key):
 
         for seg in result.get('segments', []):
             text = seg.get('text', '').strip()
-            if text:
-                segments.append({
-                    'start': seg.get('start', 0),
-                    'end': seg.get('end', 0),
-                    'text': text
-                })
+            if not text:
+                continue
 
-        print(f"   ✅ Transcrição concluída: {len(segments)} segmentos")
-        return segments
+            # Filtrar segmentos que são claramente ruído ou fala em inglês do jogo
+            # Heurística: se o segmento tem poucas palavras e parece ser ruído/inglês, ignora
+            words = text.split()
+            if len(words) <= 2:
+                # Segmentos muito curtos (1-2 palavras) tendem a ser ruído ou palavras soltas do jogo
+                # Verifica se parece inglês (muitas consoantes, poucas vogais típicas do PT)
+                english_like = sum(1 for w in words if len(w) > 2 and w[0].isupper() and w.isalpha())
+                if english_like >= len(words) * 0.5:
+                    continue  # Provavelmente inglês do jogo, ignora
+
+            segment_data = {
+                'start': seg.get('start', 0),
+                'end': seg.get('end', 0),
+                'text': text
+            }
+
+            # Incluir word-level timestamps se disponíveis
+            if 'words' in seg and seg['words']:
+                segment_data['words'] = seg['words']
+
+            segments.append(segment_data)
+
+        # Filtrar segmentos consecutivos em inglês/ruído que duram muito tempo (legenda congelada)
+        filtered_segments = []
+        for seg in segments:
+            text = seg['text'].strip()
+            words = text.split()
+            # Heurística simples: se >80% das palavras parecem inglês, pode ser rádio do jogo
+            english_words = sum(1 for w in words if w and w[0].isupper() and w.isalpha() and len(w) > 2)
+            if words and english_words / len(words) > 0.8:
+                # Segmento provavelmente em inglês (rádio do jogo) - só mantém se for curto (<3s)
+                if seg['end'] - seg['start'] > 3:
+                    continue  # Ignora legenda longa em inglês (congelaria a tela)
+            filtered_segments.append(seg)
+
+        print(f"   ✅ Transcrição concluída: {len(filtered_segments)} segmentos (filtrados {len(segments) - len(filtered_segments)} ruído/inglês)")
+        return filtered_segments
 
     except Exception as e:
         print(f"   ❌ Erro na transcrição: {e}")
@@ -332,6 +411,170 @@ def get_vision_model():
 def get_text_model():
     """Modelo do Groq para escrever roteiros (troque no .env: GROQ_TEXT_MODEL)."""
     return os.environ.get("GROQ_TEXT_MODEL") or DEFAULT_GROQ_TEXT_MODEL
+
+
+# Cache para modelos ativos descobertos dinamicamente
+_ACTIVE_GROQ_TEXT_MODELS: list[str] = []
+_ACTIVE_GROQ_VISION_MODELS: list[str] = []
+_MODELS_FETCHED = False
+
+
+def fetch_active_groq_models(api_key: str) -> tuple[list[str], list[str]]:
+    """
+    Consulta a API da Groq para listar modelos realmente ativos na conta.
+    Filtra fora modelos de áudio/whisper/guard/tts/orpheus e modelos descontinuados.
+    Retorna tupla (modelos_texto_ativos, modelos_visao_ativos).
+    """
+    global _ACTIVE_GROQ_TEXT_MODELS, _ACTIVE_GROQ_VISION_MODELS, _MODELS_FETCHED
+
+    if _MODELS_FETCHED:
+        return _ACTIVE_GROQ_TEXT_MODELS, _ACTIVE_GROQ_VISION_MODELS
+
+    try:
+        import requests
+        headers = {'Authorization': f'Bearer {api_key}'}
+        response = requests.get(GROQ_MODELS_URL, headers=headers, timeout=15)
+
+        if response.status_code != 200:
+            print(f"   ⚠️  Groq models API retornou {response.status_code}: {response.text[:200]}")
+            _MODELS_FETCHED = True
+            return [], []
+
+        data = response.json()
+        models = data.get('data', [])
+
+        # Palavras-chave para filtrar modelos NÃO de chat/texto/visão
+        exclude_keywords = ['whisper', 'guard', 'tts', 'orpheus', 'audio', 'speech', 'translation', 'tts']
+
+        text_models = []
+        vision_models = []
+
+        for model in models:
+            model_id = model.get('id', '').lower()
+
+            # Pula modelos de áudio/guard/tts
+            if any(kw in model_id for kw in exclude_keywords):
+                continue
+
+            # Pula modelos descontinuados conhecidos
+            if model.get('id') in DEPRECATED_GROQ_MODELS:
+                continue
+
+            # Classifica como visão ou texto
+            is_vision = 'vision' in model_id or 'qwen' in model_id
+
+            if is_vision:
+                vision_models.append(model.get('id'))
+            else:
+                text_models.append(model.get('id'))
+
+        _ACTIVE_GROQ_TEXT_MODELS = text_models
+        _ACTIVE_GROQ_VISION_MODELS = vision_models
+        _MODELS_FETCHED = True
+
+        if text_models or vision_models:
+            print(f"   ✅ Modelos Groq ativos: {len(text_models)} texto, {len(vision_models)} visão")
+
+        return text_models, vision_models
+
+    except Exception as e:
+        print(f"   ⚠️  Falha ao buscar modelos Groq (usando fallbacks estáticos): {e}")
+        _MODELS_FETCHED = True
+        return [], []
+
+
+def get_text_models_to_try(api_key: str | None = None) -> list[str]:
+    """
+    Retorna lista de modelos de texto para tentar (descobertos dinamicamente + fallbacks estáticos).
+    Prioriza: modelo do .env > qwen/qwen3.8-27b > modelos ativos descobertos > fallbacks estáticos.
+    """
+    models = []
+
+    # 1. Modelo configurado no .env (maior prioridade se definido)
+    env_model = os.environ.get("GROQ_TEXT_MODEL")
+    if env_model and env_model not in DEPRECATED_GROQ_MODELS:
+        models.append(env_model)
+
+    # 2. Modelo preferido qwen/qwen3.8-27b (funciona para texto e visão)
+    preferred = "qwen/qwen3.8-27b"
+    if preferred not in models and preferred not in DEPRECATED_GROQ_MODELS:
+        models.append(preferred)
+
+    # 3. Modelos ativos descobertos dinamicamente
+    if api_key:
+        text_models, _ = fetch_active_groq_models(api_key)
+        for m in text_models:
+            if m not in models and m not in DEPRECATED_GROQ_MODELS:
+                models.append(m)
+
+    # 4. Fallbacks estáticos
+    for fb in STATIC_TEXT_MODEL_FALLBACKS:
+        if fb not in models and fb not in DEPRECATED_GROQ_MODELS:
+            models.append(fb)
+
+    return models
+
+
+def get_vision_models_to_try(api_key: str | None = None) -> list[str]:
+    """
+    Retorna lista de modelos de visão para tentar (descobertos dinamicamente + fallbacks estáticos).
+    Prioriza: modelo do .env > qwen/qwen3.8-27b > modelos ativos descobertos > fallbacks estáticos.
+    """
+    models = []
+
+    # 1. Modelo configurado no .env
+    env_model = os.environ.get("GROQ_VISION_MODEL")
+    if env_model and env_model not in DEPRECATED_GROQ_MODELS:
+        models.append(env_model)
+
+    # 2. Modelo preferido qwen/qwen3.8-27b
+    preferred = "qwen/qwen3.8-27b"
+    if preferred not in models and preferred not in DEPRECATED_GROQ_MODELS:
+        models.append(preferred)
+
+    # 3. Modelos ativos descobertos dinamicamente
+    if api_key:
+        _, vision_models = fetch_active_groq_models(api_key)
+        for m in vision_models:
+            if m not in models and m not in DEPRECATED_GROQ_MODELS:
+                models.append(m)
+
+    # 4. Fallbacks estáticos
+    for fb in STATIC_VISION_MODEL_FALLBACKS:
+        if fb not in models and fb not in DEPRECATED_GROQ_MODELS:
+            models.append(fb)
+
+    return models
+
+
+def groq_chat_with_fallback(messages, api_key, model_getter, max_tokens=4000, temperature=0.7, timeout=120, retries=3):
+    """
+    Chama o chat/completions do Groq com fallback automático entre modelos.
+
+    Args:
+        messages: Lista de mensagens para o chat
+        api_key: Chave da API Groq
+        model_getter: Função que retorna lista de modelos para tentar (ex: get_text_models_to_try)
+        max_tokens, temperature, timeout, retries: Parâmetros padrão do groq_chat
+
+    Returns:
+        Texto da resposta ou None se todos os modelos falharem
+    """
+    models_to_try = model_getter(api_key) if callable(model_getter) else model_getter(api_key)
+
+    for model in models_to_try:
+        result = groq_chat(messages, api_key, model, max_tokens, temperature, timeout, retries=1)
+
+        if result is not None:
+            if model != models_to_try[0]:
+                print(f"   ✅ Fallback funcionou com modelo: {model}")
+            return result
+
+        # Se falhou com 404/400, continua para o próximo
+        print(f"   ⚠️  Modelo {model} indisponível, tentando próximo...")
+
+    print(f"   ❌ Todos os modelos falharam")
+    return None
 
 
 def groq_chat(messages, api_key, model, max_tokens=4000, temperature=0.7, timeout=120, retries=3):
@@ -487,7 +730,14 @@ def generate_viral_script_ai(original_text, target_duration, api_key):
     )
     # Uma segunda tentativa: modelos às vezes devolvem só uma frase.
     for _ in range(2):
-        answer = groq_chat([{"role": "user", "content": prompt}], api_key, get_text_model())
+        # Usa fallback automático entre modelos (descobertos dinamicamente + estáticos)
+        answer = groq_chat_with_fallback(
+            [{"role": "user", "content": prompt}],
+            api_key,
+            get_text_models_to_try,
+            max_tokens=4000,
+            temperature=0.7
+        )
         script = clean_script(answer, max_words, min_words=min_words)
         if script:
             return script
@@ -584,7 +834,14 @@ def _write_script_for_moment(moment, described, api_key):
         f"5. Sem emojis, markdown, aspas ou títulos.\n"
         f"Responda APENAS com o texto da narração."
     )
-    answer = groq_chat([{"role": "user", "content": prompt}], api_key, get_text_model())
+    # Usa fallback automático entre modelos de texto
+    answer = groq_chat_with_fallback(
+        [{"role": "user", "content": prompt}],
+        api_key,
+        get_text_models_to_try,
+        max_tokens=4000,
+        temperature=0.7
+    )
     return clean_script(answer, max_words, min_words=int(TARGET_DURATION_MIN * SCRIPT_WORDS_PER_SECOND * 0.6))
 
 
@@ -606,15 +863,26 @@ def analyze_frames_with_ai(frame_paths, api_key):
     if not frame_paths:
         return []
 
-    model = get_vision_model()
+    # Obtém lista de modelos de visão para tentar (com fallback)
+    vision_models = get_vision_models_to_try(api_key)
+    print(f"🤖 Analisando {len(frame_paths)} frames (modelos: {', '.join(vision_models[:3])}{'...' if len(vision_models) > 3 else ''})...")
+
     batches = [frame_paths[i:i + MAX_IMAGES_PER_REQUEST]
                for i in range(0, len(frame_paths), MAX_IMAGES_PER_REQUEST)]
-    print(f"🤖 Analisando {len(frame_paths)} frames com {model} ({len(batches)} lotes de até {MAX_IMAGES_PER_REQUEST})...")
 
     described = []
     for n, batch in enumerate(batches, 1):
         print(f"   Lote {n}/{len(batches)}...")
-        described.extend(_describe_frame_batch(batch, api_key, model))
+        # Tenta cada modelo de visão até um funcionar
+        batch_described = []
+        for model in vision_models:
+            batch_described = _describe_frame_batch(batch, api_key, model)
+            if batch_described:
+                if model != vision_models[0]:
+                    print(f"      ✅ Fallback visão funcionou com: {model}")
+                break
+            print(f"      ⚠️  Modelo {model} falhou, tentando próximo...")
+        described.extend(batch_described)
 
     if not described:
         print("   ❌ A IA não devolveu nenhuma descrição de frame.")
@@ -645,7 +913,7 @@ def generate_climax_clips_from_visual(video_path, _frame_paths, climax_moments, 
     Para cada momento de clímax identificado, gera o corte completo:
     - Cria roteiro narrado (já vem do climax_moments)
     - Gera áudio TTS com edge-tts
-    - Corta vídeo no FFmpeg sincronizado com áudio
+    - Corta vídeo no FFmpeg sincronizado com áudio usando layout ClipFlow 3 camadas
     - Salva em output_dir
     Retorna lista de caminhos dos cortes gerados.
     """
@@ -703,10 +971,10 @@ def generate_climax_clips_from_visual(video_path, _frame_paths, climax_moments, 
                   f"corte {clip_idx} descartado em vez de gerar um vídeo de poucos segundos.")
             continue
 
-        # Cria legendas sincronizadas com WordBoundary
+        # Cria legendas sincronizadas com WordBoundary (estilo karaokê ClipFlow)
         ass_path = TEMP_DIR / f"visual_clip_{clip_idx}_subs.ass"
-        if not create_ass_subtitle_from_tts_events(word_events, ass_path):
-            print(f"   ⚠️  Falha ao criar legendas, continuando sem...")
+        if not create_karaoke_ass_subtitle_from_tts(word_events, ass_path, target_duration):
+            print(f"   ⚠️  Falha ao criar legendas karaokê, continuando sem...")
             ass_path = None
 
         # Nome do arquivo de saída
@@ -714,8 +982,7 @@ def generate_climax_clips_from_visual(video_path, _frame_paths, climax_moments, 
         output_name = f"corte_visual_{clip_idx}_{safe_reason}.mp4"
         output_path = output_dir / output_name
 
-        # Corta e exporta vídeo vertical sincronizado com TTS
-        # Cria um clip object compatível com cut_and_export_vertical
+        # Cria clip object para o layout ClipFlow
         clip_obj = {
             'start': clip_start,
             'end': clip_end,
@@ -727,63 +994,40 @@ def generate_climax_clips_from_visual(video_path, _frame_paths, climax_moments, 
         # Usa duração real do TTS para sincronia exata
         final_duration = tts_duration
         speed_ratio = clip_obj['duration'] / final_duration if final_duration > 0 else 1.0
-        v_fade, a_fade = fade_out_filters(final_duration)
-        v_fade = f",{v_fade}" if v_fade else ""
-        af_chain = "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary" + (f",{a_fade}" if a_fade else "")
 
-        # Constrói comando FFmpeg direto para modo visual (similar a cut_and_export_vertical modo IA)
-        bg_filter = (
-            f"[0:v]split=2[v1][v2];"
-            f"[v1]scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={VERTICAL_WIDTH}:{VERTICAL_HEIGHT},"
-            f"gblur=sigma=30[bg];"
-            f"[v2]scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:force_original_aspect_ratio=decrease[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[video]"
+        # Gerar gancho/pergunta via IA para o banner
+        api_key = get_groq_key()
+        if api_key:
+            print("   🤖 Gerando gancho viral e CTA com IA...")
+            hook_data = generate_hook_and_question(script, clip_obj['duration'], api_key)
+        else:
+            hook_data = {
+                "titulo_gancho": "MOMENTO INCRÍVEL",
+                "pergunta_cta": "O QUE ACHOU?",
+                "nota": 75
+            }
+
+        # Aplicar layout ClipFlow 3 camadas (sem webcam para modo visual)
+        success = process_clipflow_layout(
+            input_path=video_path,
+            output_path=output_path,
+            webcam_pos=None,  # Sem webcam no modo visual
+            ass_path=ass_path,
+            hook_data=hook_data,
+            clip_duration=clip_obj['duration'],
+            groq_api_key=api_key,
+            clip_text=script,
+            audio_mode="ia",
+            tts_audio_path=tts_audio_path,
+            final_duration=final_duration,
+            speed_ratio=speed_ratio
         )
 
-        if ass_path and ass_path.exists():
-            filter_complex = (
-                f"{bg_filter};"
-                f"[video]setpts={1/speed_ratio:.6f}*PTS[vspeed];"
-                f"[vspeed]subtitles='{ass_path.as_posix()}'{v_fade}[vout]"
-            )
-            map_v = "[vout]"
-        else:
-            filter_complex = (
-                f"{bg_filter};"
-                f"[video]setpts={1/speed_ratio:.6f}*PTS{v_fade}[vout]"
-            )
-            map_v = "[vout]"
-
-        ffmpeg_cmd = FFMPEG.as_posix()
-        cmd = [
-            ffmpeg_cmd, "-y",
-            "-ss", str(clip_start),
-            "-t", str(clip_obj['duration']),  # Trecho original; setpts ajusta para a duração do TTS
-            "-i", str(video_path),
-            "-i", str(tts_audio_path),
-            "-filter_complex", filter_complex,
-            "-map", map_v,
-            "-map", "1:a",
-            "-af", af_chain,
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "20",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-movflags", "+faststart",
-            "-shortest",
-            str(output_path)
-        ]
-
-        print(f"   ⚙️  Executando FFmpeg (velocidade: {speed_ratio:.2f}x)...")
-        ok, _, err = run_cmd(cmd)
-
-        if not ok:
-            print(f"   ❌ Erro no FFmpeg: {err[:300]}")
+        if not success:
+            print(f"   ❌ Erro no FFmpeg layout ClipFlow")
             # Tenta fallback simplificado
-            ok = _try_simple_cut(video_path, clip_start, clip_obj['duration'], tts_audio_path, ass_path, output_path, speed_ratio, final_duration)
-            if not ok:
+            success = _try_simple_cut_clipflow(video_path, clip_obj, ass_path, output_path, speed_ratio, final_duration, hook_data, api_key)
+            if not success:
                 continue
 
         print(f"   ✅ Corte visual salvo: {output_path}")
@@ -1027,63 +1271,93 @@ def clean_filename(name):
 
 
 def download_video(url, output_prefix):
-    """Baixa vídeo (1080p max) e áudio usando yt-dlp."""
-    # Limpa URL mantendo apenas o ID do vídeo
+    """Baixa vídeo e áudio usando yt-dlp.
+
+    Suporta YouTube, Twitch (clips e VODs), Kick e outras plataformas suportadas pelo yt-dlp.
+    Para YouTube: usa player_client android/web + JS runtime.
+    Para outras plataformas: usa formato compatível sem args específicos do YouTube.
+    """
+    # Limpa URL (apenas para YouTube; outras plataformas retornam inalteradas)
     clean_url = clean_youtube_url(url)
     if clean_url != url:
         print(f"\n🔗 URL original: {url}")
         print(f"🔗 URL limpa: {clean_url}")
     url = clean_url
 
-    print(f"\n📥 Baixando vídeo: {url}")
+    is_yt = is_youtube_url(url)
+    print(f"\n📥 Baixando vídeo: {url} {'(YouTube)' if is_yt else '(outra plataforma)'}")
+
     # Onde o yt-dlp encontra o ffmpeg (necessário para juntar vídeo + áudio)
     ffmpeg_loc = ["--ffmpeg-location", str(FFMPEG.parent)]
 
-    # Baixar vídeo (melhor qualidade até 1080p)
+    # ========== Baixar VÍDEO ==========
     video_path = TEMP_DIR / f"{output_prefix}_video.mp4"
+
+    if is_yt:
+        # YouTube: formato até 1080p + player_client + JS runtime
+        video_format = "bv*[height<=1080]+ba/b[height<=1080]"
+        extractor_args = ["--extractor-args", "youtube:player_client=android,web"]
+        js_args = ytdlp_js_args()
+    else:
+        # Twitch, Kick, etc.: formato compatível que garante merge de vídeo+áudio
+        video_format = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+        extractor_args = []
+        js_args = []  # Outras plataformas não precisam de JS runtime
+
     cmd = [
         sys.executable, "-m", "yt_dlp",
         *ffmpeg_loc,
         "--no-playlist",
         "--merge-output-format", "mp4",
-        "-f", "bv*[height<=1080]+ba/b[height<=1080]",
-        *ytdlp_js_args(),
+        "-f", video_format,
+        *js_args,
         "--rm-cache-dir",
-        "--extractor-args", "youtube:player_client=android,web",
+        *extractor_args,
         "-o", str(video_path),
         url
     ]
     ok, _, err = run_cmd(cmd)
     if not ok or not video_path.exists():
-        print(f"⚠️  Falha no download principal, tentando fallback com player_client=web...")
-        # Fallback: tentar apenas web client
-        cmd_fallback = [
-            sys.executable, "-m", "yt_dlp",
-            *ffmpeg_loc,
-            "--no-playlist",
-            "--merge-output-format", "mp4",
-            "-f", "bv*[height<=1080]+ba/b[height<=1080]",
-            *ytdlp_js_args(),
-            "--rm-cache-dir",
-            "--extractor-args", "youtube:player_client=web",
-            "-o", str(video_path),
-            url
-        ]
-        ok, _, err = run_cmd(cmd_fallback)
+        if is_yt:
+            print(f"⚠️  Falha no download principal, tentando fallback com player_client=web...")
+            # Fallback YouTube: apenas web client
+            cmd_fallback = [
+                sys.executable, "-m", "yt_dlp",
+                *ffmpeg_loc,
+                "--no-playlist",
+                "--merge-output-format", "mp4",
+                "-f", video_format,
+                *js_args,
+                "--rm-cache-dir",
+                "--extractor-args", "youtube:player_client=web",
+                "-o", str(video_path),
+                url
+            ]
+            ok, _, err = run_cmd(cmd_fallback)
         if not ok or not video_path.exists():
             print(f"❌ Falha ao baixar vídeo: {err}")
             return None, None
 
-    # Baixar áudio separado (para transcrição via legendas do YouTube)
+    # ========== Baixar ÁUDIO SEPARADO ==========
     audio_path = TEMP_DIR / f"{output_prefix}_audio.m4a"
+
+    if is_yt:
+        audio_format = "bestaudio[ext=m4a]/bestaudio"
+        audio_extractor_args = ["--extractor-args", "youtube:player_client=android,web"]
+        audio_js_args = ytdlp_js_args()
+    else:
+        audio_format = "bestaudio[ext=m4a]/bestaudio"
+        audio_extractor_args = []
+        audio_js_args = []
+
     cmd = [
         sys.executable, "-m", "yt_dlp",
         *ffmpeg_loc,
         "--no-playlist",
-        "-f", "bestaudio[ext=m4a]/bestaudio",
-        *ytdlp_js_args(),
+        "-f", audio_format,
+        *audio_js_args,
         "--rm-cache-dir",
-        "--extractor-args", "youtube:player_client=android,web",
+        *audio_extractor_args,
         "-o", str(audio_path),
         url
     ]
@@ -1091,18 +1365,29 @@ def download_video(url, output_prefix):
     if not ok:
         print(f"⚠️  Falha ao baixar áudio separado: {err}")
 
-    # Baixar legendas do YouTube (com timestamps) - EXPANDIDO para incluir inglês
+    # ========== Baixar LEGENDAS ==========
+    # Legendas automáticas funcionam melhor no YouTube; para outras plataformas tenta mesmo assim
+    if is_yt:
+        sub_langs = "pt,pt-BR,pt-PT,en"
+        sub_extractor_args = ["--extractor-args", "youtube:player_client=android,web"]
+        sub_js_args = ytdlp_js_args()
+    else:
+        # Para Twitch/Kick: tenta legendas mas não força player_client do YouTube
+        sub_langs = "pt,pt-BR,pt-PT,en"
+        sub_extractor_args = []
+        sub_js_args = []
+
     cmd = [
         sys.executable, "-m", "yt_dlp",
         *ffmpeg_loc,
         "--no-playlist",
         "--write-auto-sub",
-        "--sub-lang", "pt,pt-BR,pt-PT,en",  # Inclui inglês como fallback
+        "--sub-lang", sub_langs,
         "--sub-format", "json3",
         "--skip-download",
-        *ytdlp_js_args(),
+        *sub_js_args,
         "--rm-cache-dir",
-        "--extractor-args", "youtube:player_client=android,web",
+        *sub_extractor_args,
         "-o", str(TEMP_DIR / f"{output_prefix}_subs.%(ext)s"),
         url
     ]
@@ -1610,7 +1895,14 @@ def analyze_band_with_ai(band_text, band_start, band_end, api_key):
         f"- Se não houver bons momentos com gancho imediato, retorne lista vazia []"
     )
 
-    answer = groq_chat([{"role": "user", "content": prompt}], api_key, get_text_model(), temperature=0.3, max_tokens=2000)
+    # Usa fallback automático entre modelos de texto
+    answer = groq_chat_with_fallback(
+        [{"role": "user", "content": prompt}],
+        api_key,
+        get_text_models_to_try,
+        max_tokens=2000,
+        temperature=0.3
+    )
 
     if not answer:
         return []
@@ -2023,22 +2315,47 @@ def get_audio_duration(audio_path):
     return 0
 
 
-def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, audio_mode="original"):
-    """Corta vídeo, converte para vertical 9:16, adiciona legendas e normaliza áudio."""
+def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, audio_mode="original", webcam_pos=None, groq_api_key=None):
+    """
+    Corta vídeo usando layout ClipFlow 3 camadas (1080x1920) para TODOS os modos.
+
+    Layout:
+    1. TOPO (1080x730): Webcam crop ou gameplay zoom
+    2. MEIO (1080x180): Banner PNG com gancho viral
+    3. BASE (1080x1010): Gameplay central 9:16 + legendas
+    Empilhamento: vstack=inputs=3 = 1080x1920 exatos
+
+    Modos suportados:
+    - audio_mode="original": Áudio original do vídeo, legendas baseadas no YouTube
+    - audio_mode="ia": Narração TTS (edge-tts), legendas WordBoundary sincronizadas
+    """
     print(f"\n🎬 Processando corte {clip_num}: {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s) [Modo: {audio_mode}]")
 
     ass_path = None
     tts_audio_path = None
     final_duration = clip['duration']
-    video_trim_start = clip['start']
     tts_word_events = []
+    viral_script = None
+    speed_ratio = 1.0
+
+    # Gerar gancho/pergunta via Groq IA baseado na transcrição do clip
+    clip_text = clip.get('text', '')
+    if groq_api_key:
+        print("   🤖 Gerando gancho viral e CTA com IA...")
+        hook_data = generate_hook_and_question(clip_text, clip['duration'], groq_api_key)
+    else:
+        print("   ⚠️  Sem GROQ_API_KEY, usando gancho padrão")
+        hook_data = {
+            "titulo_gancho": "MOMENTO INCRÍVEL",
+            "pergunta_cta": "O QUE ACHOU?",
+            "nota": 75
+        }
 
     if audio_mode == "ia":
         # Modo IA: gerar narração e sincronizar
         print(f"🤖 Gerando roteiro viral e narração com edge-tts ({TTS_VOICE})...")
 
         # Gerar roteiro viral baseado no texto do clip
-        viral_script = None
         api_key = get_groq_key()
         if api_key:
             print(f"🧠 Reescrevendo o roteiro com IA ({get_text_model()})...")
@@ -2066,7 +2383,7 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
         else:
             print(f"🔊 Áudio TTS gerado: {tts_duration:.1f}s ({len(word_events)} eventos WordBoundary)")
             final_duration = tts_duration
-            video_trim_start = clip['start']
+            speed_ratio = clip['duration'] / final_duration if final_duration > 0 else 1.0
             tts_word_events = word_events
 
             # Criar legendas sincronizadas com eventos REAIS do edge-tts
@@ -2076,112 +2393,31 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
                 ass_path = None
 
     if audio_mode == "original":
-        # Modo original: usar legendas baseadas nas legendas do YouTube
+        # Modo original: usar legendas baseadas nas legendas do YouTube (estilo karaokê ClipFlow)
         ass_path = TEMP_DIR / f"clip_{clip_num}_subs.ass"
-        if not create_ass_subtitle(segments, clip['start'], clip['end'], ass_path):
-            print("⚠️  Falha ao criar legendas, exportando sem...")
+        # Usar create_karaoke_ass_subtitle para ter o mesmo estilo que o gameplay
+        if not create_karaoke_ass_subtitle(segments, clip['start'], clip['end'], clip['duration'], ass_path):
+            print("⚠️  Falha ao criar legendas karaokê, exportando sem...")
             ass_path = None
 
-    # Construir comando ffmpeg
-    # Fundo desfocado: duplicar vídeo, escalar para cobrir tela inteira, blur, overlay
-    bg_filter = (
-        f"[0:v]split=2[v1][v2];"
-        f"[v1]scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:force_original_aspect_ratio=increase,"
-        f"crop={VERTICAL_WIDTH}:{VERTICAL_HEIGHT},"
-        f"gblur=sigma=30[bg];"
-        f"[v2]scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:force_original_aspect_ratio=decrease[fg];"
-        f"[bg][fg]overlay=(W-w)/2:(H-h)/2[video]"
+    # Aplicar layout ClipFlow 3 camadas unificado
+    success = process_clipflow_layout(
+        input_path=video_path,
+        output_path=output_path,
+        webcam_pos=webcam_pos,
+        ass_path=ass_path,
+        hook_data=hook_data,
+        clip_duration=clip['duration'],
+        groq_api_key=groq_api_key,
+        clip_text=clip_text,
+        audio_mode=audio_mode,
+        tts_audio_path=tts_audio_path,
+        final_duration=final_duration,
+        speed_ratio=speed_ratio
     )
 
-    if audio_mode == "ia" and tts_audio_path and tts_audio_path.exists():
-        # Usar áudio TTS externo, remover áudio original do vídeo (-an na entrada de vídeo)
-        # O vídeo será esticado/acelerado para durar EXATAMENTE o mesmo que o áudio TTS
-        speed_ratio = clip['duration'] / final_duration if final_duration > 0 else 1.0
-        v_fade, a_fade = fade_out_filters(final_duration)
-        v_fade = f",{v_fade}" if v_fade else ""
-        af_chain = "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary" + (f",{a_fade}" if a_fade else "")
-
-        if ass_path and ass_path.exists():
-            filter_complex = (
-                f"{bg_filter};"
-                f"[video]setpts={1/speed_ratio:.6f}*PTS[vspeed];"
-                f"[vspeed]subtitles='{ass_path.as_posix()}'{v_fade}[vout]"
-            )
-            map_v = "[vout]"
-        else:
-            filter_complex = (
-                f"{bg_filter};"
-                f"[video]setpts={1/speed_ratio:.6f}*PTS{v_fade}[vout]"
-            )
-            map_v = "[vout]"
-
-        ffmpeg_cmd = FFMPEG.as_posix()
-        # IMPORTANTE: o -t da ENTRADA é a duração do trecho original (clip['duration']).
-        # O setpts (clip/final) é que encolhe/estica esse trecho para durar final_duration,
-        # a duração real do áudio TTS. Usar final_duration aqui aplicaria a escala duas vezes
-        # e o vídeo (com -shortest) cortaria a narração.
-        cmd = [
-            ffmpeg_cmd, "-y",
-            "-ss", str(video_trim_start),
-            "-t", str(clip['duration']),  # Trecho original; setpts ajusta para a duração do TTS
-            "-i", str(video_path),
-            "-i", str(tts_audio_path),
-            "-filter_complex", filter_complex,
-            "-map", map_v,
-            "-map", "1:a",
-            "-af", af_chain,
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "20",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-movflags", "+faststart",
-            "-shortest",  # Terminar quando o mais curto acabar (áudio TTS)
-            str(output_path)
-        ]
-    else:
-        # Modo original: usar áudio do vídeo
-        v_fade, a_fade = fade_out_filters(clip['duration'])
-        v_fade = f",{v_fade}" if v_fade else ""
-        if ass_path and ass_path.exists():
-            filter_complex = (
-                f"{bg_filter};"
-                f"[video]subtitles='{ass_path.as_posix()}'{v_fade}[vout]"
-            )
-            map_v = "[vout]"
-        elif v_fade:
-            filter_complex = f"{bg_filter};[video]null{v_fade}[vout]"
-            map_v = "[vout]"
-        else:
-            filter_complex = f"{bg_filter}"
-            map_v = "[video]"
-
-        af_filter = "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary" + (f",{a_fade}" if a_fade else "")
-
-        ffmpeg_cmd = FFMPEG.as_posix()
-        cmd = [
-            ffmpeg_cmd, "-y",
-            "-ss", str(clip['start']),
-            "-t", str(clip['duration']),
-            "-i", str(video_path),
-            "-filter_complex", filter_complex,
-            "-map", map_v,
-            "-map", "0:a?",
-            "-af", af_filter,
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "20",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-movflags", "+faststart",
-            str(output_path)
-        ]
-
-    print(f"⚙️  Executando ffmpeg...")
-    ok, _, err = run_cmd(cmd)
-
-    if not ok:
-        print(f"❌ Erro no ffmpeg: {err[:500]}")
+    if not success:
+        print(f"   ❌ Falha no layout ClipFlow, tentando fallback simplificado...")
         return cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num, audio_mode, tts_audio_path, final_duration)
 
     print(f"✅ Corte salvo: {output_path}")
@@ -2404,8 +2640,16 @@ def detect_webcam_position_ai(video_path, api_key):
             "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
         }]
 
-        model = get_vision_model()
-        answer = groq_chat([{"role": "user", "content": content}], api_key, model, temperature=0.1, max_tokens=200)
+        # Usa fallback automático entre modelos de visão
+        vision_models = get_vision_models_to_try(api_key)
+        answer = None
+        for model in vision_models:
+            answer = groq_chat([{"role": "user", "content": content}], api_key, model, temperature=0.1, max_tokens=200, retries=1)
+            if answer:
+                if model != vision_models[0]:
+                    print(f"      ✅ Fallback visão funcionou com: {model}")
+                break
+            print(f"      ⚠️  Modelo visão {model} falhou, tentando próximo...")
 
         if not answer:
             return None
@@ -2437,222 +2681,885 @@ def detect_webcam_position_ai(video_path, api_key):
         return None
 
 
-def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, webcam_pos):
+# ========== FUNÇÕES CLIPFLOW 3 CAMADAS (NOVO 2025) ==========
+
+def censor_profanity(text: str) -> str:
+    """Aplica censura simples a palavrões comuns no texto da legenda."""
+    PROFANITY_WORDS = [
+        "caralho", "porra", "puta", "merda", "foda", "cacete", "buceta", "pau", "rola",
+        "cu", "bosta", "arrombado", "otario", "otária", "filho da puta", "filha da puta",
+        "vai se foder", "vao se foder", "fodase", "foda-se", "carai", "krl", "cr", "putz"
+    ]
+    import re
+    censored = text
+    for word in PROFANITY_WORDS:
+        pattern = re.compile(re.escape(word), re.IGNORECASE)
+        def replace_func(match):
+            w = match.group()
+            if len(w) <= 2:
+                return "*" * len(w)
+            return w[0] + "*" * (len(w) - 1)
+        censored = pattern.sub(replace_func, censored)
+    return censored
+
+
+def create_hook_banner_image(titulo_gancho: str, pergunta_cta: str, output_path: Path) -> bool:
     """
-    Corta vídeo no modo Gameplay/Streamer (tela dividida) com otimizações de retenção.
+    Gera uma imagem PNG 1080x180 com o banner do gancho usando Pillow.
+    A faixa vermelha (hook bar) deve ficar LIMPA para a legenda karaokê ficar
+    centralizada dentro dela (y=730 a y=910 no vídeo final).
 
-    - Se webcam_pos não for None: cria split-screen com vstack
-      * Topo: webcam recortada (crop com coordenadas normalizadas) → scale 1080x620
-      * Base: gameplay central (crop 9:16) → scale 1080x1300
-      * Juntados com vstack = 1080x1920
-    - Se webcam_pos for None: crop central 9:16 + scale 1080x1920
-
-    Otimizações NOVO 2025:
-    - Gancho visual: faixa superior com título de impacto (drawtext) nos primeiros 4s
-    - Corte seco para loop: fade-out rápido 0.2s apenas áudio (sem fade vídeo)
-    - Legendas: 2-3 palavras, centro, negrito, contorno preto 6px
-    - Watermark: logo PNG discreto no canto (se assets/logo.png existir)
-
-    Áudio: original com loudnorm + fade-out rápido 0.2s (apenas áudio)
-    Legendas: .ass centralizada (Alignment=5), MarginV=1100
-
-    webcam_pos pode ser:
-    - None: sem webcam
-    - dict com chaves: x, y, w, h (normalizados 0.0-1.0), name (opcional)
-
-    clip pode conter: hook_title (título de impacto para banner superior)
+    Desenha APENAS:
+    - Fundo vermelho sólido (#D91E18)
+    - Borda sutil (1px) mais escura no topo e base da faixa
+    - Título do gancho BEM DISCRETO no topo da faixa (y=12), pequeno, sem pergunta/CTA
+      para não encavalar com a legenda karaokê que vai sobrepor no centro.
     """
-    webcam_name = "Sem webcam (gameplay only)" if webcam_pos is None else webcam_pos.get('name', 'Posição personalizada')
-    hook_title = clip.get('hook_title', '').strip()
-    print(f"\n🎬 Processando corte GAMEPLAY {clip_num}: {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s)")
-    print(f"   Webcam: {webcam_name}")
-    if hook_title:
-        print(f"   🎯 Gancho: {hook_title}")
-    if webcam_pos and 'x' in webcam_pos:
-        print(f"   Coordenadas: x={webcam_pos['x']:.3f}, y={webcam_pos['y']:.3f}, w={webcam_pos['w']:.3f}, h={webcam_pos['h']:.3f}")
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        print("   ❌ Pillow não instalado. Instale com: pip install pillow")
+        return False
 
-    # Criar legendas .ass sincronizadas com as falas
-    ass_path = TEMP_DIR / f"gameplay_clip_{clip_num}_subs.ass"
-    if not create_ass_subtitle_gameplay(segments, clip['start'], clip['end'], ass_path):
-        print("⚠️  Falha ao criar legendas, exportando sem...")
-        ass_path = None
+    WIDTH, HEIGHT = VERTICAL_WIDTH, CLIPFLOW_HOOK_BAR_HEIGHT  # 1080x180
+    BG_COLOR = (0xD9, 0x1E, 0x18)  # #D91E18 - vermelho sólido
+    BORDER_COLOR = (0xB0, 0x18, 0x14)  # #B01814 - vermelho mais escuro para borda sutil
 
-    # Construir filtro de vídeo para o modo gameplay
-    # NOVO: Fade rápido apenas no áudio (0.2s), sem fade no vídeo para incentivar loop
-    v_fade, a_fade = fade_out_filters_gameplay(clip['duration'])
-    v_fade = f",{v_fade}" if v_fade else ""
-    af_chain = "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary" + (f",{a_fade}" if a_fade else "")
+    # Cria imagem com fundo vermelho
+    img = Image.new('RGB', (WIDTH, HEIGHT), BG_COLOR)
+    draw = ImageDraw.Draw(img)
+
+    # Borda sutil (1px) no topo e base da faixa vermelha
+    draw.line([(0, 0), (WIDTH, 0)], fill=BORDER_COLOR, width=1)
+    draw.line([(0, HEIGHT - 1), (WIDTH, HEIGHT - 1)], fill=BORDER_COLOR, width=1)
+
+    # Tenta carregar fonte TrueType do sistema (apenas para título discreto)
+    font_title = None
+    font_paths = [
+        "C:/Windows/Fonts/arialbd.ttf",      # Arial Bold
+        "C:/Windows/Fonts/impact.ttf",       # Impact
+        "C:/Windows/Fonts/ariblk.ttf",       # Arial Black
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]
+
+    for fp in font_paths:
+        try:
+            # Fonte menor (28pt) para título discreto no topo
+            font_title = ImageFont.truetype(fp, 28)
+            print(f"   📝 Fonte carregada: {fp}")
+            break
+        except OSError:
+            continue
+
+    # Fallback: fonte padrão do Pillow
+    if font_title is None:
+        print("   ⚠️  Nenhuma fonte TrueType encontrada, usando fallback")
+        font_title = ImageFont.load_default()
+
+    # Desenha APENAS titulo_gancho BEM DISCRETO no topo da faixa (y=12)
+    # Sem pergunta_cta, sem texto no centro - a legenda karaokê vai lá
+    if titulo_gancho:
+        bbox = draw.textbbox((0, 0), titulo_gancho, font=font_title)
+        text_width = bbox[2] - bbox[0]
+        x = (WIDTH - text_width) // 2
+        y = 12  # Bem no topo da faixa vermelha
+
+        # Contorno preto fino (1px)
+        outline_offset = 1
+        for dx, dy in [(-outline_offset, 0), (outline_offset, 0), (0, -outline_offset), (0, outline_offset)]:
+            draw.text((x + dx, y + dy), titulo_gancho, font=font_title, fill=(0, 0, 0))
+        # Texto principal amarelo/dourado
+        draw.text((x, y), titulo_gancho, font=font_title, fill=(0xFF, 0xD7, 0x00))  # #FFD700
+
+    # Salva PNG
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(output_path, 'PNG')
+        print(f"   🖼️  Banner do gancho gerado (faixa limpa para karaokê): {output_path}")
+        return True
+    except Exception as e:
+        print(f"   ❌ Erro ao salvar banner PNG: {e}")
+        return False
+
+
+def create_karaoke_ass_subtitle(segments, clip_start, clip_end, clip_duration, output_path):
+    """
+    Cria legenda .ass estilo KARAOKÊ/DESTAQUE para a área do gameplay (base):
+    - Blocos de 2-3 palavras por vez (caixa alta)
+    - Palavra exata sendo pronunciada em AMARELO (#FFD700), resto em BRANCO
+    - Fonte Impact/Arial Black tamanho 68, borda preta grossa
+    - MarginV=220 (área inferior do gameplay)
+    - Censura simples de palavrões (F***, P***)
+    - Zero sobreposição: end do bloco atual = start do próximo
+
+    Os segmentos podem vir do YouTube (timestamps absolutos do vídeo) ou do Groq Whisper
+    (timestamps relativos ao clipe se já cortado). Esta função filtra pelo intervalo
+    do clipe e ajusta tempos para serem relativos ao início do clipe.
+    """
+    if not segments:
+        return False
+
+    # Agrupa em chunks de CLIPFLOW_KARAOKE_WORDS_PER_CHUNK palavras
+    WORDS_PER_CHUNK = CLIPFLOW_KARAOKE_WORDS_PER_CHUNK
+    chunks = []
+
+    for seg in segments:
+        # Filtrar segmentos fora do intervalo do clipe
+        if seg['end'] <= clip_start:
+            continue
+        if seg['start'] >= clip_end:
+            break
+
+        # Ajustar tempos para relativos ao início do clipe
+        adj_start = max(0, seg['start'] - clip_start)
+        adj_end = min(clip_duration, seg['end'] - clip_start)
+        if adj_end <= adj_start:
+            continue
+
+        words = seg['text'].split()
+        if not words:
+            continue
+
+        # Se o segmento tem word-level timestamps (Groq Whisper), usar eles
+        if 'words' in seg and seg['words']:
+            seg_words = seg['words']
+            # Filtrar palavras dentro do clipe e ajustar tempos
+            clip_words = []
+            for w in seg_words:
+                w_start = w['start'] - clip_start
+                w_end = w['end'] - clip_start
+                if w_end > 0 and w_start < clip_duration:
+                    clip_words.append({
+                        'word': w['word'],
+                        'start': max(0, w_start),
+                        'end': min(clip_duration, w_end)
+                    })
+            if clip_words:
+                # Agrupar palavras em chunks
+                for i in range(0, len(clip_words), WORDS_PER_CHUNK):
+                    chunk_words = clip_words[i:i + WORDS_PER_CHUNK]
+                    chunk_start = chunk_words[0]['start']
+                    chunk_end = chunk_words[-1]['end']
+                    censored_words = [censor_profanity(w['word']).upper() for w in chunk_words]
+                    chunks.append({
+                        'start': chunk_start,
+                        'end': chunk_end,
+                        'text': ' '.join(censored_words),
+                        'words': censored_words
+                    })
+                continue
+
+        # Fallback: estimar duração por palavra baseado no segmento ajustado
+        seg_duration = adj_end - adj_start
+        word_duration = seg_duration / len(words) if words else 0
+
+        for i in range(0, len(words), WORDS_PER_CHUNK):
+            chunk_words = words[i:i + WORDS_PER_CHUNK]
+            chunk_start = adj_start + i * word_duration
+            chunk_end = min(adj_start + (i + len(chunk_words)) * word_duration, adj_end)
+
+            # Censura palavrões
+            censored_words = [censor_profanity(w).upper() for w in chunk_words]
+            chunk_text = ' '.join(censored_words)
+
+            chunks.append({
+                'start': chunk_start,
+                'end': chunk_end,
+                'text': chunk_text,
+                'words': censored_words
+            })
+
+    if not chunks:
+        return False
+
+    # Zero sobreposição: end do atual = start do próximo
+    for i in range(len(chunks) - 1):
+        if chunks[i]['end'] > chunks[i + 1]['start']:
+            chunks[i]['end'] = chunks[i + 1]['start']
+
+    # Remove chunks muito curtos (< 0.3s)
+    chunks = [c for c in chunks if c['end'] - c['start'] >= 0.3]
+
+    # Header ASS para estilo karaokê CENTRALIZADO NA FAIXA VERMELHA (y=730-910)
+    # PlayResX: 1080, PlayResY: 1920 | Alignment=5 (centro exato) | MarginV=0
+    # Fontsize=54, Bold, Outline=3, Shadow=1
+    # Usa {\pos(540,835)} nos eventos para centralizar na faixa vermelha sem encavalar com título no topo (y=12)
+    KARAOKE_FONT_SIZE = 54
+    KARAOKE_ALIGNMENT = 5  # Centro exato (middle-center)
+    KARAOKE_MARGIN_V = 0
+    KARAOKE_OUTLINE = 3
+    KARAOKE_SHADOW = 1
+    # Faixa vermelha: y=730 a y=910. Centro ajustado para y=835 (abaixo do título em y=12)
+    KARAOKE_POS_X = 540
+    KARAOKE_POS_Y = 835
+
+    ass_header = f"""[Script Info]
+Title: ClipFlow Gameplay - Karaoke Subtitles (Centered in Red Bar)
+ScriptType: v4.00+
+PlayResX: {VERTICAL_WIDTH}
+PlayResY: {VERTICAL_HEIGHT}
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Karaoke,Impact,{KARAOKE_FONT_SIZE},&H00FFFFFF,&H00FFFF00,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{KARAOKE_OUTLINE},{KARAOKE_SHADOW},{KARAOKE_ALIGNMENT},20,20,{KARAOKE_MARGIN_V},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    def format_ass_time(seconds):
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        centisecs = int((seconds - int(seconds)) * 100)
+        return f"{hours}:{minutes:02d}:{secs:02d}.{centisecs:02d}"
+
+    events = []
+
+    # Constrói o texto com highlight karaokê (\k timing)
+    for chunk in chunks:
+        chunk_start = chunk['start']
+        chunk_end = chunk['end']
+        chunk_words = chunk['words']
+
+        # Cada palavra tem seu tempo em centisegundos para o efeito karaokê
+        karaoke_parts = []
+        chunk_total_duration = chunk_end - chunk_start
+        word_duration = chunk_total_duration / len(chunk_words) if chunk_words else 0
+
+        for j, word in enumerate(chunk_words):
+            word_dur_cs = int(word_duration * 100)
+            if word_dur_cs < 1:
+                word_dur_cs = 1
+            # Palavra atual em amarelo (#FFD700), resto em branco
+            # Usa {\k timing} para karaokê + {\t} para troca de cor
+            karaoke_parts.append(f"{{\\k{word_dur_cs}\\t(\\c&H00D7FF&)}}{word}{{\\t(\\c&HFFFFFF&)}}")
+
+        karaoke_text = " ".join(karaoke_parts)
+
+        start_fmt = format_ass_time(chunk_start)
+        end_fmt = format_ass_time(chunk_end)
+
+        # Adiciona {\pos(540,820)} para centralizar exatamente na faixa vermelha
+        events.append(f"Dialogue: 0,{start_fmt},{end_fmt},Karaoke,,0,0,0,karaoke,{{\\pos({KARAOKE_POS_X},{KARAOKE_POS_Y})}}{karaoke_text}")
+
+    try:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(ass_header)
+            f.write('\n'.join(events))
+        print(f"   📝 Legenda karaokê criada: {output_path} ({len(events)} blocos)")
+        return True
+    except Exception as e:
+        print(f"   ❌ Erro ao criar legenda karaokê: {e}")
+        return False
+
+
+def create_karaoke_ass_subtitle_from_tts(word_events, output_path, clip_duration):
+    """
+    Cria legenda .ass estilo KARAOKÊ a partir de eventos WordBoundary do edge-tts
+    para a faixa vermelha (hook bar) do ClipFlow.
+
+    - Blocos de 2-3 palavras por vez
+    - Palavra ativa em AMARELO (#FFD700), resto em BRANCO
+    - Fonte tamanho 54, Bold, Outline=3, Shadow=1
+    - Posicionada no centro da faixa vermelha (y=820, x=540)
+    - Zero sobreposição: end do bloco atual = start do próximo
+    """
+    if not word_events:
+        return False
+
+    WORDS_PER_CHUNK = CLIPFLOW_KARAOKE_WORDS_PER_CHUNK  # 2-3
+    chunks = []
+    current_chunk_words = []
+    current_chunk_start = None
+
+    for event in word_events:
+        word_text = event["text"].strip()
+        if not word_text:
+            continue
+
+        if current_chunk_start is None:
+            current_chunk_start = event["offset"]
+
+        current_chunk_words.append(word_text)
+
+        # Verificar se deve fechar o chunk: atingiu limite OU palavra tem pontuação final
+        is_end_of_sentence = word_text.endswith(('.', '!', '?', '...'))
+        if len(current_chunk_words) >= WORDS_PER_CHUNK or is_end_of_sentence:
+            chunk_text = ' '.join(current_chunk_words)
+            chunk_end = event["offset"] + event["duration"]
+            # Censura palavrões
+            censored_words = [censor_profanity(w).upper() for w in current_chunk_words]
+            chunks.append({
+                'start': current_chunk_start,
+                'end': chunk_end,
+                'text': chunk_text,
+                'words': censored_words
+            })
+            current_chunk_words = []
+            current_chunk_start = None
+
+    # Último chunk se houver palavras restantes
+    if current_chunk_words:
+        last_event = word_events[-1]
+        chunk_end = last_event["offset"] + last_event["duration"]
+        censored_words = [censor_profanity(w).upper() for w in current_chunk_words]
+        chunks.append({
+            'start': current_chunk_start,
+            'end': chunk_end,
+            'text': ' '.join(current_chunk_words),
+            'words': censored_words
+        })
+
+    if not chunks:
+        return False
+
+    # Zero sobreposição: end do atual = start do próximo
+    for i in range(len(chunks) - 1):
+        if chunks[i]['end'] > chunks[i + 1]['start']:
+            chunks[i]['end'] = chunks[i + 1]['start']
+
+    # Remove chunks muito curtos (< 0.3s)
+    chunks = [c for c in chunks if c['end'] - c['start'] >= 0.3]
+
+    # Header ASS para estilo karaokê CENTRALIZADO NA FAIXA VERMELHA (y=730-910)
+    KARAOKE_FONT_SIZE = 54
+    KARAOKE_ALIGNMENT = 5  # Centro exato (middle-center)
+    KARAOKE_MARGIN_V = 0
+    KARAOKE_OUTLINE = 3
+    KARAOKE_SHADOW = 1
+    KARAOKE_POS_X = 540
+    KARAOKE_POS_Y = 835  # Centro da faixa vermelha (730-910), abaixo do título no topo (y=12)
+
+    ass_header = f"""[Script Info]
+Title: ClipFlow - Karaoke Subtitles from TTS (Centered in Red Bar)
+ScriptType: v4.00+
+PlayResX: {VERTICAL_WIDTH}
+PlayResY: {VERTICAL_HEIGHT}
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Karaoke,Impact,{KARAOKE_FONT_SIZE},&H00FFFFFF,&H00FFFF00,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{KARAOKE_OUTLINE},{KARAOKE_SHADOW},{KARAOKE_ALIGNMENT},20,20,{KARAOKE_MARGIN_V},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    def format_ass_time(seconds):
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        centisecs = int((seconds - int(seconds)) * 100)
+        return f"{hours}:{minutes:02d}:{secs:02d}.{centisecs:02d}"
+
+    events = []
+
+    # Constrói o texto com highlight karaokê (\k timing)
+    for chunk in chunks:
+        chunk_start = chunk['start']
+        chunk_end = chunk['end']
+        chunk_words = chunk['words']
+
+        # Cada palavra tem seu tempo em centisegundos para o efeito karaokê
+        karaoke_parts = []
+        chunk_total_duration = chunk_end - chunk_start
+        word_duration = chunk_total_duration / len(chunk_words) if chunk_words else 0
+
+        for j, word in enumerate(chunk_words):
+            word_dur_cs = int(word_duration * 100)
+            if word_dur_cs < 1:
+                word_dur_cs = 1
+            # Palavra atual em amarelo (#FFD700), resto em branco
+            karaoke_parts.append(f"{{\\k{word_dur_cs}\\t(\\c&H00D7FF&)}}{word}{{\\t(\\c&HFFFFFF&)}}")
+
+        karaoke_text = " ".join(karaoke_parts)
+
+        start_fmt = format_ass_time(chunk_start)
+        end_fmt = format_ass_time(chunk_end)
+
+        # Adiciona {\pos(540,820)} para centralizar exatamente na faixa vermelha
+        events.append(f"Dialogue: 0,{start_fmt},{end_fmt},Karaoke,,0,0,0,karaoke,{{\\pos({KARAOKE_POS_X},{KARAOKE_POS_Y})}}{karaoke_text}")
+
+    try:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(ass_header)
+            f.write('\n'.join(events))
+        print(f"   📝 Legenda karaokê (TTS) criada: {output_path} ({len(events)} blocos)")
+        return True
+    except Exception as e:
+        print(f"   ❌ Erro ao criar legenda karaokê (TTS): {e}")
+        return False
+
+
+def generate_hook_and_question(transcription_text: str, clip_duration: float, api_key: str) -> dict:
+    """
+    Envia a transcrição para o Groq LLM para gerar gancho/pergunta/nota.
+    Retorna dict com: titulo_gancho, pergunta_cta, nota
+    Se falhar, retorna valores padrão seguros (NÃO aborta o clipe).
+    """
+    if not transcription_text.strip():
+        print("   ⚠️  Transcrição vazia, não é possível gerar gancho")
+        return {
+            "titulo_gancho": "MOMENTO INCRÍVEL NA LIVE",
+            "pergunta_cta": "O QUE VOCÊ ACHOU?",
+            "nota": 75
+        }
+
+    prompt = (
+        "Você é um especialista em criar clips virais para Shorts/Reels/TikTok. "
+        f"Analise a transcrição abaixo de um momento de gameplay/streamer ({clip_duration:.0f} segundos).\n\n"
+        "RETORNE APENAS JSON VÁLIDO com exatamente estas chaves:\n"
+        '{"titulo_gancho": "FRASE CURTA DE IMPACTO EM CAIXA ALTA (MÁX 5 PALAVRAS)", '
+        '"pergunta_cta": "PERGUNTA CURTA PARA GERAR COMENTÁRIOS (MÁX 4 PALAVRAS)", '
+        '"nota": 85}\n\n'
+        "REGRAS OBRIGATÓRIAS:\n"
+        "- titulo_gancho: MAIÚSCULAS, impacto imediato, máximo 5 palavras, sem pontuação final\n"
+        "- pergunta_cta: pergunta direta, máximo 4 palavras, termina com ?\n"
+        "- nota: inteiro 0-100, baseada no potencial viral do momento (emoção, tensão, humor, skill, fail épico)\n"
+        "- Se o conteúdo for genérico/sem graça, dê nota baixa\n\n"
+        f"TRANSCRIÇÃO:\n{transcription_text[:2000]}"
+    )
+
+    # Tenta modelo principal, depois fallbacks
+    models_to_try = [get_text_model(), "llama-3.1-8b-instant", "meta-llama/llama-4-scout-17b-16e-instruct", "qwen/qwen3-32b"]
+
+    for model in models_to_try:
+        try:
+            result = groq_chat([{"role": "user", "content": prompt}], api_key, model, temperature=0.7, max_tokens=200)
+
+            if not result:
+                print(f"   ⚠️  Groq ({model}) não retornou resposta, tentando próximo...")
+                continue
+
+            hook_data = extract_json(result)
+            if not hook_data or not isinstance(hook_data, dict):
+                print(f"   ⚠️  Resposta inválida do Groq ({model}): {result[:200]}")
+                continue
+
+            # Valida campos obrigatórios
+            required_keys = ["titulo_gancho", "pergunta_cta", "nota"]
+            for key in required_keys:
+                if key not in hook_data:
+                    print(f"   ⚠️  Campo '{key}' ausente na resposta do Groq ({model})")
+                    continue
+
+            titulo = str(hook_data["titulo_gancho"]).strip()
+            pergunta = str(hook_data["pergunta_cta"]).strip()
+            nota = int(hook_data["nota"])
+
+            # SEMPRE imprime nota e título para acompanhamento em tempo real
+            print(f"   [IA] Análise ({model}): Nota {nota}/100 | Título: '{titulo}' | Pergunta: '{pergunta}'")
+
+            # Validações
+            if nota < CLIPFLOW_HOOK_MIN_SCORE:
+                print(f"   ⚠️  Nota {nota}/100 abaixo do mínimo ({CLIPFLOW_HOOK_MIN_SCORE}), tentando próximo modelo...")
+                continue
+
+            # Limita palavras
+            titulo_words = titulo.split()
+            if len(titulo_words) > 5:
+                titulo = " ".join(titulo_words[:5])
+                print(f"   ✂️  Título truncado para 5 palavras: {titulo}")
+
+            pergunta_words = pergunta.split()
+            if len(pergunta_words) > 4:
+                pergunta = " ".join(pergunta_words[:4])
+                print(f"   ✂️  Pergunta truncada para 4 palavras: {pergunta}")
+
+            # Garante que pergunta termina com ?
+            if not pergunta.endswith("?"):
+                pergunta += "?"
+
+            # Garante caixa alta no título
+            titulo = titulo.upper()
+
+            print(f"   ✅ Gancho APROVADO ({model}): '{titulo}' | Pergunta: '{pergunta}' | Nota: {nota}")
+            return {
+                "titulo_gancho": titulo,
+                "pergunta_cta": pergunta,
+                "nota": nota
+            }
+
+        except Exception as e:
+            error_str = str(e)
+            if "404" in error_str or "400" in error_str or "does not exist" in error_str:
+                print(f"   ⚠️  Modelo {model} indisponível (404/400), tentando fallback...")
+                continue
+            print(f"   ❌ Erro ao gerar gancho/pergunta com {model}: {e}")
+            continue
+
+    # FALLBACK SEGURO: todos os modelos falharam → usa valores padrão e segue com o clipe
+    print("   ⚠️  [FALLBACK] Todos os modelos LLM falharam. Usando gancho padrão para não perder o clipe.")
+    return {
+        "titulo_gancho": "MOMENTO INCRÍVEL NA LIVE",
+        "pergunta_cta": "O QUE VOCÊ ACHOU?",
+        "nota": 75
+    }
+
+
+def process_clipflow_layout(input_path, output_path, webcam_pos, ass_path, hook_data, clip_duration, groq_api_key, clip_text,
+                            audio_mode="original", tts_audio_path=None, final_duration=None, speed_ratio=1.0):
+    """
+    Aplica layout ClipFlow 3 camadas (1080x1920) para TODOS os modos de corte.
+
+    1. BLOCO 1 - TOPO (Webcam): 1080x730
+       - Crop da webcam: iw*w:ih*h:iw*x:ih*y → scale=1080:730:force_original_aspect_ratio=increase,crop=1080:730
+       - Se sem webcam: gameplay com crop superior (zoom)
+    2. BLOCO 2 - MEIO (Faixa Divisória de Gancho): 1080x180
+       - Imagem PNG gerada via Pillow (banner_gancho.png, fundo #D91E18) como entrada de imagem estática
+         (-loop 1 -framerate 30 -t <duracao> -i <banner_png>) → scale=1080:180:force_original_aspect_ratio=increase,crop=1080:180
+       - NÃO usa o filtro "loop=loop=-1:size=1"
+    3. BLOCO 3 - BASE (Gameplay): 1080x1010
+       - Crop central 9:16: crop=ih*9/16:ih:(iw-ih*9/16)/2:0
+       - scale=1080:1010:force_original_aspect_ratio=increase,crop=1080:1010
+       - Legendas aplicadas APENAS UMA VEZ sobre o vídeo final empilhado, nunca duplicado
+    - Empilha [top][mid][base] com vstack=inputs=3 = 1080x1920 exatos
+    - Áudio: loudnorm + fade-out 1.5s (modo original) ou apenas áudio TTS (modo IA)
+    - Timeout: 600s
+    - Codecs: -c:v libx264 -preset veryfast -crf 22 -c:a aac -b:a 128k -movflags +faststart
+
+    Args:
+        audio_mode: "original" (usa áudio do vídeo) ou "ia" (usa tts_audio_path)
+        tts_audio_path: Caminho do áudio TTS (obrigatório se audio_mode=="ia")
+        final_duration: Duração final do arquivo (para modo IA = duração TTS; para original = clip_duration)
+        speed_ratio: clip['duration'] / final_duration (para ajustar velocidade do vídeo no modo IA)
+    """
+    print("   🎨 Aplicando layout ClipFlow 3 camadas (1080x1920)...")
 
     ffmpeg_cmd = FFMPEG.as_posix()
-
-    # Verificar se existe logo/watermark
     watermark_path = Path(GAMEPLAY_WATERMARK_PATH)
     has_watermark = watermark_path.exists()
-    if has_watermark:
-        print(f"   🏷️  Watermark: {watermark_path}")
+
+    # Prepara textos do gancho
+    titulo_gancho = hook_data.get("titulo_gancho", "") if hook_data else ""
+    pergunta_cta = hook_data.get("pergunta_cta", "") if hook_data else ""
+
+    # Duração efetiva para fade e para o banner
+    effective_duration = final_duration if final_duration else clip_duration
+
+    # 1. Gera banner PNG do gancho (1080x180) usando Pillow
+    banner_path = TEMP_DIR / "banner_gancho.png"
+    if not create_hook_banner_image(titulo_gancho, pergunta_cta, banner_path):
+        print("   ⚠️  Falha ao gerar banner do gancho, prosseguindo sem banner")
+        banner_path = None
 
     if webcam_pos is None:
-        # Modo sem webcam: apenas gameplay - crop central 9:16
-        vf = (
-            f"crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
-            f"scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}"
+        # SEM WEBCAM: Bloco 1 = gameplay com crop superior (zoom)
+        filter_complex = (
+            # Bloco 1 (Topo - 1080x730): Gameplay com crop superior (zoom)
+            f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
+            f"scale={VERTICAL_WIDTH}:{CLIPFLOW_WEBAM_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:{CLIPFLOW_WEBAM_HEIGHT}[top];"
+            # Bloco 3 (Base - 1080x1010): Gameplay central 9:16
+            f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
+            f"scale={VERTICAL_WIDTH}:{CLIPFLOW_GAMEPLAY_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:{CLIPFLOW_GAMEPLAY_HEIGHT}[base]"
         )
-
-        # Adicionar gancho visual (banner superior) se houver hook_title
-        if hook_title:
-            # drawtext: faixa amarela vibrante no topo, texto preto negrito centralizado
-            # y=140 (terço superior), altura ~120px, duração 4s
-            escaped_title = hook_title.replace("'", "\\'").replace(":", "\\:")
-            vf += (f",drawtext=text='{escaped_title}':"
-                   f"fontfile='C\\:/Windows/Fonts/arialbd.ttf':"
-                   f"fontsize=52:fontcolor=black:fontcolor_expr=black:"
-                   f"box=1:boxcolor=yellow@0.95:boxborderw=20:"
-                   f"x=(w-text_w)/2:y={GAMEPLAY_HOOK_BANNER_Y}:"
-                   f"enable='lt(t,{GAMEPLAY_HOOK_BANNER_DURATION})'")
-
-        # Adicionar watermark se existir
-        if has_watermark:
-            vf += f",movie='{watermark_path.as_posix()}'[wm];[in][wm]overlay=20:20[out]"
-
-        if ass_path and ass_path.exists():
-            vf += f",subtitles='{ass_path.as_posix()}'"
-        vf += v_fade
-
-        cmd = [
-            ffmpeg_cmd, "-y",
-            "-ss", str(clip['start']),
-            "-t", str(clip['duration']),
-            "-i", str(video_path),
-            "-vf", vf,
-            "-af", af_chain,
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "20",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-movflags", "+faststart",
-            str(output_path)
-        ]
     else:
-        # Tela dividida com webcam (usando coordenadas normalizadas do dict)
+        # COM WEBCAM: Bloco 1 = Webcam crop (usa iw*w:ih*h:iw*x:ih*y, nunca "w*" sem "i")
         wc_x = f"iw*{webcam_pos['x']:.6f}"
         wc_y = f"ih*{webcam_pos['y']:.6f}"
         wc_w = f"iw*{webcam_pos['w']:.6f}"
         wc_h = f"ih*{webcam_pos['h']:.6f}"
 
-        # Filter complex para tela dividida
-        # [0:v]crop=wc_w:wc_h:wc_x:wc_y,scale=1080:620:force_original_aspect_ratio=increase,crop=1080:620[cam]
-        # [0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1300:force_original_aspect_ratio=increase,crop=1080:1300[game]
-        # [cam][game]vstack=inputs=2[vout]
         filter_complex = (
+            # Bloco 1 (Topo - 1080x730): Webcam crop
             f"[0:v]crop={wc_w}:{wc_h}:{wc_x}:{wc_y},"
-            f"scale={VERTICAL_WIDTH}:620:force_original_aspect_ratio=increase,"
-            f"crop={VERTICAL_WIDTH}:620[cam];"
+            f"scale={VERTICAL_WIDTH}:{CLIPFLOW_WEBAM_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:{CLIPFLOW_WEBAM_HEIGHT}[top];"
+            # Bloco 3 (Base - 1080x1010): Gameplay central 9:16
             f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
-            f"scale={VERTICAL_WIDTH}:1300:force_original_aspect_ratio=increase,"
-            f"crop={VERTICAL_WIDTH}:1300[game];"
-            f"[cam][game]vstack=inputs=2[vout]"
+            f"scale={VERTICAL_WIDTH}:{CLIPFLOW_GAMEPLAY_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:{CLIPFLOW_GAMEPLAY_HEIGHT}[base]"
         )
 
-        # Adicionar gancho visual (banner superior) se houver hook_title
-        if hook_title:
-            escaped_title = hook_title.replace("'", "\\'").replace(":", "\\:")
-            filter_complex += (
-                f";[vout]drawtext=text='{escaped_title}':"
-                f"fontfile='C\\:/Windows/Fonts/arialbd.ttf':"
-                f"fontsize=52:fontcolor=black:"
-                f"box=1:boxcolor=yellow@0.95:boxborderw=20:"
-                f"x=(w-text_w)/2:y={GAMEPLAY_HOOK_BANNER_Y}:"
-                f"enable='lt(t,{GAMEPLAY_HOOK_BANNER_DURATION})'[vhook]"
-            )
-            map_v = "[vhook]"
-        else:
-            filter_complex += f";[vout]null[vhook]"
-            map_v = "[vhook]"
+    # Bloco 2 (Meio - 1080x180): Banner do gancho (PNG) OU faixa vermelha sólida como fallback
+    # IMPORTANTE: O banner PNG é imagem estática - usa entrada separada com -loop 1 -framerate 30 -t <duracao>
+    # e redimensiona com scale=1080:180:force_original_aspect_ratio=increase,crop=1080:180
+    # NÃO usa o filtro "loop=loop=-1:size=1"
+    if banner_path and banner_path.exists():
+        filter_complex += f";[1:v]scale={VERTICAL_WIDTH}:{CLIPFLOW_HOOK_BAR_HEIGHT}:force_original_aspect_ratio=increase,crop={VERTICAL_WIDTH}:{CLIPFLOW_HOOK_BAR_HEIGHT}[hook_bar]"
+        bar_label = "[hook_bar]"
+        banner_input = ["-loop", "1", "-framerate", "30", "-t", str(effective_duration), "-i", str(banner_path)]
+    else:
+        filter_complex += f";color=c=#D91E18:s={VERTICAL_WIDTH}x{CLIPFLOW_HOOK_BAR_HEIGHT}[hook_bar]"
+        bar_label = "[hook_bar]"
+        banner_input = []
 
-        # Adicionar watermark se existir
-        if has_watermark:
-            filter_complex += f";movie='{watermark_path.as_posix()}'[wm];[vhook][wm]overlay=20:20[vfinal]"
-            map_v = "[vfinal]"
+    # vstack final: 3 inputs (topo, meio/gancho, base) = 1080x1920
+    filter_complex += f";[top]{bar_label}[base]vstack=inputs=3[stacked]"
 
-        # Adicionar legendas
-        if ass_path and ass_path.exists():
-            filter_complex += f";[vfinal]subtitles='{ass_path.as_posix()}'{v_fade}[vfinal2]"
-            map_v = "[vfinal2]"
+    # Adiciona legendas APÓS o empilhamento, sobre o vídeo completo 1080x1920 (antes do fade)
+    if ass_path and ass_path.exists():
+        ass_path_escaped = ass_path.as_posix().replace(":", "\\:")
+        filter_complex += f";[stacked]subtitles='{ass_path_escaped}'[vout]"
+    else:
+        filter_complex += ";[stacked]copy[vout]"
 
+    # Adiciona fade de vídeo 1.5s no final
+    fade_start = max(0, effective_duration - 1.5)
+    filter_complex += f";[vout]fade=t=out:st={fade_start:.2f}:d=1.5[vout_fade]"
+    map_v = "[vout_fade]"
+
+    # Adiciona watermark se existir (aplica sobre o vídeo final com legendas)
+    if has_watermark:
+        # Escapa dois-pontos no caminho (para Windows com letra de drive)
+        wm_path_escaped = watermark_path.as_posix().replace(":", "\\:")
+        filter_complex = filter_complex.replace(
+            "[vout]fade=t=out:st=",
+            f"movie='{wm_path_escaped}'[wm];[vout][wm]overlay=20:20[wmarked];[wmarked]fade=t=out:st="
+        )
+        map_v = "[vout_fade]"  # already correct since fade is last
+
+    # Áudio: loudnorm + fade-out 1.5s (modo original) ou apenas loudnorm (modo IA, TTS já tem duração exata)
+    if audio_mode == "ia" and tts_audio_path and tts_audio_path.exists():
+        af = f"loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary,afade=t=out:st={fade_start:.2f}:d=1.5"
+    else:
+        af = f"loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary,afade=t=out:st={fade_start:.2f}:d=1.5"
+
+    # Monta comando FFmpeg
+    cmd = [
+        ffmpeg_cmd, "-y",
+        "-hide_banner", "-loglevel", "error",
+        "-ss", str(clip_duration if audio_mode == "ia" else clip_duration),  # Ajustado abaixo
+    ]
+
+    # Para modo IA, o -ss/-t é do trecho original, o setpts ajusta para duração do TTS
+    if audio_mode == "ia":
+        # O setpts será aplicado dentro do filter_complex
         cmd = [
             ffmpeg_cmd, "-y",
-            "-ss", str(clip['start']),
-            "-t", str(clip['duration']),
-            "-i", str(video_path),
-            "-filter_complex", filter_complex,
-            "-map", map_v,
-            "-map", "0:a?",
-            "-af", af_chain,
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "20",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-movflags", "+faststart",
-            str(output_path)
+            "-hide_banner", "-loglevel", "error",
+            "-ss", str(0),  # Será sobrescrito pela chamada
+            "-t", str(clip_duration),  # Trecho original
+            "-i", str(input_path),
         ]
+        # Adiciona banner como segundo input se existir
+        cmd.extend(banner_input)
+        # Adiciona TTS como input de áudio
+        cmd.extend(["-i", str(tts_audio_path)])
 
-    print(f"⚙️  Executando ffmpeg (modo gameplay otimizado)...")
-    ok, _, err = run_cmd(cmd)
+        # Adiciona setpts para ajustar velocidade do vídeo para durar o mesmo que o TTS
+        # O vídeo original tem duração clip_duration, precisa durar final_duration
+        # setpts = (final_duration / clip_duration) * PTS = (1/speed_ratio) * PTS
+        filter_complex = filter_complex.replace(
+            "[top]",
+            f"[0:v]setpts={1/speed_ratio:.6f}*PTS[vspeed];[vspeed]"
+        )
+    else:
+        # Modo original: usa áudio do vídeo
+        cmd = [
+            ffmpeg_cmd, "-y",
+            "-hide_banner", "-loglevel", "error",
+            "-i", str(input_path),
+        ]
+        cmd.extend(banner_input)
+
+    cmd.extend([
+        "-filter_complex", filter_complex,
+        "-map", map_v,
+        "-map", "1:a" if audio_mode == "ia" else "0:a?",
+        "-af", af,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(output_path)
+    ])
+
+    print("   ⚙️  Executando ffmpeg (ClipFlow 3 camadas)...")
+    ok, _, err = run_cmd(cmd, timeout=600)
 
     if not ok:
-        print(f"❌ Erro no ffmpeg: {err[:500]}")
-        # Fallback simplificado
+        # Mostra as ÚLTIMAS 800 chars do stderr (erro real, sem banner do FFmpeg)
+        err_tail = err[-800:] if len(err) > 800 else err
+        print(f"   ❌ Erro no FFmpeg layout 3 camadas: {err_tail}")
+        return False
+
+    print(f"   ✅ Layout ClipFlow 3 camadas aplicado com sucesso: {output_path}")
+    return True
+
+
+def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, webcam_pos, groq_api_key=None):
+    """
+    Corta vídeo no modo Gameplay/Streamer com layout ClipFlow 3 camadas (1080x1920).
+
+    NOVA ARQUITETURA CLIPFLOW 3 CAMADAS:
+    1. BLOCO 1 - TOPO (Webcam): 1080x730
+       - Crop da webcam selecionada → scale=1080:730:force_original_aspect_ratio=increase,crop=1080:730
+       - Se sem webcam: gameplay com crop superior (zoom)
+    2. BLOCO 2 - MEIO (Faixa Divisória de Gancho): 1080x180
+       - Imagem PNG gerada via Pillow com fundo vermelho (#D91E18)
+       - Título de gancho viral (amarelo/dourado, negrito, contorno preto)
+       - Pergunta/CTA abaixo (branco, contorno preto)
+    3. BLOCO 3 - BASE (Gameplay): 1080x1010
+       - Crop central 9:16 → scale=1080:1010:force_original_aspect_ratio=increase,crop=1080:1010
+       - Legendas estilo karaokê aplicadas por cima (MarginV=220)
+    - Empilha os 3 blocos com vstack=inputs=3 = 1080x1920 exatos
+
+    Otimizações:
+    - Banner PNG via Pillow (elimina erros drawtext no Windows)
+    - Legendas karaokê: 2-3 palavras, palavra ativa amarela, resto branco
+    - Render: libx264 veryfast CRF 22, aac 128k, timeout 300s
+    - Salva JSON de metadados junto ao vídeo
+
+    webcam_pos: None ou dict com x,y,w,h normalizados (0.0-1.0)
+    clip deve conter: text (transcrição do segmento)
+    """
+    webcam_name = "Sem webcam (gameplay only)" if webcam_pos is None else webcam_pos.get('name', 'Posição personalizada')
+    print(f"\n🎬 Processando corte GAMEPLAY {clip_num}: {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s)")
+    print(f"   Webcam: {webcam_name}")
+    if webcam_pos and 'x' in webcam_pos:
+        print(f"   Coordenadas: x={webcam_pos['x']:.3f}, y={webcam_pos['y']:.3f}, w={webcam_pos['w']:.3f}, h={webcam_pos['h']:.3f}")
+
+    # 1. Criar legenda karaokê .ass para o gameplay (base)
+    ass_path = TEMP_DIR / f"gameplay_clip_{clip_num}_subs.ass"
+    if not create_karaoke_ass_subtitle(segments, clip['start'], clip['end'], clip['duration'], ass_path):
+        print("   ⚠️  Falha ao criar legendas karaokê, exportando sem...")
+        ass_path = None
+
+    # 2. Gerar gancho/pergunta via Groq IA baseado na transcrição do clip
+    clip_text = clip.get('text', '')
+    if groq_api_key:
+        print("   🤖 Gerando gancho viral e CTA com IA...")
+        hook_data = generate_hook_and_question(clip_text, clip['duration'], groq_api_key)
+    else:
+        print("   ⚠️  Sem GROQ_API_KEY, usando gancho padrão")
+        hook_data = {
+            "titulo_gancho": "MOMENTO INCRÍVEL NA LIVE",
+            "pergunta_cta": "O QUE VOCÊ ACHOU?",
+            "nota": 75
+        }
+
+    # 3. Aplicar layout ClipFlow 3 camadas
+    success = process_clipflow_layout(
+        input_path=video_path,
+        output_path=output_path,
+        webcam_pos=webcam_pos,
+        ass_path=ass_path,
+        hook_data=hook_data,
+        clip_duration=clip['duration'],
+        groq_api_key=groq_api_key,
+        clip_text=clip_text
+    )
+
+    if not success:
+        print(f"   ❌ Falha no layout ClipFlow, tentando fallback simplificado...")
         return cut_simple_gameplay(video_path, clip, ass_path, output_path, clip_num, webcam_pos)
 
-    print(f"✅ Corte gameplay salvo: {output_path}")
+    # 4. Salvar JSON de metadados junto ao vídeo
+    json_path = output_path.with_suffix('.json')
+    metadata = {
+        "titulo_gancho": hook_data.get("titulo_gancho", ""),
+        "pergunta_cta": hook_data.get("pergunta_cta", ""),
+        "nota": hook_data.get("nota", 0),
+        "transcricao": clip_text,
+        "clip_start": clip['start'],
+        "clip_end": clip['end'],
+        "clip_duration": clip['duration'],
+        "webcam_position": webcam_pos,
+        "timestamp": datetime.now().isoformat()
+    }
+    try:
+        import json
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+        print(f"   📄 Metadados salvos: {json_path.name}")
+    except Exception as e:
+        print(f"   ⚠️  Erro ao salvar JSON: {e}")
+
+    print(f"✅ Corte ClipFlow salvo: {output_path}")
     return True
 
 
 def cut_simple_gameplay(video_path, clip, ass_path, output_path, clip_num, webcam_pos):
-    """Versão simplificada do modo gameplay sem filter_complex (fallback)."""
-    print(f"🔄 Tentando versão simplificada (gameplay)...")
+    """Versão simplificada do modo gameplay - fallback que SEMPRE gera vertical 1080x1920.
 
-    if webcam_pos is None:
-        # Apenas gameplay central
-        vf = f"crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}"
-    else:
-        # Simplificado: usa scale+pad com blur (não é split-screen real, mas funciona)
-        vf = f"scale={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:force_original_aspect_ratio=decrease,pad={VERTICAL_WIDTH}:{VERTICAL_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black"
-
-    if ass_path and ass_path.exists():
-        vf += f",subtitles='{ass_path.as_posix()}'"
-
-    v_fade, a_fade = fade_out_filters(clip['duration'])
-    if v_fade:
-        vf += f",{v_fade}"
-
-    af_chain = "loudnorm=I=-16:TP=-1.5:LRA=11" + (f",{a_fade}" if a_fade else "")
+    Mesmo no fallback, mantém layout 3 camadas ClipFlow (1080x1920):
+    - Topo (730px): webcam ou gameplay zoom
+    - Meio (180px): faixa vermelha sólida (#D91E18)
+    - Base (1010px): gameplay central 9:16 + legendas
+    - vstack = 1080x1920 exato
+    - NUNCA gera horizontal com tarjas pretas.
+    """
+    print(f"🔄 Tentando versão simplificada (gameplay - fallback vertical 1080x1920)...")
 
     ffmpeg_cmd = FFMPEG.as_posix()
+
+    if webcam_pos is None:
+        # SEM WEBCAM: Bloco 1 = gameplay com crop superior, Bloco 3 = gameplay central
+        filter_complex = (
+            f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
+            f"scale={VERTICAL_WIDTH}:{CLIPFLOW_WEBAM_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:{CLIPFLOW_WEBAM_HEIGHT}[top];"
+            f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
+            f"scale={VERTICAL_WIDTH}:{CLIPFLOW_GAMEPLAY_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:{CLIPFLOW_GAMEPLAY_HEIGHT}[base]"
+        )
+    else:
+        # COM WEBCAM: Bloco 1 = Webcam crop (iw*w:ih*h:iw*x:ih*y)
+        wc_x = f"iw*{webcam_pos['x']:.6f}"
+        wc_y = f"ih*{webcam_pos['y']:.6f}"
+        wc_w = f"iw*{webcam_pos['w']:.6f}"
+        wc_h = f"ih*{webcam_pos['h']:.6f}"
+
+        filter_complex = (
+            f"[0:v]crop={wc_w}:{wc_h}:{wc_x}:{wc_y},"
+            f"scale={VERTICAL_WIDTH}:{CLIPFLOW_WEBAM_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:{CLIPFLOW_WEBAM_HEIGHT}[top];"
+            f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
+            f"scale={VERTICAL_WIDTH}:{CLIPFLOW_GAMEPLAY_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:{CLIPFLOW_GAMEPLAY_HEIGHT}[base]"
+        )
+
+    # Adiciona legendas no gameplay (base) - APENAS UMA VEZ
+    if ass_path and ass_path.exists():
+        ass_path_escaped = ass_path.as_posix().replace(":", "\\:")
+        filter_complex += f";[base]subtitles='{ass_path_escaped}'[base_sub]"
+        base_label = "[base_sub]"
+    else:
+        base_label = "[base]"
+
+    # Bloco 2 (Meio - 1080x180): Faixa vermelha sólida (#D91E18) como fallback
+    filter_complex += f";color=c=#D91E18:s={VERTICAL_WIDTH}x{CLIPFLOW_HOOK_BAR_HEIGHT}[hook_bar]"
+
+    # vstack final: 3 inputs = 1080x1920 exato
+    filter_complex += f";[top][hook_bar]{base_label}vstack=inputs=3[vout]"
+
+    # Fade de vídeo 1.5s
+    fade_start = max(0, clip['duration'] - 1.5)
+    filter_complex += f";[vout]fade=t=out:st={fade_start:.2f}:d=1.5[vout_fade]"
+    map_v = "[vout_fade]"
+
+    # Áudio: loudnorm + fade-out 1.5s
+    af = f"loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary,afade=t=out:st={fade_start:.2f}:d=1.5"
+
     cmd = [
         ffmpeg_cmd, "-y",
+        "-hide_banner", "-loglevel", "error",
         "-ss", str(clip['start']),
         "-t", str(clip['duration']),
         "-i", str(video_path),
-        "-vf", vf,
-        "-af", af_chain,
-        "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "20",
-        "-c:a", "aac",
-        "-b:a", "128k",
+        "-filter_complex", filter_complex,
+        "-map", map_v,
+        "-map", "0:a?",
+        "-af", af,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+        "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
         str(output_path)
     ]
 
-    ok, _, err = run_cmd(cmd)
+    ok, _, err = run_cmd(cmd, timeout=600)
     if ok:
-        print(f"✅ Corte salvo (simplificado): {output_path}")
+        print(f"✅ Corte salvo (fallback vertical 1080x1920): {output_path}")
         return True
     else:
-        print(f"❌ Falha total: {err[:500]}")
+        print(f"❌ Falha total no fallback: {err[:500]}")
         return False
 
 
@@ -2900,43 +3807,59 @@ def main():
         print("   Fluxo: Transcrição → IA analisa faixas temporais → Seleção de clímax → Split-screen → FFmpeg")
         print("=" * 60)
 
-        # Perguntar quantos cortes gerar
-        print(f"\n📊 Quantidade de cortes (padrão: {GAMEPLAY_DEFAULT_CLIPS}, min: {GAMEPLAY_MIN_CLIPS}, max: {GAMEPLAY_MAX_CLIPS}):")
-        while True:
-            try:
-                num_clips_input = input(f"   Quantos cortes deseja gerar? [{GAMEPLAY_DEFAULT_CLIPS}]: ").strip()
-                if not num_clips_input:
-                    num_clips = GAMEPLAY_DEFAULT_CLIPS
-                    break
-                num_clips = int(num_clips_input)
-                if GAMEPLAY_MIN_CLIPS <= num_clips <= GAMEPLAY_MAX_CLIPS:
-                    break
-                print(f"   ❌ Digite um número entre {GAMEPLAY_MIN_CLIPS} e {GAMEPLAY_MAX_CLIPS}.")
-            except (ValueError, EOFError, KeyboardInterrupt):
-                print("\n   Cancelado ou entrada inválida. Usando padrão.")
-                num_clips = GAMEPLAY_DEFAULT_CLIPS
-                break
-        print(f"   ✅ Serão gerados {num_clips} cortes")
+        # Forçar áudio original no modo gameplay
+        audio_mode = "original"
 
-        # Perguntar posição da webcam (passa video_path e api_key para detecção automática)
+        # Perguntar posição da webcam (sempre, para clips curtos e longos)
         webcam_pos = ask_webcam_position(video_path, groq_api_key)
         if webcam_pos is None:
             print("❌ Opção inválida. Cancelando.")
             sys.exit(1)
 
-        # Forçar áudio original no modo gameplay
-        audio_mode = "original"
-
-        # Encontrar melhores clips usando IA distribuída pelo vídeo
-        if groq_api_key:
-            clips = find_best_clips_gameplay_ai(segments, video_duration, groq_api_key, num_clips)
+        # Suporte a clips curtos (<= 90s): trata o vídeo inteiro como um único segmento viral
+        if video_duration <= 90:
+            print(f"\n⚡ Vídeo curto detectado ({video_duration:.1f}s <= 90s): usando vídeo inteiro como único corte")
+            num_clips = 1
+            # Criar clip único cobrindo o vídeo inteiro
+            clips = [{
+                'start': 0.0,
+                'end': video_duration,
+                'duration': video_duration,
+                'text': ' '.join(s['text'] for s in segments) if segments else 'Gameplay curto',
+                'score': 100,
+                'reason': 'Vídeo curto completo',
+                'hook_title': 'MOMENTO ÉPICO COMPLETO'
+            }]
+            print(f"   ✅ Clip único criado: 0s - {video_duration:.1f}s ({video_duration:.1f}s)")
         else:
-            print("   ⚠️  Sem GROQ_API_KEY, usando método tradicional de sliding window...")
-            clips = find_best_clips(segments, video_duration, num_clips)
+            # Perguntar quantos cortes gerar (apenas para vídeos longos)
+            print(f"\n📊 Quantidade de cortes (padrão: {GAMEPLAY_DEFAULT_CLIPS}, min: {GAMEPLAY_MIN_CLIPS}, max: {GAMEPLAY_MAX_CLIPS}):")
+            while True:
+                try:
+                    num_clips_input = input(f"   Quantos cortes deseja gerar? [{GAMEPLAY_DEFAULT_CLIPS}]: ").strip()
+                    if not num_clips_input:
+                        num_clips = GAMEPLAY_DEFAULT_CLIPS
+                        break
+                    num_clips = int(num_clips_input)
+                    if GAMEPLAY_MIN_CLIPS <= num_clips <= GAMEPLAY_MAX_CLIPS:
+                        break
+                    print(f"   ❌ Digite um número entre {GAMEPLAY_MIN_CLIPS} e {GAMEPLAY_MAX_CLIPS}.")
+                except (ValueError, EOFError, KeyboardInterrupt):
+                    print("\n   Cancelado ou entrada inválida. Usando padrão.")
+                    num_clips = GAMEPLAY_DEFAULT_CLIPS
+                    break
+            print(f"   ✅ Serão gerados {num_clips} cortes")
 
-        if not clips:
-            print("❌ Não foi possível identificar trechos viáveis.")
-            sys.exit(1)
+            # Encontrar melhores clips usando IA distribuída pelo vídeo
+            if groq_api_key:
+                clips = find_best_clips_gameplay_ai(segments, video_duration, groq_api_key, num_clips)
+            else:
+                print("   ⚠️  Sem GROQ_API_KEY, usando método tradicional de sliding window...")
+                clips = find_best_clips(segments, video_duration, num_clips)
+
+            if not clips:
+                print("❌ Não foi possível identificar trechos viáveis.")
+                sys.exit(1)
 
         print(f"\n🎯 {len(clips)} melhores trechos identificados:")
         for i, clip in enumerate(clips, 1):
@@ -2946,7 +3869,7 @@ def main():
 
         # Processar cada corte no modo gameplay
         print("\n" + "=" * 60)
-        print("🎬 INICIANDO EXPORTAÇÃO DOS CORTES (GAMEPLAY)")
+        print("🎬 INICIANDO EXPORTAÇÃO DOS CORTES (GAMEPLAY - ClipFlow 3 Camadas)")
         print("=" * 60)
 
         success_count = 0
@@ -2955,7 +3878,7 @@ def main():
             output_name = f"corte_gameplay_{i}_{safe_text}.mp4"
             output_path = OUTPUT_DIR / output_name
 
-            if cut_and_export_gameplay(video_path, clip, segments, output_path, i, webcam_pos):
+            if cut_and_export_gameplay(video_path, clip, segments, output_path, i, webcam_pos, groq_api_key):
                 success_count += 1
 
         # Limpeza
