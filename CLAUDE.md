@@ -18,13 +18,14 @@
     - **Bug fixes aplicados (2025):**
 - **Modo `--audio gameplay` (NOVO)**: Modo Gameplay / Streamer com tela dividida (split-screen).
   - **Quantidade de cortes configurável**: Pergunta interativa no terminal (padrão 5, aceita 1-10).
-  - **Seleção de momentos por IA distribuída (NOVO)**: Para resolver concentração de cortes no início de lives longas (1-3h):
-    * Divide o vídeo em `GAMEPLAY_TIME_BANDS` (6) faixas temporais iguais do início ao fim
-    * Cada faixa envia transcrição compacta com timestamps [HH:MM:SS] para Groq (modelo de texto)
-    * IA retorna até `GAMEPLAY_CLIPS_PER_BAND` (2) melhores clímax por faixa com score 0-10
-    * Agrega todos os candidatos, ordena por score, aplica filtro anti-repetição: mínimo `GAMEPLAY_MIN_GAP_SECONDS` (300s = 5min) entre inícios de cortes
-    * Relaxa progressivamente o espaçamento (3min, 2min, 1min, sem filtro) se não atingir a quantidade desejada
-    * Fallback para método tradicional (sliding window) se sem GROQ_API_KEY
+  - **Seleção de momentos (REGRA: a IA escolhe, o código calcula)**: o título/texto de um corte NUNCA pode vir de algo que a IA escreveu sobre o tempo.
+    * `build_gameplay_candidates()` monta candidatos a partir da transcrição REAL em todo o vídeo: início/fim em limites de fala (segmentos), duração `GAMEPLAY_CLIP_DURATION_MIN`-`MAX`, e só entra quem tem fala suficiente (`GAMEPLAY_MIN_CLIP_WORDS`=30 palavras e `GAMEPLAY_MIN_WORDS_PER_SECOND`=0,8).
+    * Cada candidato recebe uma nota local (`local_moment_score`: densidade de fala, risadas, exclamações, palavras de reação; saudação perde ponto). Por faixa (`GAMEPLAY_TIME_BANDS`=6) entram até `GAMEPLAY_CANDIDATES_PER_BAND`=8 candidatos, sem sobreposição.
+    * `analyze_band_with_ai()` manda à IA os candidatos NUMERADOS com o texto real; ela devolve só `id`, `score`, `reason`, `hook_title` e `pergunta_cta`. O prompt NÃO tem timestamps, a IA NÃO calcula tempo e NÃO escreve o texto do corte. Se a IA falhar numa faixa, usa-se a nota local (`fonte: local`).
+    * Depois: ordena por score e aplica o filtro anti-repetição (`GAMEPLAY_MIN_GAP_SECONDS`=300s, relaxando para 180/120/60/0 se faltar corte). `clip['text']` é recalculado da transcrição do intervalo final (`real_text_for_range`).
+    * Antes de renderizar, `cut_and_export_gameplay()` recalcula o texto real do intervalo e DESCARTA o corte se a fala for insuficiente (exceto vídeo curto escolhido de propósito, `sem_checagem_fala`).
+    * Título da faixa: o `hook_data` que a IA devolveu para o candidato (baseado só no texto real) ou, se faltar, `generate_hook_and_question()` com o texto real. Nome do arquivo: `clip_file_title()` (título do gancho, ou começo da fala real). O `.json` ao lado traz `transcricao` real, `fonte_titulo`, `palavras`, `faixa_do_video`, `score_selecao`.
+    * Sem GROQ_API_KEY ou sem candidatos: método tradicional (`find_best_clips`, janelas deslizantes sobre a transcrição).
   - **Seleção de posição da webcam**: Pergunta interativa no terminal (7 opções):
     [1] Canto inferior esquerdo (padrão, x=0.0, y=0.72, w=0.26, h=0.28)
     [2] Canto superior esquerdo (x=0.0, y=0.0, w=0.26, h=0.28)
@@ -44,7 +45,7 @@
   - **Legendas**: `.ass` na linha divisória (`MarginV=1240`), fonte negrito, borda preta 5px, cor amarela (`&H00FFFF00`).
   - **Prefixo de saída**: `corte_gameplay_` na pasta `cortes_prontos/`.
   - **Detecção automática (opção 6)**: Função `detect_webcam_position_ai()` extrai frame em 10% da duração do vídeo, envia para Groq Vision (`qwen/qwen3.8-27b` por padrão) com prompt estruturado para retornar JSON com coordenadas normalizadas. Validação: coordenadas devem estar em 0.0-1.0 e crop não pode sair dos limites. Se falhar ou não encontrar webcam → fallback para opção 7 (sem webcam).
-  - **Funções novas**: `find_best_clips_gameplay_ai()`, `analyze_band_with_ai()`. Constantes: `GAMEPLAY_TIME_BANDS=6`, `GAMEPLAY_CLIPS_PER_BAND=2`, `GAMEPLAY_MIN_GAP_SECONDS=300`, `GAMEPLAY_DEFAULT_CLIPS=5`, `GAMEPLAY_MIN_CLIPS=1`, `GAMEPLAY_MAX_CLIPS=10`.
+  - **Funções novas**: `find_best_clips_gameplay_ai()`, `build_gameplay_candidates()`, `select_band_candidates()`, `analyze_band_with_ai()` (recebe candidatos reais), `real_text_for_range()`, `has_enough_speech()`, `clip_file_title()`. Constantes: `GAMEPLAY_TIME_BANDS=6`, `GAMEPLAY_CLIPS_PER_BAND=2`, `GAMEPLAY_MIN_GAP_SECONDS=300`, `GAMEPLAY_DEFAULT_CLIPS=5`, `GAMEPLAY_MIN_CLIPS=1`, `GAMEPLAY_MAX_CLIPS=10`.
       1. **Legenda pulando/duplicada**: Modo IA usa EXCLUSIVAMENTE eventos `WordBoundary` do `edge_tts.Communicate.stream()` — NUNCA usa `.vtt` do YouTube. Estilo `.ass` único (`Alignment=2`, `MarginV=320`), zero sobreposição, sem alternância de estilos (sem karaoke).
       2. **Voz sem respiro**: `generate_viral_script()` garante pontuação natural rigorosa (vírgulas, pontos, exclamações a cada frase curta) e NÃO remove pontuação antes de enviar ao `edge-tts`.
       3. **Sincronia exata áudio/vídeo**: o `-t` da ENTRADA do vídeo é a duração do trecho original (`clip['duration']`), e o `setpts` (`final_duration / clip['duration']`, ou seja `1/speed_ratio`) é quem ajusta o trecho para durar a duração REAL do MP3 (`final_duration`). NUNCA usar `final_duration` no `-t` de entrada: a escala seria aplicada duas vezes e o `-shortest` cortaria a narração.

@@ -170,6 +170,13 @@ Anote para cada item: **passou ou falhou**, a **URL** usada, a **opção** do me
    - a legenda acompanha a voz (3 a 5 palavras por vez, sem pular);
    - o vídeo **não** fica acelerado nem em câmera lenta de forma estranha.
 5. **Opção 4** (Gameplay/Streamer) com uma live gravada. A webcam do streamer deve aparecer **dentro** do vídeo, sem ser recortada.
+   **Teste de título e texto (importante):** para cada corte gerado, abra o `.json` que fica ao lado do `.mp4` e compare com o vídeo:
+   - a **legenda na tela**, o **texto `transcricao` do `.json`** e o **título da faixa vermelha** devem tratar do que o streamer **realmente fala naquele corte** (ouça o corte);
+   - o nome do arquivo (`corte_gameplay_N_...`) deve ser o título do gancho, e não uma frase solta de outro momento;
+   - em `fonte_titulo`, o valor esperado é `ia_trecho_real` ou `ia_texto_real` (`padrao` indica que a IA falhou);
+   - os cortes devem estar **espalhados pela live inteira** (veja `faixa_do_video` e `clip_start`), não todos no começo;
+   - um trecho **sem fala** (música, silêncio) **não pode** virar corte: o terminal deve mostrar `Corte descartado: fala insuficiente`.
+   Se um título não combinar com o corte, anote o `.json` inteiro e o texto do terminal.
 6. **Nitidez (o teste mais importante).** Abra um corte no tamanho real, no celular ou em tela cheia:
    - o vídeo está inteiro, **sem corte nas laterais** e sem zoom;
    - o texto do jogo e o rosto estão nítidos, **não** borrados nem com blocos;

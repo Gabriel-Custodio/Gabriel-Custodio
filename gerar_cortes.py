@@ -127,6 +127,17 @@ GAMEPLAY_HOOK_BANNER_DURATION = 4  # Duração da faixa em segundos
 GAMEPLAY_SUBTITLE_WORDS_PER_CHUNK = 3  # Palavras por bloco de legenda (era 4)
 GAMEPLAY_WATERMARK_PATH = "assets/logo.png"  # Logo/watermark opcional
 
+# Seleção de momentos do modo gameplay: o CÓDIGO monta os candidatos a partir da transcrição real
+# (início, fim e texto saem dela); a IA só escolhe entre candidatos numerados. Nunca calcula
+# tempo nem escreve o texto do corte.
+GAMEPLAY_CANDIDATES_PER_BAND = 8    # candidatos reais que a IA recebe por faixa
+GAMEPLAY_CANDIDATE_STEP = 8         # segundos mínimos entre inícios de candidatos
+GAMEPLAY_CANDIDATE_TEXT_CHARS = 600 # texto de cada candidato enviado à IA
+GAMEPLAY_MIN_CLIP_WORDS = 30        # menos palavras que isso = trecho sem fala suficiente
+GAMEPLAY_MIN_WORDS_PER_SECOND = 0.8 # densidade mínima de fala no trecho (palavras por segundo)
+GAMEPLAY_PAD_BEFORE = 0.3           # folga antes da primeira fala (s)
+GAMEPLAY_PAD_AFTER = 0.5            # folga depois da última fala (s)
+
 # ========== CONFIGURAÇÕES CLIPFLOW 3 CAMADAS (NOVO 2025 - igual monitor_lives.py) ==========
 CLIPFLOW_WEBAM_HEIGHT = 730                    # Altura do bloco webcam (topo)
 CLIPFLOW_HOOK_BAR_HEIGHT = 180                 # Altura da faixa divisória de gancho (meio)
@@ -1576,13 +1587,209 @@ def find_best_clips(segments, video_duration, num_clips=NUM_CLIPS):
     return selected[:num_clips]
 
 
+def segments_in_range(segments, start, end):
+    """Segmentos da transcrição que pertencem ao intervalo (pelo menos 50% dentro dele)."""
+    found = []
+    for seg in segments:
+        seg_start, seg_end = seg['start'], seg['end']
+        duration = seg_end - seg_start
+        if duration <= 0 or seg_end <= start or seg_start >= end:
+            continue
+        overlap = min(seg_end, end) - max(seg_start, start)
+        if overlap / duration >= 0.5:
+            found.append(seg)
+    return found
+
+
+def real_text_for_range(segments, start, end):
+    """Texto REAL (da transcrição) de um intervalo: retorna (texto, palavras, palavras_por_segundo)."""
+    text = ' '.join(seg['text'].strip() for seg in segments_in_range(segments, start, end)).strip()
+    words = len(text.split())
+    return text, words, words / max(end - start, 0.001)
+
+
+def has_enough_speech(words, words_per_second):
+    """True se o trecho tem fala suficiente para legenda, título e texto fazerem sentido."""
+    return words >= GAMEPLAY_MIN_CLIP_WORDS and words_per_second >= GAMEPLAY_MIN_WORDS_PER_SECOND
+
+
+_GREETING_RE = re.compile(
+    r"^\s*(salve|e a[ií],? galera|fala,? (galera|rapaziada|pessoal)|vamos l[aá]|ent[aã]o,? pessoal|boa (noite|tarde|dia)|bem[- ]vindos?)",
+    re.I)
+_LAUGH_RE = re.compile(r"\[(risos?|risadas?|gargalhadas?)\]|\b(k{3,}|(ha){2,}|(rs){2,})\b", re.I)
+_INTENSE_WORDS = ("meu deus", "não acredito", "nao acredito", "caramba", "socorro", "que isso", "loucura",
+                  "impossível", "impossivel", "mentira", "inacreditável", "inacreditavel", "olha isso", "nossa")
+
+
+def local_moment_score(text, words_per_second):
+    """Nota local (0 a ~9) de um trecho real: fala, risadas, exclamações, palavras de reação.
+
+    Serve para escolher QUAIS candidatos a IA vai ver. Não tem pretensão de ser o julgamento final.
+    """
+    score = min(words_per_second, 2.5) / 2.5 * 3.0
+    score += min(len(_LAUGH_RE.findall(text)), 3) * 0.8
+    score += min(text.count('!'), 4) * 0.4
+    score += min(text.count('?'), 3) * 0.2
+    lower = text.lower()
+    score += min(sum(1 for w in _INTENSE_WORDS if w in lower), 3) * 0.6
+    if _GREETING_RE.search(text):
+        score -= 2.0
+    return round(max(score, 0.0), 2)
+
+
+def build_gameplay_candidates(segments, video_duration):
+    """Monta candidatos a corte a partir da transcrição REAL, em todo o vídeo.
+
+    Início e fim ficam em limites de fala (segmentos); o texto é o que foi realmente dito no
+    intervalo. Trechos sem fala suficiente não viram candidatos.
+    """
+    segs = sorted((s for s in segments if s.get('text', '').strip() and s['end'] > s['start']),
+                  key=lambda s: s['start'])
+    if not segs:
+        return []
+    target = (GAMEPLAY_CLIP_DURATION_MIN + GAMEPLAY_CLIP_DURATION_MAX) / 2
+    candidates = []
+    last_start = -1e9
+    for i, first in enumerate(segs):
+        if first['start'] - last_start < GAMEPLAY_CANDIDATE_STEP:
+            continue
+        start = max(0.0, first['start'] - GAMEPLAY_PAD_BEFORE)
+        if start + GAMEPLAY_CLIP_DURATION_MIN > video_duration:
+            break
+        best_end, best_gap = None, None
+        k = i
+        while k < len(segs) and segs[k]['end'] - start <= GAMEPLAY_CLIP_DURATION_MAX:
+            duration = segs[k]['end'] - start
+            if duration >= GAMEPLAY_CLIP_DURATION_MIN:
+                ends_sentence = bool(re.search(r'[.!?…]["”\']?$', segs[k]['text'].strip()))
+                gap = abs(duration - target) - (3 if ends_sentence else 0)
+                if best_gap is None or gap < best_gap:
+                    best_gap, best_end = gap, segs[k]['end']
+            k += 1
+        if best_end is None:
+            end = min(start + target, video_duration)
+        else:
+            end = min(best_end + GAMEPLAY_PAD_AFTER, start + GAMEPLAY_CLIP_DURATION_MAX, video_duration)
+        if end - start < GAMEPLAY_CLIP_DURATION_MIN:
+            continue
+        text, words, wps = real_text_for_range(segs[i:k + 1], start, end)
+        if not has_enough_speech(words, wps):
+            continue
+        candidates.append({
+            'start': start, 'end': end, 'duration': end - start,
+            'text': text, 'words': words, 'wps': round(wps, 2),
+            'local_score': local_moment_score(text, wps),
+        })
+        last_start = first['start']
+    return candidates
+
+
+def select_band_candidates(candidates, band_start, band_end, limit):
+    """Os melhores candidatos (nota local) de uma faixa, sem sobreposição entre si."""
+    pool = sorted((c for c in candidates if band_start <= c['start'] < band_end),
+                  key=lambda c: c['local_score'], reverse=True)
+    chosen = []
+    for cand in pool:
+        if all(abs(cand['start'] - other['start']) >= GAMEPLAY_CLIP_DURATION_MAX for other in chosen):
+            chosen.append(cand)
+        if len(chosen) >= limit:
+            break
+    return sorted(chosen, key=lambda c: c['start'])
+
+
+def _clean_hook_title(value):
+    value = re.sub(r'["“”\'*#]+', '', str(value or '')).strip()
+    value = re.sub(r'[.!?…,;:]+$', '', value)
+    return ' '.join(value.split()[:5]).upper()
+
+
+def _clean_hook_question(value):
+    value = re.sub(r'["“”\'*#]+', '', str(value or '')).strip()
+    words = value.split()[:4]
+    return (' '.join(words).rstrip('?!.… ') + '?') if words else ''
+
+
+def analyze_band_with_ai(candidates, api_key):
+    """A IA ESCOLHE entre candidatos reais numerados; não calcula tempo nem escreve o texto.
+
+    Retorna a lista dos candidatos escolhidos (com score, motivo e, se houver, o gancho), uma lista
+    vazia se a IA não achou nada bom, ou None se a chamada falhou (quem chama usa a nota local).
+    """
+    if not candidates:
+        return []
+    limit = GAMEPLAY_CLIPS_PER_BAND
+    listing = "\n".join(
+        f"[{n}] {c['text'][:GAMEPLAY_CANDIDATE_TEXT_CHARS]}" for n, c in enumerate(candidates, 1))
+    prompt = (
+        "Você é um editor especialista em Shorts/TikTok/Reels de games. Abaixo estão TRECHOS REAIS de uma "
+        "live, já recortados e numerados. O texto de cada trecho é a transcrição EXATA do que o streamer "
+        f"disse nele. Escolha os {limit} melhores para cortes virais.\n\n"
+        "ACEITE: reação explosiva, pergunta intrigante, história engraçada ou chocante, clutch/vitória, "
+        "fail épico, descoberta, frase de impacto, risada.\n"
+        "REJEITE: saudações, enrolação, explicação de contexto, trechos sem graça e textos sem sentido "
+        "(transcrição ruim).\n\n"
+        f"TRECHOS:\n{listing}\n\n"
+        "Responda APENAS com JSON válido, uma lista de até "
+        f"{limit} objetos:\n"
+        '[{"id": 3, "score": 8.5, "reason": "motivo curto (máx 50 caracteres)", '
+        '"hook_title": "TÍTULO EM CAIXA ALTA, MÁX 5 PALAVRAS", "pergunta_cta": "PERGUNTA CURTA?"}]\n\n'
+        "Regras:\n"
+        "- id: o número do trecho; use SÓ números da lista.\n"
+        "- score: de 0 a 10.\n"
+        "- hook_title e pergunta_cta: baseados SOMENTE no texto do trecho escolhido. NÃO invente fatos, "
+        "nomes nem acontecimentos. Se o texto não fizer sentido, use \"\" nos dois.\n"
+        "- Se nenhum trecho for bom, responda []."
+    )
+    answer = groq_chat_with_fallback([{"role": "user", "content": prompt}], api_key,
+                                     get_text_models_to_try, max_tokens=1500, temperature=0.3)
+    if not answer:
+        return None
+    data = extract_json(answer)
+    if not isinstance(data, list):
+        return None
+
+    picked, used = [], set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get('id'))
+            score = float(item.get('score', 0))
+        except (TypeError, ValueError):
+            continue
+        if not (1 <= idx <= len(candidates)) or idx in used or score < 3.0:
+            continue
+        used.add(idx)
+        cand = dict(candidates[idx - 1])
+        title = _clean_hook_title(item.get('hook_title'))
+        question = _clean_hook_question(item.get('pergunta_cta'))
+        cand.update({
+            'score': min(score, 10.0),
+            'reason': str(item.get('reason', '')).strip()[:50],
+            'fonte': 'ia',
+        })
+        if title and question:
+            cand['hook_title'] = title
+            cand['hook_data'] = {'titulo_gancho': title, 'pergunta_cta': question,
+                                 'nota': int(min(score, 10.0) * 10)}
+        picked.append(cand)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
 def find_best_clips_gameplay_ai(segments, video_duration, api_key, num_clips=GAMEPLAY_DEFAULT_CLIPS):
-    """Seleciona os melhores trechos para cortes virais no modo Gameplay usando IA."""
+    """Seleciona os melhores trechos do modo Gameplay: candidatos reais + escolha da IA."""
     if not segments or not api_key:
         print("   ⚠️  Sem segmentos ou API key, usando método tradicional...")
         return find_best_clips(segments, video_duration, num_clips)
 
-    print(f"\n🤖 Modo Gameplay IA: Analisando vídeo em {GAMEPLAY_TIME_BANDS} faixas temporais...")
+    print(f"\n🤖 Modo Gameplay IA: montando candidatos a partir da transcrição real...")
+    all_pool = build_gameplay_candidates(segments, video_duration)
+    print(f"   🧩 {len(all_pool)} trechos candidatos com fala suficiente em todo o vídeo")
+    if not all_pool:
+        print("   ⚠️  Nenhum trecho com fala suficiente, usando método tradicional...")
+        return find_best_clips(segments, video_duration, num_clips)
 
     band_duration = video_duration / GAMEPLAY_TIME_BANDS
     all_candidates = []
@@ -1590,44 +1797,25 @@ def find_best_clips_gameplay_ai(segments, video_duration, api_key, num_clips=GAM
     for band_idx in range(GAMEPLAY_TIME_BANDS):
         band_start = band_idx * band_duration
         band_end = min((band_idx + 1) * band_duration, video_duration)
-
         print(f"   📍 Faixa {band_idx + 1}/{GAMEPLAY_TIME_BANDS}: {band_start/60:.1f}min - {band_end/60:.1f}min")
 
-        band_segments = []
-        for seg in segments:
-            if seg['end'] <= band_start:
-                continue
-            if seg['start'] >= band_end:
-                break
-            overlap_start = max(seg['start'], band_start)
-            overlap_end = min(seg['end'], band_end)
-            if overlap_end > overlap_start:
-                prop = (overlap_end - overlap_start) / (seg['end'] - seg['start'])
-                words = seg['text'].split()
-                n_words = max(1, int(len(words) * prop))
-                band_segments.append({
-                    'start': overlap_start,
-                    'end': overlap_end,
-                    'text': ' '.join(words[:n_words])
-                })
-
-        if not band_segments:
-            print(f"      ⚠️  Sem transcrição nesta faixa")
+        pool = select_band_candidates(all_pool, band_start, band_end, GAMEPLAY_CANDIDATES_PER_BAND)
+        if not pool:
+            print("      ⚠️  Sem trechos com fala suficiente nesta faixa")
             continue
 
-        band_text_parts = []
-        total_chars = 0
-        for seg in band_segments:
-            timestamp = f"[{int(seg['start']//3600):02d}:{int((seg['start']%3600)//60):02d}:{int(seg['start']%60):02d}]"
-            seg_text = f"{timestamp} {seg['text']}"
-            if total_chars + len(seg_text) > 3000:
-                break
-            band_text_parts.append(seg_text)
-            total_chars += len(seg_text)
-
-        band_text = "\n".join(band_text_parts)
-        candidates = analyze_band_with_ai(band_text, band_start, band_end, api_key)
-        all_candidates.extend(candidates)
+        picks = analyze_band_with_ai(pool, api_key)
+        if picks is None:
+            print("      ⚠️  IA indisponível nesta faixa: usando a nota local (fala, risadas, exclamações)")
+            picks = []
+            for cand in sorted(pool, key=lambda c: c['local_score'], reverse=True)[:GAMEPLAY_CLIPS_PER_BAND]:
+                cand = dict(cand)
+                cand.update({'score': min(cand['local_score'], 10.0), 'fonte': 'local',
+                             'reason': 'trecho com mais fala e reação (sem IA)'})
+                picks.append(cand)
+        for cand in picks:
+            cand['band'] = band_idx + 1
+        all_candidates.extend(picks)
 
     if not all_candidates:
         print("   ⚠️  IA não retornou candidatos, usando método tradicional...")
@@ -1675,107 +1863,27 @@ def find_best_clips_gameplay_ai(segments, video_duration, api_key, num_clips=GAM
         elif c['duration'] > GAMEPLAY_CLIP_DURATION_MAX:
             c['end'] = c['start'] + GAMEPLAY_CLIP_DURATION_MAX
             c['duration'] = GAMEPLAY_CLIP_DURATION_MAX
+        # o texto SEMPRE vem da transcrição do intervalo final (nunca do que a IA escreveu)
+        c['text'], c['words'], c['wps'] = real_text_for_range(segments, c['start'], c['end'])
+        c['wps'] = round(c['wps'], 2)
+
+    selected = [c for c in selected if has_enough_speech(c['words'], c['wps'])]
 
     print(f"\n🎯 {len(selected)} cortes finais selecionados:")
     for i, c in enumerate(selected, 1):
         print(f"  {i}. {c['start']:.1f}s - {c['end']:.1f}s ({c['duration']:.1f}s) | Score: {c['score']:.1f}")
         print(f"     Motivo: {c.get('reason', 'N/A')}")
         print(f"     Gancho: {c.get('hook_title', 'N/A')}")
-        print(f"     Texto: {c['text'][:120]}...")
+        print(f"     Fala real ({c['words']} palavras, {c['wps']}/s): {c['text'][:120]}...")
 
     return selected[:num_clips]
 
 
-def analyze_band_with_ai(band_text, band_start, band_end, api_key):
-    """Analisa uma faixa temporal com a IA para encontrar clímax."""
-    band_duration = band_end - band_start
-
-    prompt = (
-        f"Você é um editor especialista em Shorts/TikTok/Reels de games. "
-        f"Analise a transcrição de uma live/stream de gameplay (duração da faixa: {band_duration/60:.1f}min).\n"
-        f"O texto abaixo tem timestamps [HH:MM:SS].\n\n"
-        f"TRANSCRIÇÃO DA FAIXA:\n{band_text}\n\n"
-        f"Identifique os melhores {GAMEPLAY_CLIPS_PER_BAND} momentos para CORTES VIRAIS de {GAMEPLAY_CLIP_DURATION_MIN} a {GAMEPLAY_CLIP_DURATION_MAX} segundos.\n\n"
-        f"🎯 REGRA DE OURO DA RETENÇÃO:\n"
-        f"- O corte DEVE COMEÇAR NO CLÍMAX IMEDIATO (primeiros 2s = gancho total)\n"
-        f"- REJEITE: introduções lentas, saudações ('salve rapaziada', 'e aí galera', 'olha aí'), "
-        f"explicações demoradas, setup de contexto, 'vamos lá', 'então pessoal'\n"
-        f"- ACEITE APENAS: reação explosiva, pergunta intrigante aberta, clutch/vitória no exato momento, "
-        f"fail épico, descoberta chocante, frase de impacto, risada incontrolável\n"
-        f"- O corte DEVE TERMINAR LOGO APÓS O DESFECHO da frase/reação principal (sem silêncio morto)\n\n"
-        f"Responda APENAS com JSON válido, lista de objetos:\n"
-        f'[\n'
-        f'  {{"start_offset": 125.5, "duration": 38, "score": 9.0, '
-        f'"reason": "clutch 1v3 no último segundo", "text": "trecho da transcrição", '
-        f'"hook_title": "ELE VENCEU O IMPOSSÍVEL"}},\n'
-        f'  {{"start_offset": 380.0, "duration": 35, "score": 8.5, '
-        f'"reason": "reação de choque ao drop raro", "text": "trecho da transcrição", '
-        f'"hook_title": "NÃO ACREDITEI NO QUE VI"}}\n'
-        f']\n\n'
-        f"Regras OBRIGATÓRIAS:\n"
-        f"- start_offset: segundos desde o INÍCIO DA FAIXA (não do vídeo)\n"
-        f"- duration: entre {GAMEPLAY_CLIP_DURATION_MIN} e {GAMEPLAY_CLIP_DURATION_MAX} segundos (ideal: 32-45s)\n"
-        f"- score: 0 a 10 (potencial viral)\n"
-        f"- reason: descrição curta do porquê (máx 50 chars)\n"
-        f"- text: trecho relevante da transcrição (máx 200 chars)\n"
-        f"- hook_title: TÍTULO DE IMPACTO em CAIXA ALTA, 5-6 palavras máx\n"
-        f"- Se não houver bons momentos com gancho imediato, retorne lista vazia []"
-    )
-
-    answer = groq_chat_with_fallback(
-        [{"role": "user", "content": prompt}],
-        api_key,
-        get_text_models_to_try,
-        max_tokens=2000,
-        temperature=0.3
-    )
-
-    if not answer:
-        return []
-
-    data = extract_json(answer)
-    if not isinstance(data, list):
-        return []
-
-    candidates = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        try:
-            start_offset = float(item.get('start_offset', 0))
-            duration = float(item.get('duration', 40))
-            score = float(item.get('score', 0))
-            reason = str(item.get('reason', '')).strip()
-            text = str(item.get('text', '')).strip()
-            hook_title = str(item.get('hook_title', '')).strip().upper()
-        except (TypeError, ValueError):
-            continue
-
-        if not (0 <= start_offset <= band_duration):
-            continue
-        if not (GAMEPLAY_CLIP_DURATION_MIN <= duration <= GAMEPLAY_CLIP_DURATION_MAX):
-            duration = max(GAMEPLAY_CLIP_DURATION_MIN, min(GAMEPLAY_CLIP_DURATION_MAX, duration))
-        if score < 3.0:
-            continue
-
-        abs_start = band_start + start_offset
-        abs_end = min(abs_start + duration, band_end)
-        actual_duration = abs_end - abs_start
-
-        if actual_duration < GAMEPLAY_CLIP_DURATION_MIN:
-            continue
-
-        candidates.append({
-            'start': abs_start,
-            'end': abs_end,
-            'duration': actual_duration,
-            'text': text,
-            'score': score,
-            'reason': reason,
-            'hook_title': hook_title
-        })
-
-    return candidates
+def clip_file_title(clip, max_chars=50):
+    """Base do nome do arquivo: o título do gancho (se a IA fez um) ou o começo da fala REAL."""
+    base = (clip.get('hook_data') or {}).get('titulo_gancho') or clip.get('text', '')
+    base = clean_filename(base[:max_chars]).strip(' .')
+    return base or "corte"
 
 
 def generate_viral_script(original_text, target_duration):
@@ -3477,6 +3585,17 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
     if webcam_pos and 'x' in webcam_pos:
         print(f"   Coordenadas: x={webcam_pos['x']:.3f}, y={webcam_pos['y']:.3f}, w={webcam_pos['w']:.3f}, h={webcam_pos['h']:.3f}")
 
+    # O texto do corte é SEMPRE a fala real do intervalo (nunca um texto escrito pela IA).
+    clip_words, clip_wps = None, None
+    if segments:
+        real_text, clip_words, clip_wps = real_text_for_range(segments, clip['start'], clip['end'])
+        if not clip.get('sem_checagem_fala') and not has_enough_speech(clip_words, clip_wps):
+            print(f"   ⏭️  Corte descartado: fala insuficiente neste trecho "
+                  f"({clip_words} palavras, {clip_wps:.2f}/s; mínimo {GAMEPLAY_MIN_CLIP_WORDS} palavras e "
+                  f"{GAMEPLAY_MIN_WORDS_PER_SECOND}/s). Sem fala, a legenda e o título não fariam sentido.")
+            return False
+        clip['text'] = real_text
+
     clip_start = clip['start']
     clip_duration = clip['duration']
     temp_segment_path = TEMP_DIR / f"segment_gameplay_{clip_num}_{int(clip_start)}s_{int(clip_duration)}s.mp4"
@@ -3495,9 +3614,14 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
         ass_path = None
 
     clip_text = clip.get('text', '')
-    if groq_api_key:
-        print("   🤖 Gerando gancho viral e CTA com IA...")
+    hook_source = "ia_trecho_real"
+    if clip.get('hook_data'):
+        hook_data = clip['hook_data']
+        print(f"   🏷️  Título da IA (baseado só na fala real do trecho): '{hook_data['titulo_gancho']}'")
+    elif groq_api_key:
+        print("   🤖 Gerando gancho viral e CTA com IA (a partir da fala real do trecho)...")
         hook_data = generate_hook_and_question(clip_text, clip['duration'], groq_api_key)
+        hook_source = "ia_texto_real"
     else:
         print("   ⚠️  Sem GROQ_API_KEY, usando gancho padrão")
         hook_data = {
@@ -3505,6 +3629,7 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
             "pergunta_cta": "O QUE VOCÊ ACHOU?",
             "nota": 75
         }
+        hook_source = "padrao"
 
     success = process_clipflow_layout(
         input_path=input_video_path,
@@ -3534,6 +3659,14 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
         "pergunta_cta": hook_data.get("pergunta_cta", ""),
         "nota": hook_data.get("nota", 0),
         "transcricao": clip_text,
+        "transcricao_fonte": "transcrição real do intervalo do corte",
+        "palavras": clip_words,
+        "palavras_por_segundo": round(clip_wps, 2) if clip_wps is not None else None,
+        "fonte_titulo": hook_source,
+        "score_selecao": clip.get('score'),
+        "motivo_selecao": clip.get('reason'),
+        "fonte_selecao": clip.get('fonte'),
+        "faixa_do_video": clip.get('band'),
         "clip_start": clip['start'],
         "clip_end": clip['end'],
         "clip_duration": clip['duration'],
@@ -3965,7 +4098,8 @@ def main():
                 'text': ' '.join(s['text'] for s in segments) if segments else 'Gameplay curto',
                 'score': 100,
                 'reason': 'Vídeo curto completo',
-                'hook_title': 'MOMENTO ÉPICO COMPLETO'
+                'hook_title': 'MOMENTO ÉPICO COMPLETO',
+                'sem_checagem_fala': True
             }]
             print(f"   ✅ Clip único criado: 0s - {video_duration:.1f}s ({video_duration:.1f}s)")
         else:
@@ -4008,7 +4142,7 @@ def main():
 
         success_count = 0
         for i, clip in enumerate(clips, 1):
-            safe_text = clean_filename(clip['text'][:50])
+            safe_text = clip_file_title(clip)
             output_name = f"corte_gameplay_{i}_{safe_text}.mp4"
             output_path = OUTPUT_DIR / output_name
 
