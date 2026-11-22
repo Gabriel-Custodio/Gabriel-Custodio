@@ -137,6 +137,19 @@ CLIPFLOW_HOOK_MIN_SCORE = 65                   # Nota mínima para aceitar o gan
 CLIPFLOW_KARAOKE_WORDS_PER_CHUNK = 5           # Palavras por bloco karaokê (3-5)
 CLIPFLOW_KARAOKE_FONT_SIZE = 68                # Tamanho da fonte karaokê
 CLIPFLOW_KARAOKE_MARGIN_V = 220                # MarginV para área do gameplay (base)
+
+# Layout "fit" (PADRÃO): o vídeo original inteiro, em escala 1:1, dentro da tela 9:16 (1080x1920).
+# Nada é recortado nem ampliado além do necessário para caber na largura; o espaço que sobra em
+# cima e embaixo recebe um fundo (cópia desfocada do próprio vídeo, ou preto). O layout antigo
+# de 3 camadas (webcam recortada + gameplay com zoom) fica disponível com CORTES_LAYOUT=clipflow.
+DEFAULT_LAYOUT = "fit"          # "fit" ou "clipflow"; troque no .env com CORTES_LAYOUT
+FIT_BACKGROUND = "blur"         # "blur" (fundo desfocado) ou "black" (preto); .env: CORTES_FUNDO
+FIT_SHOW_HOOK = True            # faixa do gancho acima do vídeo, se sobrar espaço
+FIT_HOOK_GAP = 24               # distância (px) entre a faixa do gancho e o vídeo
+FIT_SUBTITLE_MARGIN_V = 420     # altura da legenda (px a partir da base), na área abaixo do vídeo
+QUALITY_CRF = 17                # qualidade da saída (menor = melhor; 17 é quase sem perdas visíveis)
+QUALITY_PRESET = "medium"
+INTERMEDIATE_CRF = 12           # pré-corte (arquivo temporário): quase sem perdas para não somar perda
 # ====================================
 
 
@@ -920,7 +933,7 @@ def generate_climax_clips_from_visual(video_path, _frame_paths, climax_moments, 
 
         if not success:
             print(f"   ❌ Erro no FFmpeg layout ClipFlow")
-            success = _try_simple_cut_clipflow(input_video_path if use_temp_segment else video_path, clip_obj, ass_path, output_path, speed_ratio, final_duration, hook_data, api_key, tts_audio_path)
+            success = _try_simple_cut_clipflow(video_path if get_layout() == "fit" else (input_video_path if use_temp_segment else video_path), clip_obj, ass_path, output_path, speed_ratio, final_duration, hook_data, api_key, tts_audio_path)
             if not success:
                 continue
 
@@ -932,6 +945,10 @@ def generate_climax_clips_from_visual(video_path, _frame_paths, climax_moments, 
 
 def _try_simple_cut_clipflow(video_path, clip, ass_path, output_path, speed_ratio, final_duration, hook_data, api_key, tts_audio_path=None):
     """Tenta corte simplificado usando layout ClipFlow 3 camadas (1080x1920)."""
+    if get_layout() == "fit":
+        # video_path precisa ser o vídeo COMPLETO: o trecho é cortado aqui com -ss/-t
+        return fit_fallback(video_path, clip['start'], clip['duration'], output_path, ass_path,
+                            audio_mode="ia", tts_audio_path=tts_audio_path, tts_duration=final_duration)
     print(f"   🔄 Tentando versão simplificada (ClipFlow 3 camadas)...")
 
     ffmpeg_cmd = FFMPEG.as_posix()
@@ -2086,8 +2103,8 @@ def extract_video_segment(video_path, start_time, duration, output_path):
         "-ss", str(start_time),
         "-t", str(duration),
         "-i", str(video_path),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-        "-c:a", "aac", "-b:a", "128k",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(INTERMEDIATE_CRF),
+        "-c:a", "aac", "-b:a", "192k",
         "-vf", "setpts=PTS-STARTPTS",
         "-af", "asetpts=PTS-STARTPTS",
         "-fps_mode", "cfr",
@@ -2216,7 +2233,11 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
 
 
 def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num, audio_mode="original", tts_audio_path=None, tts_duration=None):
-    """Versão simplificada do fallback - SEMPRE usa layout ClipFlow 3 camadas (1080x1920)."""
+    """Versão simplificada do fallback (fit: trecho certo do vídeo completo; clipflow: 3 camadas)."""
+    if get_layout() == "fit":
+        print("🔄 Tentando versão simplificada (layout fit)...")
+        return fit_fallback(video_path, clip['start'], clip['duration'], output_path, ass_path,
+                            audio_mode=audio_mode, tts_audio_path=tts_audio_path, tts_duration=tts_duration)
     print(f"🔄 Tentando versão simplificada (fallback ClipFlow 3 camadas vertical 1080x1920)...")
 
     ffmpeg_cmd = FFMPEG.as_posix()
@@ -3139,9 +3160,198 @@ def repair_sync_only(input_path, output_path, clip_duration, hook_data, groq_api
     return True
 
 
+def get_layout():
+    """Layout escolhido: 'fit' (padrão) ou 'clipflow'. Troca pelo .env (CORTES_LAYOUT)."""
+    value = (os.environ.get("CORTES_LAYOUT") or DEFAULT_LAYOUT).strip().lower()
+    return value if value in ("fit", "clipflow") else DEFAULT_LAYOUT
+
+
+def fit_background_mode():
+    """Fundo do layout fit: 'blur' ou 'black'. Troca pelo .env (CORTES_FUNDO)."""
+    value = (os.environ.get("CORTES_FUNDO") or FIT_BACKGROUND).strip().lower()
+    if value in ("black", "preto"):
+        return "black"
+    if value in ("blur", "desfocado"):
+        return "blur"
+    return FIT_BACKGROUND
+
+
+def fit_geometry(src_w, src_h):
+    """Tamanho (largura, altura), pares, do vídeo dentro de 1080x1920 sem cortar nada."""
+    if src_w <= 0 or src_h <= 0:
+        return 0, 0
+    scale = min(VERTICAL_WIDTH / src_w, VERTICAL_HEIGHT / src_h)
+    w = int(round(src_w * scale / 2)) * 2
+    h = int(round(src_h * scale / 2)) * 2
+    return min(w, VERTICAL_WIDTH), min(h, VERTICAL_HEIGHT)
+
+
+def retarget_ass_for_fit(ass_path, out_path):
+    """Copia o .ass trocando alinhamento e altura da legenda para a área abaixo do vídeo.
+
+    Cada modo gera o .ass para o seu próprio layout; no layout fit a legenda fica sempre
+    centralizada, FIT_SUBTITLE_MARGIN_V px acima da base. Se algo falhar, usa o original.
+    """
+    try:
+        text = Path(ass_path).read_text(encoding="utf-8-sig")
+    except OSError:
+        return Path(ass_path)
+
+    def fix(match):
+        fields = match.group(2).split(",")
+        if len(fields) >= 23:
+            fields[18] = "2"                          # Alignment: baixo-centro
+            fields[21] = str(FIT_SUBTITLE_MARGIN_V)   # MarginV
+        return match.group(1) + ",".join(fields)
+
+    try:
+        Path(out_path).write_text(re.sub(r"^(Style:\s*)(.*)$", fix, text, flags=re.M), encoding="utf-8")
+    except OSError:
+        return Path(ass_path)
+    return Path(out_path)
+
+
+def export_fit_layout(input_path, output_path, ass_path, hook_data, effective_duration,
+                      audio_mode="original", tts_audio_path=None, speed_ratio=1.0,
+                      trim_start=None, trim_duration=None, simple=False):
+    """Exporta o vídeo ORIGINAL inteiro em 1080x1920, sem recorte e sem zoom.
+
+    - O vídeo é só reduzido para caber (lanczos); nunca é cortado nem esticado.
+    - Fundo: cópia desfocada do vídeo (CORTES_FUNDO=blur) ou preto.
+    - trim_start/trim_duration: cortam o trecho direto do vídeo completo (usado nos fallbacks;
+      no fluxo normal o input já é o trecho pré-cortado).
+    - simple=True: fundo preto, sem faixa de gancho nem marca d'água (fallback).
+    Retorna (ok, stderr).
+    """
+    w, h = VERTICAL_WIDTH, VERTICAL_HEIGHT
+    is_ia = bool(audio_mode == "ia" and tts_audio_path and Path(tts_audio_path).exists())
+
+    video = "[0:v]setpts=PTS-STARTPTS"
+    if is_ia and speed_ratio and speed_ratio > 0:
+        video += f",setpts={1 / speed_ratio:.6f}*PTS"
+    fit_scale = f"scale={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos"
+
+    if not simple and fit_background_mode() == "blur":
+        graph = (
+            f"{video},split=2[a][b];"
+            f"[a]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},gblur=sigma=30[bg];"
+            f"[b]{fit_scale}[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[canvas]"
+        )
+    else:
+        graph = f"{video},{fit_scale},pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black[canvas]"
+    label = "[canvas]"
+
+    cmd = [FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error", "-fflags", "+genpts"]
+    if trim_start is not None:
+        cmd += ["-ss", str(trim_start), "-t", str(trim_duration)]
+    cmd += ["-i", str(input_path)]
+    next_input = 1
+
+    if not simple and FIT_SHOW_HOOK and hook_data:
+        src_w, src_h = get_video_dimensions(input_path)
+        _, fg_h = fit_geometry(src_w, src_h)
+        free_top = (h - fg_h) // 2 if fg_h else 0
+        if free_top >= CLIPFLOW_HOOK_BAR_HEIGHT + FIT_HOOK_GAP:
+            banner_path = TEMP_DIR / "banner_gancho.png"
+            if create_hook_banner_image(hook_data.get("titulo_gancho", ""), hook_data.get("pergunta_cta", ""), banner_path):
+                y = free_top - CLIPFLOW_HOOK_BAR_HEIGHT - FIT_HOOK_GAP
+                cmd += ["-loop", "1", "-framerate", "30", "-t", str(effective_duration), "-i", str(banner_path)]
+                graph += f";{label}[{next_input}:v]overlay=0:{y}[withhook]"
+                label = "[withhook]"
+                next_input += 1
+
+    if ass_path and Path(ass_path).exists():
+        fit_ass = retarget_ass_for_fit(ass_path, TEMP_DIR / f"{Path(ass_path).stem}_fit.ass")
+        graph += f";{label}subtitles='{Path(fit_ass).as_posix().replace(':', chr(92) + ':')}'[withsubs]"
+        label = "[withsubs]"
+
+    watermark_path = Path(GAMEPLAY_WATERMARK_PATH)
+    if not simple and watermark_path.exists():
+        graph += (f";movie='{watermark_path.as_posix().replace(':', chr(92) + ':')}'[wm];"
+                  f"{label}[wm]overlay=20:20[wmarked]")
+        label = "[wmarked]"
+
+    fade_start = max(0, effective_duration - 1.5)
+    graph += f";{label}fade=t=out:st={fade_start:.2f}:d=1.5[vout]"
+
+    if is_ia:
+        cmd += ["-i", str(tts_audio_path)]
+        audio_map = f"{next_input}:a"
+    else:
+        audio_map = "0:a?"
+    af = ("asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,"
+          "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary,"
+          f"afade=t=out:st={fade_start:.2f}:d=1.5")
+
+    cmd += [
+        "-filter_complex", graph,
+        "-map", "[vout]", "-map", audio_map,
+        "-af", af,
+        "-c:v", "libx264", "-preset", QUALITY_PRESET, "-crf", str(QUALITY_CRF),
+        "-profile:v", "high", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-fps_mode", "cfr",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    ok, _, err = run_cmd(cmd, timeout=900)
+    return ok, err
+
+
+def process_fit_layout(input_path, output_path, webcam_pos, ass_path, hook_data, clip_duration, groq_api_key, clip_text,
+                       audio_mode="original", tts_audio_path=None, final_duration=None, speed_ratio=1.0):
+    """Layout fit no fluxo normal (mesma assinatura do process_clipflow_layout)."""
+    print("   🎨 Layout fit: vídeo original inteiro em 1080x1920, sem recorte nem zoom...")
+    if webcam_pos is not None:
+        print("   ℹ️  A webcam já aparece dentro do vídeo; o layout fit não a recorta nem a amplia.")
+    ok, err = export_fit_layout(
+        input_path, output_path, ass_path, hook_data,
+        final_duration if final_duration else clip_duration,
+        audio_mode=audio_mode, tts_audio_path=tts_audio_path, speed_ratio=speed_ratio)
+    if not ok:
+        print(f"   ❌ Erro no FFmpeg (layout fit): {err[-800:]}")
+        return False
+    print(f"   ✅ Corte salvo: {output_path}")
+    return True
+
+
+def fit_fallback(video_path, start, duration, output_path, ass_path, audio_mode="original",
+                 tts_audio_path=None, tts_duration=None):
+    """Fallback do layout fit: corta o trecho certo (-ss/-t) direto do vídeo completo.
+
+    Tenta fundo preto com legenda; se falhar, tenta sem legenda. Nunca codifica o vídeo inteiro.
+    """
+    is_ia = bool(audio_mode == "ia" and tts_audio_path and Path(tts_audio_path).exists())
+    if is_ia:
+        real = tts_duration if tts_duration else get_audio_duration(tts_audio_path)
+        if not real or real <= 0:
+            real = duration
+        speed_ratio = duration / real
+        effective = real
+    else:
+        speed_ratio, effective = 1.0, duration
+    for subs in ([ass_path, None] if ass_path else [None]):
+        ok, err = export_fit_layout(video_path, output_path, subs, None, effective,
+                                    audio_mode=audio_mode, tts_audio_path=tts_audio_path,
+                                    speed_ratio=speed_ratio, trim_start=start, trim_duration=duration,
+                                    simple=True)
+        if ok:
+            print(f"   ✅ Corte salvo (fallback fit{'' if subs else ', sem legenda'}): {output_path}")
+            return True
+        print(f"   ❌ Falha no fallback fit: {err[-500:]}")
+    return False
+
+
 def process_clipflow_layout(input_path, output_path, webcam_pos, ass_path, hook_data, clip_duration, groq_api_key, clip_text,
                             audio_mode="original", tts_audio_path=None, final_duration=None, speed_ratio=1.0):
-    """Aplica layout ClipFlow 3 camadas (1080x1920) para TODOS os modos de corte."""
+    """Aplica o layout dos cortes (todos os modos). Padrão: fit (vídeo inteiro, sem zoom);
+    CORTES_LAYOUT=clipflow usa o layout de 3 camadas (webcam recortada + gameplay com zoom)."""
+    if get_layout() == "fit":
+        return process_fit_layout(input_path, output_path, webcam_pos, ass_path, hook_data, clip_duration,
+                                  groq_api_key, clip_text, audio_mode=audio_mode,
+                                  tts_audio_path=tts_audio_path, final_duration=final_duration,
+                                  speed_ratio=speed_ratio)
     print("   🎨 Aplicando layout ClipFlow 3 camadas (1080x1920)...")
 
     ffmpeg_cmd = FFMPEG.as_posix()
@@ -3343,6 +3553,9 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
 
 def cut_simple_gameplay(video_path, clip, ass_path, output_path, clip_num, webcam_pos):
     """Versão simplificada do modo gameplay - fallback que SEMPRE gera vertical 1080x1920."""
+    if get_layout() == "fit":
+        print("🔄 Tentando versão simplificada (layout fit)...")
+        return fit_fallback(video_path, clip['start'], clip['duration'], output_path, ass_path)
     print(f"🔄 Tentando versão simplificada (gameplay - fallback vertical 1080x1920)...")
 
     ffmpeg_cmd = FFMPEG.as_posix()

@@ -120,6 +120,14 @@ with open(output_path, "wb") as f:
 - **Blocos de 3-5 palavras:** Agrupados respeitando pontuação final (`.!?…`) — fecha chunk ao atingir limite OU encontrar pontuação de fim de frase.
 - **Sem alternância de estilos:** Estilo `Default` fixo — sem efeito karaoke, sem `Highlight`.
 
+## Layout dos Cortes (REGRA: nitidez primeiro)
+- **Padrão = layout `fit`** (`export_fit_layout()`, `process_fit_layout()`): o vídeo ORIGINAL inteiro em 1080x1920, só reduzido para caber na largura (`scale=...:force_original_aspect_ratio=decrease:flags=lanczos`), SEM recorte e SEM zoom. Fundo: cópia desfocada do vídeo (`CORTES_FUNDO=blur`, padrão) ou preto. Faixa do gancho só se sobrar espaço em cima. Legenda reposicionada por `retarget_ass_for_fit()` (centro-baixo, `FIT_SUBTITLE_MARGIN_V`).
+- **Por quê:** o layout de 3 camadas (`clipflow`: webcam recortada + centro 9:16 do jogo com zoom) ampliava 1,8x a 2,4x e deixava os cortes borrados no YouTube. A webcam do streamer já está dentro do vídeo original: NÃO recortar nem ampliar.
+- `CORTES_LAYOUT=clipflow` (no `.env`) volta ao layout antigo. `process_clipflow_layout()` despacha para o fit quando o layout é `fit`; todos os modos (original, ia, gameplay, Passo C) passam por ela.
+- **Qualidade de saída:** `QUALITY_CRF`=17, `QUALITY_PRESET`="medium", `-pix_fmt yuv420p`. O pré-corte (`extract_video_segment`) usa `INTERMEDIATE_CRF`=12 para não somar perda. Não reduza o CRF/preset sem avisar: foi o que borrou os cortes.
+- **Fallbacks** (`cut_simple_vertical`, `cut_simple_gameplay`, `_try_simple_cut_clipflow`): no layout fit chamam `fit_fallback()`, que corta o trecho certo com `-ss`/`-t` direto do vídeo COMPLETO. NUNCA passar o vídeo inteiro sem `-ss`/`-t` (já aconteceu: codificava o vídeo todo e o fade deixava o resto preto) e NUNCA usar o pré-corte como entrada do fallback (ele é apagado antes).
+- Exige ffmpeg 5.1+ (`-fps_mode`) e Pillow (faixa do gancho).
+
 ## Análise Visual de Vídeos (Projeto Todo)
 - Sempre que precisar avaliar a qualidade de um corte gerado, analisar um vídeo de referência ou entender o contexto visual antes de editar qualquer script do projeto, utilize a skill `/watch` (`.claude/skills/watch/SKILL.md`). Ela serve para quem DESENVOLVE o projeto (o Claude Code assistindo vídeos); o produto (`gerar_cortes.py`) não a usa.
 - **Origem:** a skill é uma cópia do projeto MIT [bradautomates/claude-video](https://github.com/bradautomates/claude-video) (versão e commit em `.claude/skills/watch/UPSTREAM.md`). **Não edite os arquivos dela**; para atualizar, copie de novo a pasta `skills/watch/` do original e atualize o `UPSTREAM.md`.

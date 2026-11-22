@@ -13,7 +13,7 @@ Este arquivo explica **o que precisa estar instalado para funcionar** (principal
 | **Python 3** (o projeto foi feito com a 3.15) | roda os scripts | `python --version` |
 | **ffmpeg** | corta o vídeo, coloca legenda, mistura o áudio | veja a seção 2 |
 | **Node.js LTS** | o YouTube exige um runtime JavaScript para o download funcionar | `node --version` |
-| **Pacotes Python** (`requirements.txt`) | yt-dlp, edge-tts etc. | seção 3 |
+| **Pacotes Python** (`requirements.txt`) | yt-dlp, edge-tts, pillow (faixa do gancho) etc. | seção 3 |
 | **Chave do Groq** no arquivo `.env` | roteiro por IA, transcrição de vídeo sem legenda | seção 4 |
 
 Sem o Node.js, o download do YouTube pode falhar com erro 403 ou formatos faltando. Para instalar: `winget install OpenJS.NodeJS.LTS` e depois **fechar e abrir o terminal**.
@@ -51,7 +51,8 @@ Nem todo ffmpeg serve. O build precisa ter:
 
 - **libx264** (gera o vídeo);
 - **libass** (o filtro `subtitles`, que coloca a legenda);
-- **aac** (áudio).
+- **aac** (áudio);
+- versão **5.1 ou mais nova** (o programa usa a opção `-fps_mode`). A primeira linha de `-version` mostra a versão.
 
 O build "release essentials" do gyan.dev tem tudo isso. Builds muito reduzidos, ou de origem desconhecida, podem não ter o filtro de legenda.
 
@@ -128,11 +129,32 @@ Dê dois cliques em `iniciar.bat`.
 | Opção | O que faz |
 |---|---|
 | 1 | busca vídeos em alta no YouTube |
-| 2 | gera cortes de uma URL **mantendo o áudio original** |
+| 2 | **reparar/reprocessar** um corte que já existe (pede o caminho do arquivo `.mp4`) |
 | 3 | gera cortes de uma URL **com narração por IA** (voz pt-BR) |
-| 4 | sair |
+| 4 | **modo Gameplay / Streamer**: gera cortes de uma URL mantendo o áudio original |
+| 5 | **monitor de lives** (YouTube, Twitch, Kick): grava a live e gera cortes sozinho |
+| 6 | sair |
+
+O modo "áudio original" para vídeos comuns não tem mais opção no menu. Para usá-lo, abra o CMD na pasta do projeto e rode:
+
+```
+.venv\Scripts\python.exe gerar_cortes.py "URL_DO_VIDEO" --audio original
+```
 
 Os cortes ficam em `cortes_prontos/`. Cada corte deve ter **de 30 a 55 segundos**, com legenda e um fade curto no final.
+
+### Layout dos cortes
+
+Por padrão, o corte é o **vídeo original inteiro** em 1080x1920, **sem recorte e sem zoom**: o vídeo é só reduzido para caber na largura e fica no meio da tela, com legenda embaixo. O espaço que sobra em cima e embaixo recebe um fundo (por padrão, uma cópia desfocada do próprio vídeo). Se sobrar espaço em cima, aparece a faixa vermelha do gancho.
+
+A webcam do streamer já aparece dentro do vídeo, por isso ela **não** é mais recortada nem ampliada. Recortar e ampliar a webcam e o centro do jogo era o que deixava a imagem borrada.
+
+Para mudar, edite o arquivo `.env` (veja o `.env.example`):
+
+| Variável | Valores | Efeito |
+|---|---|---|
+| `CORTES_LAYOUT` | `fit` (padrão) ou `clipflow` | `clipflow` volta ao layout antigo de 3 camadas, com zoom |
+| `CORTES_FUNDO` | `blur` (padrão) ou `preto` | fundo desfocado ou preto atrás do vídeo |
 
 ---
 
@@ -141,17 +163,24 @@ Os cortes ficam em `cortes_prontos/`. Cada corte deve ter **de 30 a 55 segundos*
 Anote para cada item: **passou ou falhou**, a **URL** usada, a **opção** do menu e, se falhou, o **texto completo do terminal**.
 
 1. **Opção 1.** Lista vídeos em alta sem erro.
-2. **Opção 2 com URL limpa** (`https://www.youtube.com/watch?v=ID`) de um vídeo com fala e legenda. Gera 1 a 3 cortes.
-3. **Opção 2 com URL "suja"**, por exemplo `...watch?v=ID&t=1214s&pp=...`. Deve baixar só aquele vídeo e funcionar igual ao item 2.
-4. **Opção 3** com o mesmo vídeo. Confira:
+2. **Áudio original** (comando da seção 5) com uma URL de um vídeo com fala e legenda. Gera 1 a 3 cortes.
+3. **URL "suja"**, por exemplo `...watch?v=ID&t=1214s&pp=...`, no item 2. Deve baixar só aquele vídeo.
+4. **Opção 3** (narração IA) com o mesmo vídeo. Confira:
    - a narração fala as frases até o fim, sem cortar no meio;
    - a legenda acompanha a voz (3 a 5 palavras por vez, sem pular);
-   - o vídeo **não** fica acelerado de forma estranha.
-5. **Duração.** Cada corte tem entre 30 e 55 segundos. **Corte de poucos segundos é falha**: envie o arquivo e o terminal. Se a narração sair curta demais, o programa deve avisar `Narração curta demais` e usar o áudio original.
-6. **Final do corte.** O áudio e a imagem terminam com um fade curto, sem "corte seco".
-7. **Vídeo sem legenda** (ou só música/gameplay sem fala). Deve cair na transcrição por áudio e, se não houver fala, na análise visual. Sem `GROQ_API_KEY`, deve avisar e **não** gerar corte inventado.
-8. **Sem o ffmpeg** (renomeie `bin` temporariamente e tire o PATH, se souber). Deve parar com a mensagem clara da seção 2, não com um erro estranho.
-9. **URL inválida ou vídeo privado.** Deve falhar com mensagem legível, sem travar.
+   - o vídeo **não** fica acelerado nem em câmera lenta de forma estranha.
+5. **Opção 4** (Gameplay/Streamer) com uma live gravada. A webcam do streamer deve aparecer **dentro** do vídeo, sem ser recortada.
+6. **Nitidez (o teste mais importante).** Abra um corte no tamanho real, no celular ou em tela cheia:
+   - o vídeo está inteiro, **sem corte nas laterais** e sem zoom;
+   - o texto do jogo e o rosto estão nítidos, **não** borrados nem com blocos;
+   - o fundo atrás é só um enfeite (desfocado), e o vídeo no meio é o que importa.
+   Compare com um corte feito com `CORTES_LAYOUT=clipflow` no `.env` para ver a diferença.
+7. **Duração.** Cada corte tem entre 30 e 55 segundos. **Corte de poucos segundos é falha**: envie o arquivo e o terminal. Se a narração sair curta demais, o programa deve avisar `Narração curta demais` e usar o áudio original.
+8. **Final do corte.** O áudio e a imagem terminam com um fade curto, sem "corte seco".
+9. **Vídeo sem legenda** (ou só música/gameplay sem fala). Deve cair na transcrição por áudio e, se não houver fala, na análise visual. Sem `GROQ_API_KEY`, deve avisar e **não** gerar corte inventado.
+10. **Sem o ffmpeg** (renomeie `bin` temporariamente e tire o PATH, se souber). Deve parar com a mensagem clara da seção 2.
+11. **URL inválida ou vídeo privado.** Deve falhar com mensagem legível, sem travar.
+12. **Opção 5 (monitor de lives):** só teste com uma live **sua** ou com autorização de quem a faz.
 
 ### O que mandar quando algo falhar
 
