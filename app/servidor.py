@@ -292,6 +292,15 @@ class Estado:
             if resumo is False:
                 comando.append("--sem-resumo")
                 params["resumo"] = False
+            streamer = dados.get("streamer")
+            if streamer is not None and not isinstance(streamer, str):
+                raise ValueError("Nome do streamer inválido.")
+            streamer = re.sub(r"\s+", " ", (streamer or "")).strip()
+            if streamer:
+                if len(streamer) > 60 or any(ord(c) < 32 for c in streamer):
+                    raise ValueError("Nome do streamer inválido (até 60 caracteres, só texto).")
+                comando.append(f"--streamer={streamer}")        # com "=": nunca vira outra opção
+                params["streamer"] = streamer
         env = {}
         layout = str(dados.get("layout") or "").strip().lower()
         if layout:

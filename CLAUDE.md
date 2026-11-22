@@ -152,6 +152,7 @@ with open(output_path, "wb") as f:
 - **Qualidade primeiro:** a intro é codificada com os MESMOS parâmetros do corte (fps, taxa de áudio, canais, crf) e a junção é `concat -c copy`, sem recodificar o corte. Só se a junção falhar ou a duração do resultado não bater (±0,6 s) é que se usa a recodificação (`juncao: reencode`).
 - **Nunca estragar o corte:** o arquivo só é trocado (`os.replace`) quando a versão com intro está completa; qualquer erro devolve `None` e mantém o corte original. Intro + corte ≤ `SUMMARY_MAX_TOTAL_SECONDS` (60 s); sem áudio no corte = sem intro.
 - A legenda do corte original já está gravada na imagem, então NÃO precisa ser deslocada: a intro entra antes por concatenação. O `.json` ganha `resumo_intro` (texto, voz, duração, junção) e `duracao_final_s`.
+- **Nome do streamer:** vem de `--streamer`/campo da interface ou, senão, do canal (`fetch_video_info` via yt-dlp `-J`; `resolve_streamer_name`). Canal com cara de cortes (`SUMMARY_CUT_CHANNEL_HINTS`) NÃO é usado como nome do streamer. O prompt exige o nome; `apply_streamer_name` troca "o streamer" pelo nome se a IA ignorar; o nome informado não conta como invenção na checagem de fidelidade. Na interface o nome entra como `--streamer=NOME` (com "=", nunca vira outra opção).
 - Só o modo gameplay usa isso por enquanto (o modo `ia` já é narrado). O fallback `cut_simple_gameplay` sai sem intro. Testes: `app/tests/test_resumo.py`.
 
 ## Análise Visual de Vídeos (Projeto Todo)

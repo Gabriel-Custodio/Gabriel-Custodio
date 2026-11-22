@@ -70,6 +70,7 @@ function mostrarPrerequisitos(p) {
 function alternarOpcoes() {
   const modo = document.querySelector('input[name="modo"]:checked').value;
   $("opcoes-gameplay").hidden = modo !== "gameplay";
+  $("campo-streamer").hidden = modo !== "gameplay";
   $("linha-resumo").hidden = modo !== "gameplay";   // o resumo no início só existe no modo gameplay
 }
 document.querySelectorAll('input[name="modo"]').forEach((el) => el.addEventListener("change", alternarOpcoes));
@@ -146,6 +147,7 @@ $("form-gerar").addEventListener("submit", async (ev) => {
     corpo.cortes = Number(f.get("cortes") || 5);
     corpo.webcam = f.get("webcam") || "";
     corpo.resumo = f.get("resumo") === "on";
+    corpo.streamer = String(f.get("streamer") || "").trim();
   }
   try {
     await post("/api/executar", corpo);

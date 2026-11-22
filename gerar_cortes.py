@@ -174,6 +174,10 @@ SUMMARY_PAUSE_AFTER = 0.35      # respiro (s) entre o fim da fala e o início do
 SUMMARY_MAX_TOTAL_SECONDS = 60  # intro + corte nunca passam disso
 SUMMARY_MIN_GROUNDING = 0.3     # fração mínima das palavras "de conteúdo" do resumo que existe na fala real
 SUMMARY_SUBTITLE_FONT_SIZE = 64
+# Canais que são de CORTES/compilações: o nome do canal não é o do streamer, então não é usado sozinho
+# (o resumo diz "o streamer"; informe o nome com --streamer ou na interface).
+SUMMARY_CUT_CHANNEL_HINTS = ("corte", "cortes", "clip", "clips", "highlight", "highlights", "melhores momentos",
+                             "compila", "best of", "momentos", "shorts", "viral")
 # ====================================
 
 
@@ -3822,6 +3826,66 @@ def summary_is_grounded(summary, source_text, minimum=SUMMARY_MIN_GROUNDING):
     return len(mine & theirs) / len(mine) >= minimum
 
 
+def _plain(text):
+    """Minúsculas e sem acento, para comparar nomes."""
+    import unicodedata
+    plain = unicodedata.normalize("NFKD", str(text).lower())
+    return "".join(c for c in plain if not unicodedata.combining(c))
+
+
+def clean_streamer_name(raw):
+    """Nome do streamer em texto simples (sem @, emojis ou lixo); None se não sobrar nada útil."""
+    text = re.sub(r"[^\w\s.\-À-ÿ]", " ", str(raw or ""))
+    text = re.sub(r"\s+", " ", text).strip(" .-_")
+    return text[:40] if len(text) >= 2 else None
+
+
+def looks_like_cuts_channel(name):
+    """Canal de cortes/compilações (o nome do canal não é o do streamer)."""
+    plain = _plain(name)
+    return any(re.search(rf"\b{re.escape(h)}", plain) for h in SUMMARY_CUT_CHANNEL_HINTS)
+
+
+def fetch_video_info(url):
+    """Metadados do vídeo (título, canal, ...) via yt-dlp, sem baixar nada. {} se falhar."""
+    cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--skip-download", "--no-warnings", "-J"]
+    if is_youtube_url(url):
+        cmd += ytdlp_js_args()
+    cmd.append(url)
+    try:
+        ok, out, _ = run_cmd(cmd, timeout=120)
+        start = out.find("{") if out else -1
+        data = json.loads(out[start:]) if ok and start >= 0 else {}
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_streamer_name(info, override=None):
+    """Nome do streamer para o resumo: o informado (--streamer) ou o do canal; None se não der para saber."""
+    name = clean_streamer_name(override)
+    if name:
+        return name
+    for key in ("channel", "uploader"):
+        name = clean_streamer_name((info or {}).get(key))
+        if name and not looks_like_cuts_channel(name):
+            return name
+    return None
+
+
+def apply_streamer_name(summary, name):
+    """Garante o nome no resumo: se a IA escreveu "o streamer", troca pelo nome."""
+    if not name or _plain(name) in _plain(summary):
+        return summary
+    for pattern, repl in ((r"\bdo streamer\b", f"de {name}"), (r"\bao streamer\b", f"a {name}"),
+                          (r"\bpelo streamer\b", f"por {name}"), (r"\bo streamer\b", name),
+                          (r"\bda streamer\b", f"de {name}"), (r"\ba streamer\b", name)):
+        new, n = re.subn(pattern, repl, summary, count=1, flags=re.I)
+        if n:
+            return new
+    return summary
+
+
 def _clean_summary(raw):
     """Tira aspas, emojis, hashtags e espaços repetidos do resumo devolvido pela IA."""
     text = str(raw or "")
@@ -3830,7 +3894,7 @@ def _clean_summary(raw):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def generate_summary_intro_text(clip_text, api_key):
+def generate_summary_intro_text(clip_text, api_key, streamer=None):
     """Pede à IA 1-2 frases que apresentam o trecho, usando SOMENTE o que foi dito nele.
 
     Devolve o texto ou None (sem fala, sem chave, resposta fora das regras ou inventada).
@@ -3843,7 +3907,9 @@ def generate_summary_intro_text(clip_text, api_key):
         "O vídeo fica parado no primeiro quadro enquanto um narrador resume o assunto; depois o trecho começa.\n\n"
         f"REGRAS OBRIGATÓRIAS:\n- 1 a 2 frases, de {SUMMARY_MIN_WORDS} a {SUMMARY_MAX_WORDS} palavras no total\n"
         "- use SOMENTE o que está dito na transcrição: não invente nomes, números, jogos, lugares ou fatos que não aparecem nela\n"
-        "- fale em terceira pessoa (\"o streamer...\"), tom animado mas natural, em português do Brasil\n"
+        + (f"- o streamer se chama {streamer}: use esse NOME na frase (nunca \"o streamer\"); não invente nenhum outro nome\n"
+           if streamer else "- fale em terceira pessoa (\"o streamer...\"), sem inventar nome\n")
+        + "- tom animado mas natural, em português do Brasil\n"
         "- apresente o assunto e crie curiosidade; NÃO conte o desfecho nem a piada final\n"
         "- sem emojis, hashtags, aspas ou palavrões\n\n"
         'RETORNE APENAS JSON VÁLIDO: {"resumo": "texto da abertura"}\n\n'
@@ -3868,7 +3934,8 @@ def generate_summary_intro_text(clip_text, api_key):
         if not (SUMMARY_MIN_WORDS <= len(words) <= SUMMARY_MAX_WORDS):
             print(f"   ⚠️  Resumo fora do tamanho ({len(words)} palavras) em {model}, tentando outro modelo...")
             continue
-        if not summary_is_grounded(summary, source):
+        summary = apply_streamer_name(summary, streamer)
+        if not summary_is_grounded(summary, f"{source} {streamer or ''}"):
             print(f"   ⚠️  Resumo descartado: usa assuntos que não estão na fala do trecho ({model}).")
             continue
         return summary
@@ -4014,7 +4081,7 @@ def _duration_matches(path, expected, tolerance=0.6):
     return real > 0 and abs(real - expected) <= tolerance
 
 
-def add_summary_intro(output_path, clip_text, api_key):
+def add_summary_intro(output_path, clip_text, api_key, streamer=None):
     """Coloca o resumo narrado no começo de um corte já pronto (1080x1920).
 
     Devolve um dict com o que foi feito (para o .json) ou None se não houve intro. NUNCA levanta
@@ -4036,7 +4103,7 @@ def add_summary_intro(output_path, clip_text, api_key):
     temporarios = [tts_path, ass_path, frame_path, intro_path, list_path, joined_path]
     try:
         print("   🎙️  Resumo narrado no início do corte...")
-        summary = generate_summary_intro_text(clip_text, api_key)
+        summary = generate_summary_intro_text(clip_text, api_key, streamer)
         if not summary:
             print("   ℹ️  Sem um resumo bom o bastante para este trecho: o corte sai sem intro.")
             return None
@@ -4094,7 +4161,8 @@ def add_summary_intro(output_path, clip_text, api_key):
 
         os.replace(joined_path, output_path)
         print(f"   ✅ Resumo narrado aplicado ({intro_seconds:.1f}s no início, junção: {mode}).")
-        return {"texto": summary, "voz": TTS_VOICE, "duracao_s": round(intro_seconds, 2), "juncao": mode}
+        return {"texto": summary, "voz": TTS_VOICE, "streamer": streamer,
+                "duracao_s": round(intro_seconds, 2), "juncao": mode}
     except Exception as e:
         print(f"   ⚠️  Resumo no início ignorado por erro: {e}")
         return None
@@ -4104,6 +4172,9 @@ def add_summary_intro(output_path, clip_text, api_key):
                 p.unlink()
             except OSError:
                 pass
+
+
+STREAMER_NOME = None   # nome do streamer do vídeo atual (preenchido no main; usado no resumo)
 
 
 def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, webcam_pos, groq_api_key=None):
@@ -4183,7 +4254,7 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
         return cut_simple_gameplay(video_path, clip, ass_path, output_path, clip_num, webcam_pos)
 
     # Resumo narrado no início (vídeo parado + voz). Se falhar por qualquer motivo, o corte fica como está.
-    intro_info = add_summary_intro(output_path, clip_text, groq_api_key)
+    intro_info = add_summary_intro(output_path, clip_text, groq_api_key, STREAMER_NOME)
 
     json_path = output_path.with_suffix('.json')
     metadata = {
@@ -4205,6 +4276,7 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
         "clip_end": clip['end'],
         "clip_duration": clip['duration'],
         "webcam_position": webcam_pos,
+        "streamer": STREAMER_NOME,
         "resumo_intro": intro_info,
         "duracao_final_s": round(clip['duration'] + (intro_info["duracao_s"] if intro_info else 0), 2),
         "timestamp": datetime.now().isoformat()
@@ -4457,6 +4529,8 @@ def main():
                         help="Marca como já usados os cortes que estão em cortes_prontos/ (use só se todos vieram deste vídeo)")
     parser.add_argument("--sem-resumo", action="store_true",
                         help="Desliga o resumo narrado no início do corte (vem ligado por padrão no modo gameplay)")
+    parser.add_argument("--streamer", metavar="NOME",
+                        help="Nome do streamer, usado no resumo narrado (padrão: nome do canal, se não for um canal de cortes)")
     parser.add_argument("--repair", metavar="CLIP_PATH", help="Reparar/Reprocessar clipe existente: corrige sincronia A/V e aplica layout ClipFlow 3 camadas")
     args = parser.parse_args()
     if args.sem_resumo:
@@ -4594,6 +4668,16 @@ def main():
     video_path, subtitle_path = download_video(url, prefix)
     if not video_path:
         sys.exit(1)
+
+    global STREAMER_NOME
+    STREAMER_NOME = None
+    if audio_mode == "gameplay" and summary_intro_enabled():
+        STREAMER_NOME = resolve_streamer_name(fetch_video_info(url_limpa), args.streamer)
+        if STREAMER_NOME:
+            print(f"🎙️  Nome do streamer para o resumo: {STREAMER_NOME}")
+        else:
+            print("🎙️  Nome do streamer não identificado (canal de cortes ou sem dados): o resumo dirá \"o streamer\". "
+                  "Informe com --streamer \"NOME\" ou no campo da interface.")
 
     video_duration = get_video_duration(video_path)
     if video_duration <= 0:

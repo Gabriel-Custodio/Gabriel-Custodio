@@ -269,3 +269,59 @@ class TestFluxoCompleto(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNomeDoStreamer(unittest.TestCase):
+    def test_nome_do_canal(self):
+        self.assertEqual(g.resolve_streamer_name({"channel": "Alanzoka", "uploader": "x"}), "Alanzoka")
+        self.assertEqual(g.resolve_streamer_name({"uploader": "@gaules"}), "gaules")
+        self.assertIsNone(g.resolve_streamer_name({}))
+        self.assertIsNone(g.resolve_streamer_name(None))
+
+    def test_canal_de_cortes_nao_e_o_streamer(self):
+        for canal in ("Volta Isso Cortes", "Melhores Momentos do Fulano", "Clips do Beltrano", "XYZ Highlights"):
+            self.assertIsNone(g.resolve_streamer_name({"channel": canal}), canal)
+        self.assertEqual(g.resolve_streamer_name({"channel": "Volta Isso Cortes"}, override="Alanzoka"), "Alanzoka")
+        self.assertEqual(g.resolve_streamer_name({"channel": "Cortes X", "uploader": "Gaules"}), "Gaules")
+
+    def test_limpeza_do_nome(self):
+        self.assertEqual(g.clean_streamer_name("  @Alan 🎮 zoka  "), "Alan zoka")
+        self.assertIsNone(g.clean_streamer_name("🎮"))
+        self.assertIsNone(g.clean_streamer_name(None))
+        self.assertEqual(len(g.clean_streamer_name("a" * 100)), 40)
+
+    def test_troca_o_streamer_pelo_nome(self):
+        f = g.apply_streamer_name
+        self.assertEqual(f("O streamer tentou clonar a chave.", "Alanzoka"), "Alanzoka tentou clonar a chave.")
+        self.assertEqual(f("A reação do streamer foi enorme.", "Alanzoka"), "A reação de Alanzoka foi enorme.")
+        self.assertEqual(f("Alanzoka tentou de novo.", "Alanzoka"), "Alanzoka tentou de novo.")   # já tem
+        self.assertEqual(f("Ele tentou de novo.", "Alanzoka"), "Ele tentou de novo.")             # nada a trocar
+        self.assertEqual(f("O streamer tentou.", None), "O streamer tentou.")
+
+    def test_prompt_pede_o_nome_e_texto_final_leva_o_nome(self):
+        with mock.patch.object(g, "get_text_models_to_try", return_value=["m1"]), \
+             mock.patch.object(g, "groq_chat", return_value=resposta("O streamer tentou passar o chefe do jogo sem sucesso.")) as chat:
+            texto = g.generate_summary_intro_text(FALA, "k", "Alanzoka")
+        pedido = chat.call_args.args[0][0]["content"]
+        self.assertIn("se chama Alanzoka", pedido)
+        self.assertTrue(texto.startswith("Alanzoka tentou"))          # a IA ignorou: o código troca
+        with mock.patch.object(g, "get_text_models_to_try", return_value=["m1"]), \
+             mock.patch.object(g, "groq_chat", return_value=resposta("O streamer tentou passar o chefe do jogo sem sucesso.")) as chat:
+            g.generate_summary_intro_text(FALA, "k", None)
+        self.assertIn("o streamer", chat.call_args.args[0][0]["content"])
+        self.assertNotIn("se chama", chat.call_args.args[0][0]["content"])
+
+    def test_o_nome_nao_derruba_a_checagem_de_fidelidade(self):
+        # "Alanzoka" não está na fala, mas foi informado: não conta como invenção
+        with mock.patch.object(g, "get_text_models_to_try", return_value=["m1"]), \
+             mock.patch.object(g, "groq_chat", return_value=resposta("Alanzoka tentou passar o chefe do jogo sem sucesso.")):
+            self.assertIsNotNone(g.generate_summary_intro_text(FALA, "k", "Alanzoka"))
+
+    def test_info_do_video(self):
+        saida = 'aviso\n{"channel": "Alanzoka", "title": "x"}'
+        with mock.patch.object(g, "run_cmd", return_value=(True, saida, "")):
+            self.assertEqual(g.fetch_video_info("https://twitch.tv/x")["channel"], "Alanzoka")
+        with mock.patch.object(g, "run_cmd", return_value=(False, "", "erro")):
+            self.assertEqual(g.fetch_video_info("https://twitch.tv/x"), {})
+        with mock.patch.object(g, "run_cmd", return_value=(True, "{quebrado", "")):
+            self.assertEqual(g.fetch_video_info("https://twitch.tv/x"), {})

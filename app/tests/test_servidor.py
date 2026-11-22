@@ -329,6 +329,18 @@ class TestExecucao(Base):
             status, _ = self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "resumo": ruim})
             self.assertEqual(status, 400, ruim)
 
+    def test_nome_do_streamer_vira_flag_com_igual(self):
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1, "streamer": "  Alan  zoka "})
+        self.assertIn("'--streamer=Alan zoka'", "\n".join(self.esperar_fim()["linhas"]))
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1, "streamer": ""})
+        self.assertNotIn("--streamer", "\n".join(self.esperar_fim()["linhas"]).split("ARGS:")[-1])
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1, "streamer": "--audio=ia"})
+        texto = "\n".join(self.esperar_fim()["linhas"])
+        self.assertIn("'--streamer=--audio=ia'", texto)            # um argumento só: não vira outra opção
+        for ruim in (5, ["x"], "a" * 61, "ab\x00cd"):
+            status, _ = self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "streamer": ruim})
+            self.assertEqual(status, 400, repr(ruim))
+
     def test_codigo_de_erro(self):
         self.json("POST", "/api/executar", {"url": "https://x.com/falha", "modo": "ia"})
         fim = self.esperar_fim()
