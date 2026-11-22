@@ -15,7 +15,7 @@ echo       FABRICA DE CORTES - MENU
 echo ==========================================
 echo.
 echo [1] Buscar videos em alta (YouTube)
-echo [2] Gerar cortes de uma URL (audio original)
+echo [2] Reparar/Reprocessar clipe existente (corrigir sincronia + layout ClipFlow)
 echo [3] Gerar cortes de uma URL (narracao IA - edge-tts)
 echo [4] Modo Gameplay / Streamer (Tela Dividida + Audio Original)
 echo [5] Monitor de Lives (Tempo Real - Clips Automaticos)
@@ -28,19 +28,30 @@ if "%op%"=="1" (
     pause
     goto MENU
 )
-if "%op%"=="2" goto GERAR_ORIGINAL
+if "%op%"=="2" goto REPARAR_CLIPE
 if "%op%"=="3" goto GERAR_IA
 if "%op%"=="4" goto GERAR_GAMEPLAY
 if "%op%"=="5" goto MONITOR_LIVES
 if "%op%"=="6" exit
 goto MENU
 
-:GERAR_ORIGINAL
+:REPARAR_CLIPE
 echo.
-set "url="
-set /p url="Cole a URL do video do YouTube: "
-if not defined url goto MENU
-"%VENV_PYTHON%" gerar_cortes.py "%url%" --audio original
+echo ==========================================
+echo   REPARAR / REPROCESSAR CLIPE EXISTENTE
+echo ==========================================
+echo.
+echo Corrige sincronia de audio/video e aplica layout ClipFlow 3 camadas (1080x1920).
+echo.
+set "clip_path="
+set /p clip_path="Caminho do arquivo do clipe (ex: cortes_prontos\corte_1.mp4): "
+if not defined clip_path goto MENU
+if not exist "%clip_path%" (
+    echo [ERRO] Arquivo nao encontrado: %clip_path%
+    pause
+    goto MENU
+)
+"%VENV_PYTHON%" gerar_cortes.py --repair "%clip_path%"
 pause
 goto MENU
 

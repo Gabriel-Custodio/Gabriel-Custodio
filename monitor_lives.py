@@ -510,15 +510,20 @@ def record_buffer_segment(segment_path: Path, page_url: str, duration: int = BUF
         return False
 
     # Flags de reconexão DEVEM vir ANTES do -i para streams ao vivo (HLS)
+    # FIX sincronia: -fflags +genpts para gerar PTS contínuos
+    # Opções de saída (-fps_mode, -c, -f, -t) DEVEM vir DEPOIS do -i
     cmd = [
         FFMPEG.as_posix(), "-y",
         "-hide_banner", "-loglevel", "error",
-        # Flags de reconexão para streams HLS ao vivo
+        # Input options (before -i)
+        "-fflags", "+genpts",
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "5",
         "-timeout", "10000000",
         "-i", stream_url,  # URL direta .m3u8 resolvida
+        # Output options (after -i)
+        "-fps_mode", "cfr",
         "-t", str(duration),
         "-c", "copy",           # Copy codec para velocidade (segmento TS)
         "-f", "mpegts",         # MPEG-TS container para concatenação fácil
@@ -698,6 +703,10 @@ def extract_last_n_seconds_from_buffer(n_seconds: float, output_path: Path) -> b
     """
     Extrai os últimos N segundos do ring buffer concatenando segmentos TS.
     Retorna True se sucesso.
+
+    FIX sincronia: Usa -fflags +genpts, -fps_mode cfr, aresample=async=1:first_pts=0,
+    setpts=PTS-STARTPTS, asetpts=PTS-STARTPTS para garantir timestamps normalizados
+    desde zero e evitar travamento/congelamento nos primeiros segundos.
     """
     if not ring_buffer:
         log("Buffer vazio, não há o que extrair", "ERROR")
@@ -732,41 +741,57 @@ def extract_last_n_seconds_from_buffer(n_seconds: float, output_path: Path) -> b
             abs_path = seg.path.resolve().as_posix()  # Caminho absoluto com barras normais
             f.write(f"file '{abs_path}'\n")
 
-    # Concatena segmentos e corta exatamente os últimos n_seconds
-    # Primeiro concatena tudo, depois corta o final
+    # Concatena segmentos com correção de timestamps
+    # FIX: -fflags +genpts, -fps_mode cfr, setpts=PTS-STARTPTS, asetpts=PTS-STARTPTS
+    # NÃO usa -c copy para garantir timestamps contínuos
+    # IMPORTANTE: Opções de saída (-fps_mode, -c:v, -c:a, -af) DEPOIS do -i
     temp_concat = LIVE_BUFFER_DIR / "temp_concat.ts"
 
     cmd_concat = [
         FFMPEG.as_posix(), "-y",
         "-hide_banner", "-loglevel", "error",
+        # Input options
+        "-fflags", "+genpts",
         "-f", "concat", "-safe", "0",
         "-i", str(list_file),
-        "-c", "copy",
+        # Output options
+        "-fps_mode", "cfr",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+        "-c:a", "aac", "-b:a", "128k",
+        "-vf", "setpts=PTS-STARTPTS",
+        "-af", "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0",
         str(temp_concat)
     ]
 
-    ok, _, err = run_cmd(cmd_concat, timeout=30)
+    ok, _, err = run_cmd(cmd_concat, timeout=60)
     if not ok:
         # Mostra últimas 1500 chars do stderr
         err_tail = err[-1500:] if len(err) > 1500 else err
         log(f"Falha ao concatenar: {err_tail}", "ERROR")
         return False
 
-    # Agora corta os últimos n_seconds
+    # Agora corta os últimos n_seconds (re-encode para garantir timestamps corretos)
     concat_duration = get_video_duration(temp_concat)
     start_cut = max(0, concat_duration - n_seconds)
 
     cmd_cut = [
         FFMPEG.as_posix(), "-y",
         "-hide_banner", "-loglevel", "error",
+        # Input options (before -i): -ss for input seeking is faster
+        "-fflags", "+genpts",
         "-ss", str(start_cut),
-        "-t", str(n_seconds),
         "-i", str(temp_concat),
-        "-c", "copy",
+        # Output options (after -i)
+        "-fps_mode", "cfr",
+        "-t", str(n_seconds),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+        "-c:a", "aac", "-b:a", "128k",
+        "-vf", "setpts=PTS-STARTPTS",
+        "-af", "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0",
         str(output_path)
     ]
 
-    ok, _, err = run_cmd(cmd_cut, timeout=30)
+    ok, _, err = run_cmd(cmd_cut, timeout=60)
 
     # Limpa temp
     try:
@@ -1080,26 +1105,35 @@ def process_gameplay_layout(input_path: Path, output_path: Path, webcam_pos: Opt
                             ass_path: Optional[Path], hook_data: Optional[Dict],
                             clip_dur: float) -> bool:
     """
-    Aplica novo layout 3 camadas (1080x1920) para clips de live:
+    Aplica layout ClipFlow 3 camadas (1080x1920) para clips de live - igual ao gerar_cortes.py:
 
     1. BLOCO 1 - TOPO (Webcam): 1080x730
        - Crop da webcam selecionada → scale=1080:730:force_original_aspect_ratio=increase,crop=1080:730
+       - Se sem webcam: gameplay com crop superior (zoom)
 
     2. BLOCO 2 - MEIO (Faixa Divisória de Gancho): 1080x180
-       - Imagem PNG gerada via Pillow (banner_gancho.png) com titulo_gancho + pergunta_cta
+       - Imagem PNG gerada via Pillow (banner_gancho.png, fundo #D91E18) como entrada de imagem estática
+         (-loop 1 -framerate 30 -t <duracao> -i <banner_png>) → scale=1080:180:force_original_aspect_ratio=increase,crop=1080:180
+       - NÃO usa o filtro "loop=loop=-1:size=1"
 
     3. BLOCO 3 - BASE (Gameplay): 1080x1010
        - Crop central 9:16 → scale=1080:1010:force_original_aspect_ratio=increase,crop=1080:1010
-       - Legendas karaokê aplicadas aqui (MarginV=220)
+       - Legendas aplicadas APENAS UMA VEZ sobre o vídeo final empilhado, nunca duplicado
 
-    - Empilha com vstack=inputs=3 = 1080x1920 exatos
+    - Empilha [top][mid][base] com vstack=inputs=3 = 1080x1920 exatos
     - Áudio: loudnorm + fade-out 1.5s
+    - FIX sincronia: -fflags +genpts, aresample=async=1:first_pts=0, -fps_mode cfr
     """
-    log("Aplicando layout 3 camadas (1080x1920)...")
+    log("Aplicando layout ClipFlow 3 camadas (1080x1920)...")
 
     ffmpeg_cmd = FFMPEG.as_posix()
     watermark_path = Path(GAMEPLAY_WATERMARK_PATH)
     has_watermark = watermark_path.exists()
+
+    # Constantes ClipFlow (iguais ao gerar_cortes.py)
+    CLIPFLOW_WEBAM_HEIGHT = 730
+    CLIPFLOW_HOOK_BAR_HEIGHT = 180
+    CLIPFLOW_GAMEPLAY_HEIGHT = 1010
 
     # Prepara textos do gancho
     titulo_gancho = hook_data.get("titulo_gancho", "") if hook_data else ""
@@ -1115,16 +1149,16 @@ def process_gameplay_layout(input_path: Path, output_path: Path, webcam_pos: Opt
         # SEM WEBCAM: Bloco 1 = gameplay com crop superior (zoom)
         filter_complex = (
             # Bloco 1 (Topo - 1080x730): Gameplay com crop superior (zoom)
-            f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
-            f"scale={VERTICAL_WIDTH}:{WEBAM_HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={VERTICAL_WIDTH}:{WEBAM_HEIGHT}[top];"
+            f"[0:v]setpts=PTS-STARTPTS,crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
+            f"scale={VERTICAL_WIDTH}:{CLIPFLOW_WEBAM_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:{CLIPFLOW_WEBAM_HEIGHT}[top];"
             # Bloco 3 (Base - 1080x1010): Gameplay central 9:16
-            f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
-            f"scale={VERTICAL_WIDTH}:{GAMEPLAY_HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={VERTICAL_WIDTH}:{GAMEPLAY_HEIGHT}[base]"
+            f"[0:v]setpts=PTS-STARTPTS,crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
+            f"scale={VERTICAL_WIDTH}:{CLIPFLOW_GAMEPLAY_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:{CLIPFLOW_GAMEPLAY_HEIGHT}[base]"
         )
     else:
-        # COM WEBCAM: Bloco 1 = Webcam crop
+        # COM WEBCAM: Bloco 1 = Webcam crop (usa iw*w:ih*h:iw*x:ih*y, nunca "w*" sem "i")
         wc_x = f"iw*{webcam_pos['x']:.6f}"
         wc_y = f"ih*{webcam_pos['y']:.6f}"
         wc_w = f"iw*{webcam_pos['w']:.6f}"
@@ -1132,52 +1166,65 @@ def process_gameplay_layout(input_path: Path, output_path: Path, webcam_pos: Opt
 
         filter_complex = (
             # Bloco 1 (Topo - 1080x730): Webcam crop
-            f"[0:v]crop={wc_w}:{wc_h}:{wc_x}:{wc_y},"
-            f"scale={VERTICAL_WIDTH}:{WEBAM_HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={VERTICAL_WIDTH}:{WEBAM_HEIGHT}[top];"
+            f"[0:v]setpts=PTS-STARTPTS,crop={wc_w}:{wc_h}:{wc_x}:{wc_y},"
+            f"scale={VERTICAL_WIDTH}:{CLIPFLOW_WEBAM_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:{CLIPFLOW_WEBAM_HEIGHT}[top];"
             # Bloco 3 (Base - 1080x1010): Gameplay central 9:16
-            f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
-            f"scale={VERTICAL_WIDTH}:{GAMEPLAY_HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={VERTICAL_WIDTH}:{GAMEPLAY_HEIGHT}[base]"
+            f"[0:v]setpts=PTS-STARTPTS,crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
+            f"scale={VERTICAL_WIDTH}:{CLIPFLOW_GAMEPLAY_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VERTICAL_WIDTH}:{CLIPFLOW_GAMEPLAY_HEIGHT}[base]"
         )
 
-    # Adiciona legendas karaokê no gameplay (base)
-    if ass_path and ass_path.exists():
-        ass_path_escaped = ass_path.as_posix().replace(":", "\\:")
-        filter_complex += f";[base]subtitles='{ass_path_escaped}'[base_sub]"
-        base_label = "[base_sub]"
-    else:
-        base_label = "[base]"
-
-    # Adiciona watermark se existir
-    if has_watermark:
-        # Escapa dois-pontos no caminho (para Windows com letra de drive)
-        wm_path_escaped = watermark_path.as_posix().replace(":", "\\:")
-        filter_complex += f";movie='{wm_path_escaped}'[wm];{base_label}[wm]overlay=20:20[base_final]"
-        base_label = "[base_final]"
-
     # Bloco 2 (Meio - 1080x180): Banner do gancho (PNG) OU faixa vermelha sólida como fallback
+    # IMPORTANTE: O banner PNG é imagem estática - usa entrada separada com -loop 1 -framerate 30 -t <duracao>
+    # e redimensiona com scale=1080:180:force_original_aspect_ratio=increase,crop=1080:180
+    # NÃO usa o filtro "loop=loop=-1:size=1"
     if banner_path and banner_path.exists():
-        filter_complex += f";[1:v]scale={VERTICAL_WIDTH}:{HOOK_BAR_HEIGHT}[hook_bar]"
+        filter_complex += f";[1:v]scale={VERTICAL_WIDTH}:{CLIPFLOW_HOOK_BAR_HEIGHT}:force_original_aspect_ratio=increase,crop={VERTICAL_WIDTH}:{CLIPFLOW_HOOK_BAR_HEIGHT}[hook_bar]"
         bar_label = "[hook_bar]"
-        banner_input = ["-i", str(banner_path)]
+        banner_input = ["-loop", "1", "-framerate", "30", "-t", str(clip_dur), "-i", str(banner_path)]
     else:
-        filter_complex += f";color=c=#D91E18:s={VERTICAL_WIDTH}x{HOOK_BAR_HEIGHT}[hook_bar]"
+        filter_complex += f";color=c=#D91E18:s={VERTICAL_WIDTH}x{CLIPFLOW_HOOK_BAR_HEIGHT}[hook_bar]"
         bar_label = "[hook_bar]"
         banner_input = []
 
-    # vstack final: 3 inputs (topo, meio/gancho, base)
-    filter_complex += f";[top]{bar_label}{base_label}vstack=inputs=3[vout]"
-    map_v = "[vout]"
+    # vstack final: 3 inputs (topo, meio/gancho, base) = 1080x1920
+    filter_complex += f";[top]{bar_label}[base]vstack=inputs=3[stacked]"
 
-    # Áudio: loudnorm + fade-out 1.5s
+    # Adiciona legendas APÓS o empilhamento, sobre o vídeo completo 1080x1920 (antes do fade)
+    if ass_path and ass_path.exists():
+        ass_path_escaped = ass_path.as_posix().replace(":", "\\:")
+        filter_complex += f";[stacked]subtitles='{ass_path_escaped}'[vout]"
+    else:
+        filter_complex += ";[stacked]copy[vout]"
+
+    # Adiciona fade de vídeo 1.5s no final
     fade_start = max(0, clip_dur - 1.5)
-    af = f"loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary,afade=t=out:st={fade_start:.2f}:d=1.5"
+    filter_complex += f";[vout]fade=t=out:st={fade_start:.2f}:d=1.5[vout_fade]"
+    map_v = "[vout_fade]"
+
+    # Adiciona watermark se existir (aplica sobre o vídeo final com legendas)
+    if has_watermark:
+        # Escapa dois-pontos no caminho (para Windows com letra de drive)
+        wm_path_escaped = watermark_path.as_posix().replace(":", "\\:")
+        filter_complex = filter_complex.replace(
+            "[vout]fade=t=out:st=",
+            f"movie='{wm_path_escaped}'[wm];[vout][wm]overlay=20:20[wmarked];[wmarked]fade=t=out:st="
+        )
+        map_v = "[vout_fade]"  # already correct since fade is last
+
+    # Áudio: asetpts=PTS-STARTPTS + loudnorm + fade-out 1.5s + FIX sincronia (aresample async=1)
+    # asetpts=PTS-STARTPTS garante que timestamps de áudio comecem do zero
+    af = f"asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary,afade=t=out:st={fade_start:.2f}:d=1.5"
 
     # Monta comando FFmpeg com -hide_banner -loglevel error
+    # FIX sincronia: -fflags +genpts, -fps_mode cfr
+    # IMPORTANTE: Opções de saída (-fps_mode, -c:v, -c:a, -af) DEPOIS do -i
     cmd = [
         ffmpeg_cmd, "-y",
         "-hide_banner", "-loglevel", "error",
+        # Input options
+        "-fflags", "+genpts",
         "-i", str(input_path),
     ]
     # Adiciona banner como segundo input se existir
@@ -1186,6 +1233,8 @@ def process_gameplay_layout(input_path: Path, output_path: Path, webcam_pos: Opt
         "-filter_complex", filter_complex,
         "-map", map_v,
         "-map", "0:a?",
+        # Output options
+        "-fps_mode", "cfr",
         "-af", af,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
         "-c:a", "aac", "-b:a", "128k",
@@ -1201,7 +1250,7 @@ def process_gameplay_layout(input_path: Path, output_path: Path, webcam_pos: Opt
         log(f"Erro no FFmpeg layout 3 camadas: {err_tail}", "ERROR")
         return False
 
-    log(f"Layout 3 camadas aplicado com sucesso: {output_path}", "OK")
+    log(f"Layout ClipFlow 3 camadas aplicado com sucesso: {output_path}", "OK")
     return True
 
 def process_trigger(trigger: TriggerEvent):
