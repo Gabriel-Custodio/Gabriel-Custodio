@@ -316,6 +316,19 @@ class TestExecucao(Base):
         texto = "\n".join(self.esperar_fim()["linhas"])
         self.assertNotIn("--repetir", texto.split("ARGS:")[-1])       # desmarcado: sem a flag
 
+    def test_resumo_no_inicio_so_vira_flag_ao_desligar(self):
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1})
+        self.assertNotIn("--sem-resumo", "\n".join(self.esperar_fim()["linhas"]).split("ARGS:")[-1])  # padrão: ligado
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1, "resumo": True})
+        self.assertNotIn("--sem-resumo", "\n".join(self.esperar_fim()["linhas"]).split("ARGS:")[-1])
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1, "resumo": False})
+        self.assertIn("--sem-resumo", "\n".join(self.esperar_fim()["linhas"]))
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "ia", "resumo": False})
+        self.assertNotIn("--sem-resumo", "\n".join(self.esperar_fim()["linhas"]).split("ARGS:")[-1])  # só gameplay
+        for ruim in (0, 1, "nao"):
+            status, _ = self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "resumo": ruim})
+            self.assertEqual(status, 400, ruim)
+
     def test_codigo_de_erro(self):
         self.json("POST", "/api/executar", {"url": "https://x.com/falha", "modo": "ia"})
         fim = self.esperar_fim()

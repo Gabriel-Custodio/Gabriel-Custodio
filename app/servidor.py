@@ -196,6 +196,7 @@ class Estado:
                 "score": meta.get("score_selecao"),
                 "motivo": meta.get("motivo_selecao"),
                 "inicio_s": meta.get("clip_start"),
+                "resumo": str((meta.get("resumo_intro") or {}).get("texto") or "") if isinstance(meta.get("resumo_intro"), dict) else "",
                 "fim_s": meta.get("clip_end"),
                 "duracao_s": meta.get("clip_duration"),
                 "tem_json": bool(meta),
@@ -284,6 +285,13 @@ class Estado:
             if valor is True:
                 comando.append(flag)
                 params[chave] = True
+        if modo == "gameplay":
+            resumo = dados.get("resumo")                       # ligado por padrão; só False desliga
+            if resumo is not None and not isinstance(resumo, bool):
+                raise ValueError("Opção inválida.")
+            if resumo is False:
+                comando.append("--sem-resumo")
+                params["resumo"] = False
         env = {}
         layout = str(dados.get("layout") or "").strip().lower()
         if layout:

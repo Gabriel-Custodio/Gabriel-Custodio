@@ -161,6 +161,19 @@ FIT_SUBTITLE_MARGIN_V = 420     # altura da legenda (px a partir da base), na á
 QUALITY_CRF = 17                # qualidade da saída (menor = melhor; 17 é quase sem perdas visíveis)
 QUALITY_PRESET = "medium"
 INTERMEDIATE_CRF = 12           # pré-corte (arquivo temporário): quase sem perdas para não somar perda
+
+# Resumo narrado no início (modo gameplay): o vídeo "para" no primeiro quadro, uma voz resume o
+# assunto do trecho (só com o que foi dito nele) e então o corte começa. LIGADO por padrão;
+# desligue com --sem-resumo, com CORTES_RESUMO=0 no .env ou pela caixa na interface.
+SUMMARY_INTRO_DEFAULT = True
+SUMMARY_MIN_WORDS = 6           # resumo mais curto que isso não ajuda ninguém
+SUMMARY_MAX_WORDS = 20          # 1 a 2 frases (~5 a 8 s de fala)
+SUMMARY_MAX_SPOKEN_SECONDS = 9.0  # fala mais longa que isso: tenta de novo mais rápida, senão desiste
+SUMMARY_FAST_RATE = "+15%"
+SUMMARY_PAUSE_AFTER = 0.35      # respiro (s) entre o fim da fala e o início do corte
+SUMMARY_MAX_TOTAL_SECONDS = 60  # intro + corte nunca passam disso
+SUMMARY_MIN_GROUNDING = 0.3     # fração mínima das palavras "de conteúdo" do resumo que existe na fala real
+SUMMARY_SUBTITLE_FONT_SIZE = 64
 # ====================================
 
 
@@ -3781,6 +3794,318 @@ def process_clipflow_layout(input_path, output_path, webcam_pos, ass_path, hook_
     return True
 
 
+# ---------------------------------------------------------------------------------------------
+# Resumo narrado no início do corte (vídeo parado no primeiro quadro + voz resumindo o assunto)
+# ---------------------------------------------------------------------------------------------
+def summary_intro_enabled():
+    """Resumo no início: ligado por padrão. Desliga com CORTES_RESUMO=0 (ou --sem-resumo)."""
+    value = os.environ.get("CORTES_RESUMO")
+    if value is None or not value.strip():
+        return SUMMARY_INTRO_DEFAULT
+    return value.strip().lower() not in ("0", "false", "nao", "não", "off", "no")
+
+
+def _content_stems(text):
+    """Radicais (5 letras, sem acento) das palavras de conteúdo de um texto."""
+    import unicodedata
+    plain = unicodedata.normalize("NFKD", str(text).lower())
+    plain = "".join(c for c in plain if not unicodedata.combining(c))
+    return {w[:5] for w in re.findall(r"[a-z0-9]+", plain) if len(w) >= 5}
+
+
+def summary_is_grounded(summary, source_text, minimum=SUMMARY_MIN_GROUNDING):
+    """Confere se o resumo usa palavras que existem na fala real (barreira contra invenção)."""
+    mine = _content_stems(summary)
+    if len(mine) < 2:
+        return True
+    theirs = _content_stems(source_text)
+    return len(mine & theirs) / len(mine) >= minimum
+
+
+def _clean_summary(raw):
+    """Tira aspas, emojis, hashtags e espaços repetidos do resumo devolvido pela IA."""
+    text = str(raw or "")
+    text = re.sub(r"#\w+", " ", text)
+    text = re.sub(r"[^\w\s.,!?:;'\-%/()À-ÿ]", " ", text)   # emojis, aspas, símbolos
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def generate_summary_intro_text(clip_text, api_key):
+    """Pede à IA 1-2 frases que apresentam o trecho, usando SOMENTE o que foi dito nele.
+
+    Devolve o texto ou None (sem fala, sem chave, resposta fora das regras ou inventada).
+    """
+    source = (clip_text or "").strip()
+    if not source or not api_key:
+        return None
+    prompt = (
+        "Você escreve a ABERTURA NARRADA de um Short a partir da transcrição de um trecho de live/gameplay. "
+        "O vídeo fica parado no primeiro quadro enquanto um narrador resume o assunto; depois o trecho começa.\n\n"
+        f"REGRAS OBRIGATÓRIAS:\n- 1 a 2 frases, de {SUMMARY_MIN_WORDS} a {SUMMARY_MAX_WORDS} palavras no total\n"
+        "- use SOMENTE o que está dito na transcrição: não invente nomes, números, jogos, lugares ou fatos que não aparecem nela\n"
+        "- fale em terceira pessoa (\"o streamer...\"), tom animado mas natural, em português do Brasil\n"
+        "- apresente o assunto e crie curiosidade; NÃO conte o desfecho nem a piada final\n"
+        "- sem emojis, hashtags, aspas ou palavrões\n\n"
+        'RETORNE APENAS JSON VÁLIDO: {"resumo": "texto da abertura"}\n\n'
+        f"TRANSCRIÇÃO:\n{source[:2500]}"
+    )
+    for model in get_text_models_to_try(api_key):
+        try:
+            result = groq_chat([{"role": "user", "content": prompt}], api_key, model, temperature=0.4, max_tokens=250)
+        except Exception as e:
+            print(f"   ⚠️  Resumo: erro no Groq ({model}): {e}")
+            continue
+        data = extract_json(result) if result else None
+        if not isinstance(data, dict):
+            continue
+        summary = _clean_summary(data.get("resumo"))
+        words = summary.split()
+        if len(words) > SUMMARY_MAX_WORDS:
+            # tenta ficar só com a primeira frase
+            first = re.match(r"^(.+?[.!?])(\s|$)", summary)
+            summary = first.group(1) if first else ""
+            words = summary.split()
+        if not (SUMMARY_MIN_WORDS <= len(words) <= SUMMARY_MAX_WORDS):
+            print(f"   ⚠️  Resumo fora do tamanho ({len(words)} palavras) em {model}, tentando outro modelo...")
+            continue
+        if not summary_is_grounded(summary, source):
+            print(f"   ⚠️  Resumo descartado: usa assuntos que não estão na fala do trecho ({model}).")
+            continue
+        return summary
+    return None
+
+
+def _speak_summary(text, tts_path, rate):
+    """Gera a voz do resumo. Devolve (ok, duração_em_segundos, eventos_de_palavra)."""
+    try:
+        ok, duration, events = asyncio.run(generate_tts_audio(text, Path(tts_path), rate=rate))
+    except Exception as e:
+        print(f"   ⚠️  Resumo: falha ao gerar a voz: {e}")
+        return False, 0, []
+    return bool(ok), float(duration or 0), events or []
+
+
+def intro_word_timings(events):
+    """(início, fim, palavra) de cada palavra falada, a partir dos eventos do edge-tts."""
+    kinds = {e.get("type") for e in events}
+    use = [e for e in events if e.get("type") == "WordBoundary"] if "WordBoundary" in kinds else list(events)
+    words = []
+    for ev in use:
+        parts = str(ev.get("text", "")).split()
+        if not parts:
+            continue
+        start = float(ev.get("offset", 0))
+        dur = max(float(ev.get("duration", 0)), 0.05)
+        step = dur / len(parts)
+        for i, part in enumerate(parts):
+            words.append((start + i * step, start + (i + 1) * step, part))
+    return words
+
+
+def create_intro_ass(word_events, output_path, total_duration, per_chunk=3):
+    """Legenda da narração do resumo: blocos de poucas palavras, na mesma altura da legenda do corte."""
+    words = intro_word_timings(word_events)
+    if not words:
+        return False
+    chunks = [words[i:i + per_chunk] for i in range(0, len(words), per_chunk)]
+
+    def stamp(sec):
+        sec = max(0.0, sec)
+        return f"{int(sec // 3600)}:{int(sec % 3600 // 60):02d}:{int(sec % 60):02d}.{int((sec - int(sec)) * 100):02d}"
+
+    lines = []
+    for i, chunk in enumerate(chunks):
+        start = chunk[0][0]
+        end = chunks[i + 1][0][0] if i + 1 < len(chunks) else min(chunk[-1][1] + 0.25, total_duration)
+        if end - start < 0.15:
+            end = start + 0.15
+        text = " ".join(w[2] for w in chunk).upper()
+        text = re.sub(r"[{}\\]", "", text)
+        lines.append(f"Dialogue: 0,{stamp(start)},{stamp(end)},Intro,,0,0,0,,{text}")
+    header = (
+        "[Script Info]\nTitle: Resumo narrado\nScriptType: v4.00+\n"
+        f"PlayResX: {VERTICAL_WIDTH}\nPlayResY: {VERTICAL_HEIGHT}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n"
+        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Intro,Impact,{SUMMARY_SUBTITLE_FONT_SIZE},&H00FFFFFF,&H00FFFF00,&H00000000,&H80000000,"
+        f"-1,0,0,0,100,100,0,0,1,4,1,2,40,40,{FIT_SUBTITLE_MARGIN_V},1\n\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+    try:
+        Path(output_path).write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"   ⚠️  Resumo: não consegui criar a legenda da narração: {e}")
+        return False
+    return True
+
+
+_FPS_EXATOS = (("23.98", "24000/1001"), ("29.97", "30000/1001"), ("59.94", "60000/1001"))
+
+
+def normalize_fps(raw):
+    """Taxa de quadros em texto para o ffmpeg; 29.97 vira 30000/1001 (igual ao vídeo de origem)."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return "30"
+    for approx, exact in _FPS_EXATOS:
+        if abs(value - float(approx)) < 0.02:
+            return exact
+    return str(int(round(value))) if abs(value - round(value)) < 0.01 else str(raw)
+
+
+def probe_stream_info(path):
+    """fps, taxa de amostragem e canais do corte pronto (a intro precisa sair idêntica para juntar sem recodificar)."""
+    _, out, err = run_cmd([FFMPEG.as_posix(), "-hide_banner", "-i", str(path)])
+    text = f"{out}\n{err}"
+    info = {"fps": "30", "sample_rate": 44100, "channels": 2, "has_audio": False}
+    m = re.search(r"Video:.*?,\s*([\d.]+) fps", text)
+    if m:
+        info["fps"] = normalize_fps(m.group(1))
+    m = re.search(r"Audio:[^\n]*?,\s*(\d{4,6}) Hz,\s*([^,\n]+)", text)
+    if m:
+        info["has_audio"] = True
+        info["sample_rate"] = int(m.group(1))
+        info["channels"] = 1 if m.group(2).strip().lower() == "mono" else 2
+    elif "Audio:" in text:
+        info["has_audio"] = True
+    return info
+
+
+def build_intro_cmd(frame_png, tts_path, ass_path, output_path, duration, info):
+    """ffmpeg que cria a intro: primeiro quadro parado + legenda + voz, com os parâmetros do corte."""
+    subs = Path(ass_path).as_posix().replace(":", "\\:")
+    graph = (f"[0:v]subtitles='{subs}'[v];"
+             f"[1:a]loudnorm=I=-16:TP=-1.5:LRA=11,aresample={info['sample_rate']},apad[a]")
+    return [
+        FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error",
+        "-loop", "1", "-framerate", info["fps"], "-i", str(frame_png),
+        "-i", str(tts_path),
+        "-filter_complex", graph, "-map", "[v]", "-map", "[a]",
+        "-t", f"{duration:.3f}", "-r", info["fps"],
+        "-c:v", "libx264", "-preset", QUALITY_PRESET, "-crf", str(QUALITY_CRF),
+        "-profile:v", "high", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k", "-ar", str(info["sample_rate"]), "-ac", str(info["channels"]),
+        "-movflags", "+faststart", str(output_path),
+    ]
+
+
+def build_concat_copy_cmd(list_path, output_path):
+    """Junta intro + corte SEM recodificar (o corte mantém exatamente a qualidade que já tinha)."""
+    return [FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "concat", "-safe", "0", "-i", str(list_path),
+            "-c", "copy", "-movflags", "+faststart", str(output_path)]
+
+
+def build_concat_reencode_cmd(intro_path, main_path, output_path):
+    """Plano B da junção: recodifica (qualidade do corte um pouco menor, mas sempre funciona)."""
+    return [FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(intro_path), "-i", str(main_path),
+            "-filter_complex", "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]",
+            "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-preset", QUALITY_PRESET, "-crf", str(QUALITY_CRF),
+            "-profile:v", "high", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart", str(output_path)]
+
+
+def _duration_matches(path, expected, tolerance=0.6):
+    real = get_video_duration(path)
+    return real > 0 and abs(real - expected) <= tolerance
+
+
+def add_summary_intro(output_path, clip_text, api_key):
+    """Coloca o resumo narrado no começo de um corte já pronto (1080x1920).
+
+    Devolve um dict com o que foi feito (para o .json) ou None se não houve intro. NUNCA levanta
+    erro nem estraga o corte: o arquivo só é trocado quando a versão com intro está completa.
+    """
+    if not summary_intro_enabled():
+        return None
+    output_path = Path(output_path)
+    if not api_key:
+        print("   ℹ️  Resumo no início: sem GROQ_API_KEY, o corte sai sem ele.")
+        return None
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", output_path.stem)[:60]
+    tts_path = TEMP_DIR / f"resumo_{stem}.mp3"
+    ass_path = TEMP_DIR / f"resumo_{stem}.ass"
+    frame_path = TEMP_DIR / f"resumo_{stem}.png"
+    intro_path = TEMP_DIR / f"resumo_{stem}_intro.mp4"
+    list_path = TEMP_DIR / f"resumo_{stem}_lista.txt"
+    joined_path = TEMP_DIR / f"resumo_{stem}_final.mp4"
+    temporarios = [tts_path, ass_path, frame_path, intro_path, list_path, joined_path]
+    try:
+        print("   🎙️  Resumo narrado no início do corte...")
+        summary = generate_summary_intro_text(clip_text, api_key)
+        if not summary:
+            print("   ℹ️  Sem um resumo bom o bastante para este trecho: o corte sai sem intro.")
+            return None
+        print(f"   📝 Resumo: \"{summary}\"")
+
+        ok, spoken, events = _speak_summary(summary, tts_path, TTS_RATE)
+        if ok and spoken > SUMMARY_MAX_SPOKEN_SECONDS:
+            ok, spoken, events = _speak_summary(summary, tts_path, SUMMARY_FAST_RATE)
+        if not ok or spoken <= 0 or spoken > SUMMARY_MAX_SPOKEN_SECONDS:
+            print("   ℹ️  Não consegui uma narração curta o bastante: o corte sai sem intro.")
+            return None
+        intro_seconds = spoken + SUMMARY_PAUSE_AFTER
+
+        main_seconds = get_video_duration(output_path)
+        if main_seconds <= 0:
+            return None
+        if main_seconds + intro_seconds > SUMMARY_MAX_TOTAL_SECONDS:
+            print(f"   ℹ️  Intro + corte passariam de {SUMMARY_MAX_TOTAL_SECONDS}s: o corte sai sem intro.")
+            return None
+        info = probe_stream_info(output_path)
+        if not info["has_audio"]:
+            print("   ℹ️  O corte não tem áudio para juntar com a intro: sai sem ela.")
+            return None
+
+        ok, _, err = run_cmd([FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error",
+                              "-i", str(output_path), "-frames:v", "1", str(frame_path)], timeout=120)
+        if not ok or not frame_path.exists():
+            print(f"   ⚠️  Resumo: não consegui pegar o primeiro quadro: {err[-300:]}")
+            return None
+        if not create_intro_ass(events, ass_path, intro_seconds):
+            return None
+        ok, _, err = run_cmd(build_intro_cmd(frame_path, tts_path, ass_path, intro_path, intro_seconds, info), timeout=300)
+        if not ok or not intro_path.exists():
+            print(f"   ⚠️  Resumo: erro ao montar a intro: {err[-400:]}")
+            return None
+        intro_real = get_video_duration(intro_path)
+        expected = (intro_real or intro_seconds) + main_seconds
+
+        def quoted(p):
+            return "file '" + Path(p).resolve().as_posix().replace("'", "'\\''") + "'"
+        list_path.write_text(quoted(intro_path) + "\n" + quoted(output_path) + "\n", encoding="utf-8")
+
+        mode = None
+        ok, _, err = run_cmd(build_concat_copy_cmd(list_path, joined_path), timeout=300)
+        if ok and joined_path.exists() and _duration_matches(joined_path, expected):
+            mode = "copia"
+        else:
+            print("   ⚠️  Junção sem recodificar não ficou boa; refazendo recodificando (qualidade um pouco menor).")
+            ok, _, err = run_cmd(build_concat_reencode_cmd(intro_path, output_path, joined_path), timeout=900)
+            if ok and joined_path.exists() and _duration_matches(joined_path, expected):
+                mode = "reencode"
+        if not mode:
+            print(f"   ⚠️  Resumo: a junção falhou ({err[-300:]}). O corte sai sem intro.")
+            return None
+
+        os.replace(joined_path, output_path)
+        print(f"   ✅ Resumo narrado aplicado ({intro_seconds:.1f}s no início, junção: {mode}).")
+        return {"texto": summary, "voz": TTS_VOICE, "duracao_s": round(intro_seconds, 2), "juncao": mode}
+    except Exception as e:
+        print(f"   ⚠️  Resumo no início ignorado por erro: {e}")
+        return None
+    finally:
+        for p in temporarios:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
 def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, webcam_pos, groq_api_key=None):
     """Corta vídeo no modo Gameplay/Streamer com layout ClipFlow 3 camadas (1080x1920)."""
     webcam_name = "Sem webcam (gameplay only)" if webcam_pos is None else webcam_pos.get('name', 'Posição personalizada')
@@ -3857,6 +4182,9 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
         print(f"   ❌ Falha no layout ClipFlow, tentando fallback simplificado...")
         return cut_simple_gameplay(video_path, clip, ass_path, output_path, clip_num, webcam_pos)
 
+    # Resumo narrado no início (vídeo parado + voz). Se falhar por qualquer motivo, o corte fica como está.
+    intro_info = add_summary_intro(output_path, clip_text, groq_api_key)
+
     json_path = output_path.with_suffix('.json')
     metadata = {
         "titulo_gancho": hook_data.get("titulo_gancho", ""),
@@ -3877,6 +4205,8 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
         "clip_end": clip['end'],
         "clip_duration": clip['duration'],
         "webcam_position": webcam_pos,
+        "resumo_intro": intro_info,
+        "duracao_final_s": round(clip['duration'] + (intro_info["duracao_s"] if intro_info else 0), 2),
         "timestamp": datetime.now().isoformat()
     }
     try:
@@ -4125,8 +4455,12 @@ def main():
                         help="Permite repetir trechos que já viraram corte em execuções anteriores deste vídeo")
     parser.add_argument("--importar-existentes", action="store_true",
                         help="Marca como já usados os cortes que estão em cortes_prontos/ (use só se todos vieram deste vídeo)")
+    parser.add_argument("--sem-resumo", action="store_true",
+                        help="Desliga o resumo narrado no início do corte (vem ligado por padrão no modo gameplay)")
     parser.add_argument("--repair", metavar="CLIP_PATH", help="Reparar/Reprocessar clipe existente: corrige sincronia A/V e aplica layout ClipFlow 3 camadas")
     args = parser.parse_args()
+    if args.sem_resumo:
+        os.environ["CORTES_RESUMO"] = "0"
 
     if args.repair:
         print("=" * 60)

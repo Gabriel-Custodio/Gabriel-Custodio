@@ -70,6 +70,7 @@ function mostrarPrerequisitos(p) {
 function alternarOpcoes() {
   const modo = document.querySelector('input[name="modo"]:checked').value;
   $("opcoes-gameplay").hidden = modo !== "gameplay";
+  $("linha-resumo").hidden = modo !== "gameplay";   // o resumo no início só existe no modo gameplay
 }
 document.querySelectorAll('input[name="modo"]').forEach((el) => el.addEventListener("change", alternarOpcoes));
 
@@ -144,6 +145,7 @@ $("form-gerar").addEventListener("submit", async (ev) => {
   if (modo === "gameplay") {
     corpo.cortes = Number(f.get("cortes") || 5);
     corpo.webcam = f.get("webcam") || "";
+    corpo.resumo = f.get("resumo") === "on";
   }
   try {
     await post("/api/executar", corpo);
@@ -190,6 +192,7 @@ function montarCorte(c) {
   if (c.nota != null) selos.append(selo(`nota ${c.nota}`));
   if (c.score != null) selos.append(selo(`score ${Number(c.score).toFixed(1)}`));
   if (c.modo) selos.append(selo(c.modo));
+  if (c.resumo) selos.append(selo("com resumo no início"));
   const origem = fonteTitulo(c.fonte_titulo);
   if (origem) selos.append(selo(origem, c.fonte_titulo === "padrao" ? "cancelado" : ""));
   if (!c.tem_json) selos.append(selo("sem .json", "cancelado"));
@@ -203,6 +206,10 @@ function montarCorte(c) {
   const fala = no.querySelector(".fala");
   fala.hidden = !c.transcricao;
   no.querySelector(".transcricao").textContent = c.transcricao;
+
+  const resumo = no.querySelector(".resumo-intro");
+  resumo.hidden = !c.resumo;
+  no.querySelector(".texto-resumo").textContent = c.resumo || "";
 
   const aprovar = no.querySelector(".aprovar");
   aprovar.textContent = c.estado === "aprovado" ? "Desfazer aprovação" : "Aprovar";

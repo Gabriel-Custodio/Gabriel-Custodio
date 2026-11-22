@@ -59,6 +59,9 @@
           </div>
         </div>
 
+        <label id="linha-resumo" class="inline caixa"><input type="checkbox" id="resumo" name="resumo" checked>
+          Resumo narrado no início (o vídeo para no primeiro quadro, uma voz resume o assunto e então o corte começa)</label>
+
         <details class="avancado">
           <summary>Opções avançadas</summary>
           <label class="inline caixa"><input type="checkbox" id="repetir" name="repetir">
@@ -136,6 +139,10 @@
         <details class="fala">
           <summary>Texto falado neste corte</summary>
           <p class="transcricao"></p>
+        </details>
+        <details class="resumo-intro">
+          <summary>Resumo narrado no início</summary>
+          <p class="texto-resumo"></p>
         </details>
         <div class="acoes">
           <button type="button" class="btn aprovar">Aprovar</button>

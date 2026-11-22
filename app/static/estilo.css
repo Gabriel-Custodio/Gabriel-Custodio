@@ -121,8 +121,8 @@ input[type="text"], input[type="number"], select {
 .selos { display: flex; flex-wrap: wrap; gap: 6px; }
 .selos .selo { font-size: 12px; padding: 2px 9px; }
 .meta { margin: 0; font-size: 12px; color: var(--suave); overflow-wrap: anywhere; }
-.fala summary { cursor: pointer; color: var(--suave); }
-.transcricao { margin: 6px 0 0; font-size: 13px; max-height: 160px; overflow: auto; overflow-wrap: anywhere; }
+.fala summary, .resumo-intro summary { cursor: pointer; color: var(--suave); }
+.texto-resumo, .transcricao { margin: 6px 0 0; font-size: 13px; max-height: 160px; overflow: auto; overflow-wrap: anywhere; }
 .acoes { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 8px; }
 .acoes .btn { padding: 6px 11px; font-size: 13px; }
 .corte.aprovado { border-color: var(--ok); }

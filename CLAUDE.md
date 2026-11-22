@@ -146,6 +146,14 @@ with open(output_path, "wb") as f:
 - Os `.json` dos cortes guardam `video_id` e `video_url` (a base para as métricas do YouTube da fase 3).
 - Se o histórico esgotar os trechos, avisar (`dica_historico_esgotado`) e nunca repetir em silêncio. Testes: `app/tests/test_historico.py`.
 
+## Resumo Narrado no Início (modo gameplay; REGRA: o resumo nunca inventa e nunca estraga o corte)
+- `add_summary_intro()` (`gerar_cortes.py`) roda DEPOIS do layout, sobre o `.mp4` final de 1080x1920: pega o primeiro quadro, gera 1-2 frases (`generate_summary_intro_text`, 6-20 palavras) com a voz do `edge-tts`, monta uma intro (quadro parado + legenda da fala + voz) e junta intro + corte. Ligado por padrão (`SUMMARY_INTRO_DEFAULT`); desliga com `--sem-resumo`, `CORTES_RESUMO=0` ou a caixa da interface (a interface só manda `--sem-resumo`, e só no modo gameplay).
+- **O texto vem só da fala real do trecho** (`clip_text`). `summary_is_grounded()` descarta resumo cujas palavras de conteúdo não aparecem na fala (`SUMMARY_MIN_GROUNDING`). Sem fala, sem chave ou sem resumo bom: o corte sai sem intro.
+- **Qualidade primeiro:** a intro é codificada com os MESMOS parâmetros do corte (fps, taxa de áudio, canais, crf) e a junção é `concat -c copy`, sem recodificar o corte. Só se a junção falhar ou a duração do resultado não bater (±0,6 s) é que se usa a recodificação (`juncao: reencode`).
+- **Nunca estragar o corte:** o arquivo só é trocado (`os.replace`) quando a versão com intro está completa; qualquer erro devolve `None` e mantém o corte original. Intro + corte ≤ `SUMMARY_MAX_TOTAL_SECONDS` (60 s); sem áudio no corte = sem intro.
+- A legenda do corte original já está gravada na imagem, então NÃO precisa ser deslocada: a intro entra antes por concatenação. O `.json` ganha `resumo_intro` (texto, voz, duração, junção) e `duracao_final_s`.
+- Só o modo gameplay usa isso por enquanto (o modo `ia` já é narrado). O fallback `cut_simple_gameplay` sai sem intro. Testes: `app/tests/test_resumo.py`.
+
 ## Análise Visual de Vídeos (Projeto Todo)
 - Sempre que precisar avaliar a qualidade de um corte gerado, analisar um vídeo de referência ou entender o contexto visual antes de editar qualquer script do projeto, utilize a skill `/watch` (`.claude/skills/watch/SKILL.md`). Ela serve para quem DESENVOLVE o projeto (o Claude Code assistindo vídeos); o produto (`gerar_cortes.py`) não a usa.
 - **Origem:** a skill é uma cópia do projeto MIT [bradautomates/claude-video](https://github.com/bradautomates/claude-video) (versão e commit em `.claude/skills/watch/UPSTREAM.md`). **Não edite os arquivos dela**; para atualizar, copie de novo a pasta `skills/watch/` do original e atualize o `UPSTREAM.md`.

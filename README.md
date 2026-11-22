@@ -171,6 +171,15 @@ O programa **lembra** quais trechos de cada vídeo já viraram corte. Se você p
 
 - **Para esquecer tudo:** apague o arquivo `_historico_cortes.json`.
 
+### Resumo narrado no início (modo gameplay)
+
+Cada corte do modo gameplay **começa com o vídeo parado** no primeiro quadro enquanto uma voz (a mesma do modo IA, `pt-BR-AntonioNeural`) resume o assunto em 1 ou 2 frases; depois o corte roda normalmente. Vem **ligado por padrão**.
+
+- O resumo usa **só o que foi dito no trecho**. Se a IA não conseguir um resumo fiel (ou o trecho passar de 60 s com a intro), o corte sai **sem intro**, e o terminal avisa o motivo.
+- A intro soma uns 6 a 9 segundos ao corte. O `.json` guarda o texto em `resumo_intro` e a duração total em `duracao_final_s`.
+- O corte é juntado à intro **sem recodificar** (`juncao: copia`), então a qualidade não cai. Se isso falhar, ele recodifica (`juncao: reencode`).
+- **Para desligar:** `--sem-resumo` na linha de comando, `CORTES_RESUMO=0` no `.env`, ou desmarque a caixa na interface.
+
 ---
 
 ## 6. Roteiro de teste para o QA
@@ -203,7 +212,12 @@ Anote para cada item: **passou ou falhou**, a **URL** usada, a **opção** do me
 10. **Sem o ffmpeg** (renomeie `bin` temporariamente e tire o PATH, se souber). Deve parar com a mensagem clara da seção 2.
 11. **URL inválida ou vídeo privado.** Deve falhar com mensagem legível, sem travar.
 12. **Sem repetir (histórico):** gere cortes de um vídeo, depois gere de novo **o mesmo vídeo** (pode ser com outro formato de link). Os cortes da segunda vez **não podem repetir** os da primeira (compare o `clip_start`/`clip_end` dos `.json` ou os trechos assistidos). Depois repita marcando "Permitir repetir trechos": agora pode repetir.
-13. **Opção 5 (monitor de lives):** só teste com uma live **sua** ou com autorização de quem a faz.
+13. **Resumo no início (gameplay):** o corte começa com o primeiro quadro **parado** e uma voz resumindo; a legenda da voz aparece embaixo; quando a voz termina, o vídeo **continua do mesmo ponto** com o áudio original, sem estalo, sem pulo de imagem e sem perder a sincronia da legenda. Confira:
+   - o resumo **combina com o que o streamer fala** naquele corte (compare com `transcricao` no `.json`) e não inventa nome nem fato;
+   - no `.json`, `resumo_intro.juncao` é `copia` (se vier `reencode`, anote o terminal e compare a nitidez);
+   - o corte inteiro tem no máximo 60 s e o fade final continua funcionando;
+   - rode de novo com `--sem-resumo`: o corte deve sair **sem** intro e com `resumo_intro: null`.
+14. **Opção 5 (monitor de lives):** só teste com uma live **sua** ou com autorização de quem a faz.
 
 ### O que mandar quando algo falhar
 
