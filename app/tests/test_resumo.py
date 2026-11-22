@@ -325,3 +325,115 @@ class TestNomeDoStreamer(unittest.TestCase):
             self.assertEqual(g.fetch_video_info("https://twitch.tv/x"), {})
         with mock.patch.object(g, "run_cmd", return_value=(True, "{quebrado", "")):
             self.assertEqual(g.fetch_video_info("https://twitch.tv/x"), {})
+
+
+class TestChamadaFinal(unittest.TestCase):
+    """add_cta_outro (like/compartilhar/inscrever-se no fim) com ffmpeg falso."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.antigo_temp = g.TEMP_DIR
+        g.TEMP_DIR = self.dir
+        for k in ("CORTES_CTA", "CORTES_CTA_TEXT"):
+            os.environ.pop(k, None)
+        self.saida = self.dir / "corte.mp4"
+        self.saida.write_bytes(b"ORIGINAL")
+        self.cmds = []
+        self.durs = {"corte.mp4": 40.0, "cta_corte_outro.mp4": 6.0, "cta_corte_final.mp4": 46.0}
+        self.falhar = set()
+
+    def tearDown(self):
+        g.TEMP_DIR = self.antigo_temp
+        for k in ("CORTES_CTA", "CORTES_CTA_TEXT"):
+            os.environ.pop(k, None)
+        self.tmp.cleanup()
+
+    def fake_run(self, cmd, cwd=None, timeout=None):
+        self.cmds.append(cmd)
+        if cmd[:4] == [g.FFMPEG.as_posix(), "-hide_banner", "-i", str(self.saida)]:
+            return False, "", "Video: h264, 1080x1920, 30 fps\nAudio: aac (LC), 48000 Hz, stereo"
+        if "-frames:v" in cmd:
+            Path(cmd[-1]).write_bytes(b"PNG")
+            return True, "", ""
+        tipo = "intro" if "-loop" in cmd else "copia" if "-f" in cmd and "concat" in cmd else "reencode"
+        if tipo in self.falhar:
+            return False, "", f"falha {tipo}"
+        Path(cmd[-1]).write_bytes(tipo.encode())
+        return True, "", ""
+
+    def rodar(self, fala=(True, 5.0, EVENTOS)):
+        with mock.patch.object(g, "run_cmd", side_effect=self.fake_run), \
+             mock.patch.object(g, "get_video_duration", side_effect=lambda p: self.durs.get(Path(p).name, 0)), \
+             mock.patch.object(g, "_speak_summary", return_value=fala):
+            return g.add_cta_outro(self.saida)
+
+    def test_ligada_por_padrao_e_junta_no_fim(self):
+        info = self.rodar()
+        self.assertEqual(self.saida.read_bytes(), b"copia")
+        self.assertEqual(info["juncao"], "copia")
+        self.assertAlmostEqual(info["duracao_s"], 5.0 + g.CTA_PAUSE_AFTER, places=2)
+        self.assertIn("like", info["texto"].lower())
+        self.assertIn("inscreva", info["texto"].lower())
+        self.assertEqual(list(self.dir.glob("cta_*")), [])
+        # a ordem da junção: o corte primeiro, o final depois
+        lista_cmd = next(c for c in self.cmds if "-f" in c and "concat" in c)
+        self.assertEqual(lista_cmd[lista_cmd.index("-i") + 1].endswith("_lista.txt"), True)
+
+    def test_quadro_vem_de_antes_do_fade_e_escurece(self):
+        self.rodar()
+        quadro = next(c for c in self.cmds if "-frames:v" in c)
+        self.assertEqual(float(quadro[quadro.index("-ss") + 1]), 40.0 - g.CTA_FRAME_BEFORE_END)
+        intro = next(c for c in self.cmds if "-loop" in c)
+        grafico = intro[intro.index("-filter_complex") + 1]
+        self.assertIn("eq=brightness", grafico)
+        self.assertIn("fade=t=in", grafico)
+        self.assertIn("fade=t=out", grafico)
+
+    def test_desligada(self):
+        os.environ["CORTES_CTA"] = "0"
+        self.assertIsNone(self.rodar())
+        self.assertEqual(self.cmds, [])
+        self.assertEqual(self.saida.read_bytes(), b"ORIGINAL")
+
+    def test_texto_do_env_e_validado(self):
+        os.environ["CORTES_CTA_TEXT"] = "Curta e se inscreva no canal do Gabriel!"
+        self.assertEqual(g.cta_text(), "Curta e se inscreva no canal do Gabriel!")
+        os.environ["CORTES_CTA_TEXT"] = "oi"                       # curto demais: volta ao padrão
+        self.assertEqual(g.cta_text(), g.CTA_TEXT)
+        os.environ["CORTES_CTA_TEXT"] = " ".join(["palavra"] * 40)  # longo demais
+        self.assertEqual(g.cta_text(), g.CTA_TEXT)
+
+    def test_falhas_preservam_o_corte(self):
+        self.falhar.add("intro")
+        self.assertIsNone(self.rodar())
+        self.assertEqual(self.saida.read_bytes(), b"ORIGINAL")
+        self.falhar.clear()
+        self.falhar.update({"copia", "reencode"})
+        self.assertIsNone(self.rodar())
+        self.assertEqual(self.saida.read_bytes(), b"ORIGINAL")
+        self.assertEqual(list(self.dir.glob("cta_*")), [])
+
+    def test_recodifica_se_a_copia_falhar(self):
+        self.falhar.add("copia")
+        self.assertEqual(self.rodar()["juncao"], "reencode")
+        self.assertEqual(self.saida.read_bytes(), b"reencode")
+
+    def test_voz_longa_ou_sem_voz_ou_total_alto(self):
+        self.assertIsNone(self.rodar(fala=(True, g.CTA_MAX_SPOKEN_SECONDS + 3, EVENTOS)))
+        self.assertIsNone(self.rodar(fala=(False, 0, [])))
+        self.durs["corte.mp4"] = g.SUMMARY_MAX_TOTAL_SECONDS - 3
+        self.assertIsNone(self.rodar())
+        self.assertEqual(self.saida.read_bytes(), b"ORIGINAL")
+
+    def test_funciona_junto_com_o_resumo_do_inicio(self):
+        # o resumo do início já mexeu no arquivo; a chamada final trabalha sobre o resultado
+        self.saida.write_bytes(b"COM_RESUMO")
+        self.assertIsNotNone(self.rodar())
+        self.assertEqual(self.saida.read_bytes(), b"copia")
+
+    def test_flag_e_erro_inesperado(self):
+        self.assertIn("--sem-cta", (RAIZ / "gerar_cortes.py").read_text(encoding="utf-8"))
+        with mock.patch.object(g, "_speak_summary", side_effect=RuntimeError("boom")):
+            self.assertIsNone(g.add_cta_outro(self.saida))
+        self.assertEqual(self.saida.read_bytes(), b"ORIGINAL")

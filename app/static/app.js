@@ -71,6 +71,7 @@ function alternarOpcoes() {
   const modo = document.querySelector('input[name="modo"]:checked').value;
   $("opcoes-gameplay").hidden = modo !== "gameplay";
   $("campo-streamer").hidden = modo !== "gameplay";
+  $("linha-cta").hidden = modo !== "gameplay";
   $("linha-resumo").hidden = modo !== "gameplay";   // o resumo no início só existe no modo gameplay
 }
 document.querySelectorAll('input[name="modo"]').forEach((el) => el.addEventListener("change", alternarOpcoes));
@@ -147,6 +148,7 @@ $("form-gerar").addEventListener("submit", async (ev) => {
     corpo.cortes = Number(f.get("cortes") || 5);
     corpo.webcam = f.get("webcam") || "";
     corpo.resumo = f.get("resumo") === "on";
+    corpo.cta = f.get("cta") === "on";
     corpo.streamer = String(f.get("streamer") || "").trim();
   }
   try {
@@ -195,6 +197,7 @@ function montarCorte(c) {
   if (c.score != null) selos.append(selo(`score ${Number(c.score).toFixed(1)}`));
   if (c.modo) selos.append(selo(c.modo));
   if (c.resumo) selos.append(selo("com resumo no início"));
+  if (c.cta) selos.append(selo("com chamada final"));
   const origem = fonteTitulo(c.fonte_titulo);
   if (origem) selos.append(selo(origem, c.fonte_titulo === "padrao" ? "cancelado" : ""));
   if (!c.tem_json) selos.append(selo("sem .json", "cancelado"));

@@ -196,6 +196,7 @@ class Estado:
                 "score": meta.get("score_selecao"),
                 "motivo": meta.get("motivo_selecao"),
                 "inicio_s": meta.get("clip_start"),
+                "cta": isinstance(meta.get("cta_final"), dict),
                 "resumo": str((meta.get("resumo_intro") or {}).get("texto") or "") if isinstance(meta.get("resumo_intro"), dict) else "",
                 "fim_s": meta.get("clip_end"),
                 "duracao_s": meta.get("clip_duration"),
@@ -292,6 +293,12 @@ class Estado:
             if resumo is False:
                 comando.append("--sem-resumo")
                 params["resumo"] = False
+            cta = dados.get("cta")                             # ligada por padrão; só False desliga
+            if cta is not None and not isinstance(cta, bool):
+                raise ValueError("Opção inválida.")
+            if cta is False:
+                comando.append("--sem-cta")
+                params["cta"] = False
             streamer = dados.get("streamer")
             if streamer is not None and not isinstance(streamer, str):
                 raise ValueError("Nome do streamer inválido.")

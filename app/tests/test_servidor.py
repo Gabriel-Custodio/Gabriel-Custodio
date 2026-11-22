@@ -329,6 +329,16 @@ class TestExecucao(Base):
             status, _ = self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "resumo": ruim})
             self.assertEqual(status, 400, ruim)
 
+    def test_chamada_final_so_vira_flag_ao_desligar(self):
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1})
+        self.assertNotIn("--sem-cta", "\n".join(self.esperar_fim()["linhas"]).split("ARGS:")[-1])
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1, "cta": False})
+        self.assertIn("--sem-cta", "\n".join(self.esperar_fim()["linhas"]))
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "ia", "cta": False})
+        self.assertNotIn("--sem-cta", "\n".join(self.esperar_fim()["linhas"]).split("ARGS:")[-1])
+        for ruim in (0, 1, "nao"):
+            self.assertEqual(self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cta": ruim})[0], 400)
+
     def test_nome_do_streamer_vira_flag_com_igual(self):
         self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1, "streamer": "  Alan  zoka "})
         self.assertIn("'--streamer=Alan zoka'", "\n".join(self.esperar_fim()["linhas"]))

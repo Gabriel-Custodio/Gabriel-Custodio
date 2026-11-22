@@ -181,6 +181,16 @@ Cada corte do modo gameplay **começa com o vídeo parado** no primeiro quadro e
 - **Nome do streamer:** o resumo usa o nome do **canal** do vídeo (lido pelo yt-dlp). Se o canal parecer de cortes/compilações ("Cortes", "Clips", "Highlights"...), o nome **não** é usado sozinho e o resumo diz "o streamer". Nesse caso (ou se o nome do canal for diferente do nome do streamer) informe com `--streamer "NOME"` ou no campo "Nome do streamer" da interface. O nome vai também para o `.json` (`streamer`).
 - **Para desligar:** `--sem-resumo` na linha de comando, `CORTES_RESUMO=0` no `.env`, ou desmarque a caixa na interface.
 
+### Chamada final: like, compartilhar e inscrever-se (modo gameplay)
+
+No **fim** de cada corte, depois do fade, o último quadro fica parado (um pouco mais escuro) e a voz diz: "Gostou? Deixe o seu like, compartilhe com um amigo e se inscreva no canal para ver mais cortes!". A mesma frase aparece na legenda. Vem **ligada por padrão** e soma uns 6 a 7 segundos.
+
+- Funciona **sem** a chave do Groq (a frase é fixa) e independe do resumo no início: dá para usar um sem o outro.
+- Junção **sem recodificar** (`cta_final.juncao: copia` no `.json`), com plano B recodificando. Se algo falhar, o corte sai sem a chamada, e o terminal diz o motivo.
+- Se corte + resumo + chamada passarem de 60 s, a chamada final é a que é pulada.
+- **Trocar a frase:** `CORTES_CTA_TEXT=...` no `.env` (3 a 25 palavras).
+- **Para desligar:** `--sem-cta`, `CORTES_CTA=0` no `.env` ou a caixa "Chamada final" na interface.
+
 ---
 
 ## 6. Roteiro de teste para o QA
@@ -220,7 +230,8 @@ Anote para cada item: **passou ou falhou**, a **URL** usada, a **opção** do me
    - no `.json`, `resumo_intro.juncao` é `copia` (se vier `reencode`, anote o terminal e compare a nitidez);
    - o corte inteiro tem no máximo 60 s e o fade final continua funcionando;
    - rode de novo com `--sem-resumo`: o corte deve sair **sem** intro e com `resumo_intro: null`.
-14. **Opção 5 (monitor de lives):** só teste com uma live **sua** ou com autorização de quem a faz.
+14. **Chamada final (gameplay):** o corte termina com o fade, aparece o último quadro parado e a voz pede like, compartilhamento e inscrição, com a legenda da frase. Confira que não há estalo na emenda, que o áudio do corte não é cortado antes do fade, que o `.json` tem `cta_final` (e `duracao_final_s` somando resumo + corte + chamada) e que `--sem-cta` tira só a chamada (o resumo do início continua).
+15. **Opção 5 (monitor de lives):** só teste com uma live **sua** ou com autorização de quem a faz.
 
 ### O que mandar quando algo falhar
 

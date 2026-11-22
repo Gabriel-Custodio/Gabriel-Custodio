@@ -174,6 +174,16 @@ SUMMARY_PAUSE_AFTER = 0.35      # respiro (s) entre o fim da fala e o início do
 SUMMARY_MAX_TOTAL_SECONDS = 60  # intro + corte nunca passam disso
 SUMMARY_MIN_GROUNDING = 0.3     # fração mínima das palavras "de conteúdo" do resumo que existe na fala real
 SUMMARY_SUBTITLE_FONT_SIZE = 64
+# Chamada final (CTA): depois do corte, o último quadro fica parado e a voz pede like, compartilhamento
+# e inscrição (com a mesma frase na legenda). LIGADA por padrão; desligue com --sem-cta, CORTES_CTA=0
+# ou pela caixa da interface. A frase pode ser trocada no .env (CORTES_CTA_TEXT).
+CTA_DEFAULT = True
+CTA_TEXT = "Gostou? Deixe o seu like, compartilhe com um amigo e se inscreva no canal para ver mais cortes!"
+CTA_MAX_WORDS = 25
+CTA_MAX_SPOKEN_SECONDS = 8.0
+CTA_PAUSE_AFTER = 0.6
+CTA_FRAME_BEFORE_END = 1.6      # o corte termina com fade para preto; o quadro parado vem de antes do fade
+CTA_FADE_SECONDS = 0.4
 # Canais que são de CORTES/compilações: o nome do canal não é o do streamer, então não é usado sozinho
 # (o resumo diz "o streamer"; informe o nome com --streamer ou na interface).
 SUMMARY_CUT_CHANNEL_HINTS = ("corte", "cortes", "clip", "clips", "highlight", "highlights", "melhores momentos",
@@ -4040,10 +4050,10 @@ def probe_stream_info(path):
     return info
 
 
-def build_intro_cmd(frame_png, tts_path, ass_path, output_path, duration, info):
+def build_intro_cmd(frame_png, tts_path, ass_path, output_path, duration, info, pre_filter=""):
     """ffmpeg que cria a intro: primeiro quadro parado + legenda + voz, com os parâmetros do corte."""
     subs = Path(ass_path).as_posix().replace(":", "\\:")
-    graph = (f"[0:v]subtitles='{subs}'[v];"
+    graph = (f"[0:v]{pre_filter + ',' if pre_filter else ''}subtitles='{subs}'[v];"
              f"[1:a]loudnorm=I=-16:TP=-1.5:LRA=11,aresample={info['sample_rate']},apad[a]")
     return [
         FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error",
@@ -4074,6 +4084,21 @@ def build_concat_reencode_cmd(intro_path, main_path, output_path):
             "-c:v", "libx264", "-preset", QUALITY_PRESET, "-crf", str(QUALITY_CRF),
             "-profile:v", "high", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart", str(output_path)]
+
+
+def _concat_with_fallback(first, second, joined_path, list_path, expected):
+    """Junta first + second em joined_path. Devolve ("copia" | "reencode", "") ou (None, erro)."""
+    def quoted(p):
+        return "file '" + Path(p).resolve().as_posix().replace("'", "'\\''") + "'"
+    Path(list_path).write_text(quoted(first) + "\n" + quoted(second) + "\n", encoding="utf-8")
+    ok, _, err = run_cmd(build_concat_copy_cmd(list_path, joined_path), timeout=300)
+    if ok and Path(joined_path).exists() and _duration_matches(joined_path, expected):
+        return "copia", ""
+    print("   ⚠️  Junção sem recodificar não ficou boa; refazendo recodificando (qualidade um pouco menor).")
+    ok, _, err = run_cmd(build_concat_reencode_cmd(first, second, joined_path), timeout=900)
+    if ok and Path(joined_path).exists() and _duration_matches(joined_path, expected):
+        return "reencode", ""
+    return None, err
 
 
 def _duration_matches(path, expected, tolerance=0.6):
@@ -4142,19 +4167,7 @@ def add_summary_intro(output_path, clip_text, api_key, streamer=None):
         intro_real = get_video_duration(intro_path)
         expected = (intro_real or intro_seconds) + main_seconds
 
-        def quoted(p):
-            return "file '" + Path(p).resolve().as_posix().replace("'", "'\\''") + "'"
-        list_path.write_text(quoted(intro_path) + "\n" + quoted(output_path) + "\n", encoding="utf-8")
-
-        mode = None
-        ok, _, err = run_cmd(build_concat_copy_cmd(list_path, joined_path), timeout=300)
-        if ok and joined_path.exists() and _duration_matches(joined_path, expected):
-            mode = "copia"
-        else:
-            print("   ⚠️  Junção sem recodificar não ficou boa; refazendo recodificando (qualidade um pouco menor).")
-            ok, _, err = run_cmd(build_concat_reencode_cmd(intro_path, output_path, joined_path), timeout=900)
-            if ok and joined_path.exists() and _duration_matches(joined_path, expected):
-                mode = "reencode"
+        mode, err = _concat_with_fallback(intro_path, output_path, joined_path, list_path, expected)
         if not mode:
             print(f"   ⚠️  Resumo: a junção falhou ({err[-300:]}). O corte sai sem intro.")
             return None
@@ -4165,6 +4178,98 @@ def add_summary_intro(output_path, clip_text, api_key, streamer=None):
                 "duracao_s": round(intro_seconds, 2), "juncao": mode}
     except Exception as e:
         print(f"   ⚠️  Resumo no início ignorado por erro: {e}")
+        return None
+    finally:
+        for p in temporarios:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def cta_outro_enabled():
+    """Chamada final (like, compartilhar, inscrever-se): ligada por padrão. Desliga com CORTES_CTA=0 (ou --sem-cta)."""
+    value = os.environ.get("CORTES_CTA")
+    if value is None or not value.strip():
+        return CTA_DEFAULT
+    return value.strip().lower() not in ("0", "false", "nao", "não", "off", "no")
+
+
+def cta_text():
+    """Frase da chamada final: a do .env (CORTES_CTA_TEXT), se razoável, senão a padrão."""
+    custom = _clean_summary(os.environ.get("CORTES_CTA_TEXT"))
+    if custom and 3 <= len(custom.split()) <= CTA_MAX_WORDS:
+        return custom
+    return CTA_TEXT
+
+
+def add_cta_outro(output_path):
+    """Acrescenta no FIM de um corte pronto uma chamada narrada (like, compartilhar, inscrever-se).
+
+    O último quadro (de antes do fade final) fica parado, levemente escurecido, com a frase na legenda e na
+    voz. Junção sem recodificar (plano B: recodificar). Devolve um dict para o .json ou None; nunca levanta
+    erro nem estraga o corte (o arquivo só é trocado com o resultado completo).
+    """
+    if not cta_outro_enabled():
+        return None
+    output_path = Path(output_path)
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", output_path.stem)[:60]
+    tts_path = TEMP_DIR / f"cta_{stem}.mp3"
+    ass_path = TEMP_DIR / f"cta_{stem}.ass"
+    frame_path = TEMP_DIR / f"cta_{stem}.png"
+    outro_path = TEMP_DIR / f"cta_{stem}_outro.mp4"
+    list_path = TEMP_DIR / f"cta_{stem}_lista.txt"
+    joined_path = TEMP_DIR / f"cta_{stem}_final.mp4"
+    temporarios = [tts_path, ass_path, frame_path, outro_path, list_path, joined_path]
+    try:
+        text = cta_text()
+        print("   📣 Chamada final (like, compartilhar, inscrever-se)...")
+        ok, spoken, events = _speak_summary(text, tts_path, TTS_RATE)
+        if ok and spoken > CTA_MAX_SPOKEN_SECONDS:
+            ok, spoken, events = _speak_summary(text, tts_path, SUMMARY_FAST_RATE)
+        if not ok or spoken <= 0 or spoken > CTA_MAX_SPOKEN_SECONDS:
+            print("   ℹ️  Não consegui a narração da chamada final: o corte sai sem ela.")
+            return None
+        outro_seconds = spoken + CTA_PAUSE_AFTER
+
+        main_seconds = get_video_duration(output_path)
+        if main_seconds <= 0:
+            return None
+        if main_seconds + outro_seconds > SUMMARY_MAX_TOTAL_SECONDS:
+            print(f"   ℹ️  Corte + chamada final passariam de {SUMMARY_MAX_TOTAL_SECONDS}s: sai sem a chamada final.")
+            return None
+        info = probe_stream_info(output_path)
+        if not info["has_audio"]:
+            print("   ℹ️  O corte não tem áudio para juntar com a chamada final: sai sem ela.")
+            return None
+
+        at = max(0.0, main_seconds - CTA_FRAME_BEFORE_END)
+        ok, _, err = run_cmd([FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{at:.2f}",
+                              "-i", str(output_path), "-frames:v", "1", str(frame_path)], timeout=120)
+        if not ok or not frame_path.exists():
+            print(f"   ⚠️  Chamada final: não consegui pegar o quadro: {err[-300:]}")
+            return None
+        if not create_intro_ass(events, ass_path, outro_seconds):
+            return None
+        fade_out_at = max(0.0, outro_seconds - CTA_FADE_SECONDS)
+        pre = (f"eq=brightness=-0.12,fade=t=in:st=0:d={CTA_FADE_SECONDS},"
+               f"fade=t=out:st={fade_out_at:.2f}:d={CTA_FADE_SECONDS}")
+        ok, _, err = run_cmd(build_intro_cmd(frame_path, tts_path, ass_path, outro_path, outro_seconds, info, pre),
+                             timeout=300)
+        if not ok or not outro_path.exists():
+            print(f"   ⚠️  Chamada final: erro ao montar o final: {err[-400:]}")
+            return None
+        expected = main_seconds + (get_video_duration(outro_path) or outro_seconds)
+        mode, err = _concat_with_fallback(output_path, outro_path, joined_path, list_path, expected)
+        if not mode:
+            print(f"   ⚠️  Chamada final: a junção falhou ({err[-300:]}). O corte sai sem ela.")
+            return None
+
+        os.replace(joined_path, output_path)
+        print(f"   ✅ Chamada final aplicada ({outro_seconds:.1f}s no fim, junção: {mode}).")
+        return {"texto": text, "voz": TTS_VOICE, "duracao_s": round(outro_seconds, 2), "juncao": mode}
+    except Exception as e:
+        print(f"   ⚠️  Chamada final ignorada por erro: {e}")
         return None
     finally:
         for p in temporarios:
@@ -4255,6 +4360,8 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
 
     # Resumo narrado no início (vídeo parado + voz). Se falhar por qualquer motivo, o corte fica como está.
     intro_info = add_summary_intro(output_path, clip_text, groq_api_key, STREAMER_NOME)
+    # Chamada final narrada (like, compartilhar, inscrever-se) no fim do corte; mesma regra: falhou, fica como está.
+    cta_info = add_cta_outro(output_path)
 
     json_path = output_path.with_suffix('.json')
     metadata = {
@@ -4278,7 +4385,9 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
         "webcam_position": webcam_pos,
         "streamer": STREAMER_NOME,
         "resumo_intro": intro_info,
-        "duracao_final_s": round(clip['duration'] + (intro_info["duracao_s"] if intro_info else 0), 2),
+        "cta_final": cta_info,
+        "duracao_final_s": round(clip['duration'] + (intro_info["duracao_s"] if intro_info else 0)
+                                 + (cta_info["duracao_s"] if cta_info else 0), 2),
         "timestamp": datetime.now().isoformat()
     }
     try:
@@ -4529,12 +4638,16 @@ def main():
                         help="Marca como já usados os cortes que estão em cortes_prontos/ (use só se todos vieram deste vídeo)")
     parser.add_argument("--sem-resumo", action="store_true",
                         help="Desliga o resumo narrado no início do corte (vem ligado por padrão no modo gameplay)")
+    parser.add_argument("--sem-cta", action="store_true",
+                        help="Desliga a chamada final narrada (like, compartilhar, inscrever-se); vem ligada no modo gameplay")
     parser.add_argument("--streamer", metavar="NOME",
                         help="Nome do streamer, usado no resumo narrado (padrão: nome do canal, se não for um canal de cortes)")
     parser.add_argument("--repair", metavar="CLIP_PATH", help="Reparar/Reprocessar clipe existente: corrige sincronia A/V e aplica layout ClipFlow 3 camadas")
     args = parser.parse_args()
     if args.sem_resumo:
         os.environ["CORTES_RESUMO"] = "0"
+    if args.sem_cta:
+        os.environ["CORTES_CTA"] = "0"
 
     if args.repair:
         print("=" * 60)
