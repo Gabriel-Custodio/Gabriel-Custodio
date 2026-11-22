@@ -437,3 +437,93 @@ class TestChamadaFinal(unittest.TestCase):
         with mock.patch.object(g, "_speak_summary", side_effect=RuntimeError("boom")):
             self.assertIsNone(g.add_cta_outro(self.saida))
         self.assertEqual(self.saida.read_bytes(), b"ORIGINAL")
+
+
+class TestTarjaEFRelatorio(unittest.TestCase):
+    def setUp(self):
+        self.antigo = os.environ.pop("CORTES_BANNER_CTA", None)
+
+    def tearDown(self):
+        os.environ.pop("CORTES_BANNER_CTA", None)
+        if self.antigo is not None:
+            os.environ["CORTES_BANNER_CTA"] = self.antigo
+
+    def test_linha_fixa_da_tarja(self):
+        self.assertEqual(g.banner_cta_line(), "CURTA · COMENTE · COMPARTILHE")
+        for v in ("0", "off", "false", "não"):
+            os.environ["CORTES_BANNER_CTA"] = v
+            self.assertIsNone(g.banner_cta_line(), v)
+        os.environ["CORTES_BANNER_CTA"] = "  siga o   canal  "
+        self.assertEqual(g.banner_cta_line(), "SIGA O CANAL")
+        os.environ["CORTES_BANNER_CTA"] = "x" * 200
+        self.assertEqual(len(g.banner_cta_line()), 60)
+
+    def test_tarja_desenha_a_linha_so_quando_pedida(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow não instalado")
+        with tempfile.TemporaryDirectory() as d:
+            com, sem, vazio = Path(d) / "com.png", Path(d) / "sem.png", Path(d) / "vazio.png"
+            self.assertTrue(g.create_hook_banner_image("A PONTE ME CHAMOU", "?", com, cta_line=g.banner_cta_line()))
+            self.assertTrue(g.create_hook_banner_image("A PONTE ME CHAMOU", "?", sem))
+            self.assertTrue(g.create_hook_banner_image("", "?", vazio, cta_line=g.banner_cta_line()))
+            a, b = Image.open(com), Image.open(sem)
+            self.assertEqual(a.size, (g.VERTICAL_WIDTH, g.CLIPFLOW_HOOK_BAR_HEIGHT))
+            self.assertEqual(b.size, a.size)
+
+            def brancos(img, y0, y1):   # pixels da linha branca (a cor do título é amarela)
+                return sum(1 for y in range(y0, y1) for x in range(0, img.width, 2) if img.getpixel((x, y)) == (255, 255, 255))
+            self.assertGreater(brancos(a, 100, 160), 200)       # a linha fixa existe embaixo do título
+            self.assertEqual(brancos(b, 100, 160), 0)            # o banner antigo não muda
+            self.assertGreater(brancos(Image.open(vazio), 55, 120), 200)   # sem título, a linha sobe
+
+    def test_banner_do_fit_passa_a_linha_e_o_antigo_nao(self):
+        fonte = (RAIZ / "gerar_cortes.py").read_text(encoding="utf-8")
+        self.assertEqual(fonte.count("cta_line=banner_cta_line()"), 1)    # só no export_fit_layout
+
+    def test_frase_falada_inclui_comente(self):
+        for palavra in ("like", "comente", "compartilhe", "inscreva"):
+            self.assertIn(palavra, g.CTA_TEXT.lower())
+        self.assertLessEqual(len(g.CTA_TEXT.split()), g.CTA_MAX_WORDS)
+
+    def test_relatorio_lista_quem_saiu_sem(self):
+        itens = [
+            {"corte": 1, "resumo": True, "resumo_ligado": True, "motivo_resumo": None,
+             "cta": True, "cta_ligado": True, "motivo_cta": None},
+            {"corte": 2, "resumo": False, "resumo_ligado": True, "motivo_resumo": "sem GROQ_API_KEY",
+             "cta": False, "cta_ligado": True, "motivo_cta": "corte + chamada passariam de 60 s"},
+        ]
+        texto = "\n".join(g.relatorio_extras(itens))
+        self.assertIn("resumo no início: 1 de 2", texto)
+        self.assertIn("corte 2 saiu SEM resumo no início: sem GROQ_API_KEY", texto)
+        self.assertIn("corte 2 saiu SEM chamada final: corte + chamada passariam de 60 s", texto)
+        self.assertNotIn("corte 1 saiu", texto)
+        # recurso desligado não vira "falha"
+        desligado = [dict(i, cta_ligado=False, cta=False, motivo_cta=None) for i in itens]
+        texto = "\n".join(g.relatorio_extras(desligado))
+        self.assertIn("chamada final: desligado", texto)
+        self.assertNotIn("SEM chamada final", texto)
+        self.assertEqual(g.relatorio_extras([]), [])
+
+    def test_motivo_e_registrado_quando_pula(self):
+        g.EXTRAS_MOTIVO.clear()
+        with tempfile.TemporaryDirectory() as d:
+            saida = Path(d) / "c.mp4"
+            saida.write_bytes(b"x")
+            self.assertIsNone(g.add_summary_intro(saida, "texto", None))        # sem chave
+            self.assertEqual(g.EXTRAS_MOTIVO.get("resumo"), "sem GROQ_API_KEY")
+            antigo = g.TEMP_DIR
+            g.TEMP_DIR = Path(d)
+            try:
+                with mock.patch.object(g, "_speak_summary", return_value=(False, 0, [])):
+                    self.assertIsNone(g.add_cta_outro(saida))
+            finally:
+                g.TEMP_DIR = antigo
+            self.assertEqual(g.EXTRAS_MOTIVO.get("cta"), "não saiu a narração da chamada")
+            os.environ["CORTES_CTA"] = "0"
+            try:
+                g.add_cta_outro(saida)
+            finally:
+                os.environ.pop("CORTES_CTA", None)
+            self.assertNotIn("cta", g.EXTRAS_MOTIVO)                             # motivo antigo não vaza

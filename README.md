@@ -183,13 +183,23 @@ Cada corte do modo gameplay **começa com o vídeo parado** no primeiro quadro e
 
 ### Chamada final: like, compartilhar e inscrever-se (modo gameplay)
 
-No **fim** de cada corte, depois do fade, o último quadro fica parado (um pouco mais escuro) e a voz diz: "Gostou? Deixe o seu like, compartilhe com um amigo e se inscreva no canal para ver mais cortes!". A mesma frase aparece na legenda. Vem **ligada por padrão** e soma uns 6 a 7 segundos.
+No **fim** de cada corte, depois do fade, o último quadro fica parado (um pouco mais escuro) e a voz diz: "Gostou? Deixe o like, comente, compartilhe com um amigo e se inscreva no canal para ver mais cortes!". A mesma frase aparece na legenda. Vem **ligada por padrão** e soma uns 6 a 7 segundos.
 
 - Funciona **sem** a chave do Groq (a frase é fixa) e independe do resumo no início: dá para usar um sem o outro.
 - Junção **sem recodificar** (`cta_final.juncao: copia` no `.json`), com plano B recodificando. Se algo falhar, o corte sai sem a chamada, e o terminal diz o motivo.
 - Se corte + resumo + chamada passarem de 60 s, a chamada final é a que é pulada.
 - **Trocar a frase:** `CORTES_CTA_TEXT=...` no `.env` (3 a 25 palavras).
 - **Para desligar:** `--sem-cta`, `CORTES_CTA=0` no `.env` ou a caixa "Chamada final" na interface.
+
+### Tarja vermelha: título + "CURTA · COMENTE · COMPARTILHE"
+
+No layout `fit`, a tarja vermelha acima do vídeo mostra o **título do gancho** (maior que antes, encolhe se for comprido) e, embaixo dele, uma **linha fixa** em branco: `CURTA · COMENTE · COMPARTILHE`. Fica na tela o corte inteiro. O layout antigo (`clipflow`) não ganha a linha, porque a legenda karaokê usa o meio da faixa. Se o vídeo ocupar quase toda a altura (sobrar pouco espaço acima), a tarja inteira não aparece, como já era.
+
+- **Trocar a frase:** `CORTES_BANNER_CTA=OUTRA FRASE` no `.env`. **Tirar a linha:** `CORTES_BANNER_CTA=0`.
+
+### Relatório no fim da execução
+
+Ao terminar o modo gameplay, o terminal lista quantos cortes ficaram com resumo no início e com chamada final, e para cada corte que **saiu sem** um deles diz o motivo (por exemplo: `corte 3 saiu SEM resumo no início: a IA não deu um resumo fiel à fala do trecho`). Recurso desligado aparece como `desligado`, não como falha.
 
 ---
 
@@ -231,7 +241,8 @@ Anote para cada item: **passou ou falhou**, a **URL** usada, a **opção** do me
    - o corte inteiro tem no máximo 60 s e o fade final continua funcionando;
    - rode de novo com `--sem-resumo`: o corte deve sair **sem** intro e com `resumo_intro: null`.
 14. **Chamada final (gameplay):** o corte termina com o fade, aparece o último quadro parado e a voz pede like, compartilhamento e inscrição, com a legenda da frase. Confira que não há estalo na emenda, que o áudio do corte não é cortado antes do fade, que o `.json` tem `cta_final` (e `duracao_final_s` somando resumo + corte + chamada) e que `--sem-cta` tira só a chamada (o resumo do início continua).
-15. **Opção 5 (monitor de lives):** só teste com uma live **sua** ou com autorização de quem a faz.
+15. **Tarja e relatório (gameplay, layout fit):** a tarja vermelha mostra o título em amarelo e, embaixo, `CURTA · COMENTE · COMPARTILHE` em branco, legível no celular e sem cortar nas bordas (teste também um título comprido). No fim do terminal aparece o bloco "Resumo no início e chamada final" com a contagem e o motivo de cada corte que ficou sem. Com `CORTES_BANNER_CTA=0` a linha some.
+16. **Opção 5 (monitor de lives):** só teste com uma live **sua** ou com autorização de quem a faz.
 
 ### O que mandar quando algo falhar
 

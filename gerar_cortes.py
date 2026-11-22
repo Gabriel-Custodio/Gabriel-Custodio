@@ -174,11 +174,18 @@ SUMMARY_PAUSE_AFTER = 0.35      # respiro (s) entre o fim da fala e o início do
 SUMMARY_MAX_TOTAL_SECONDS = 60  # intro + corte nunca passam disso
 SUMMARY_MIN_GROUNDING = 0.3     # fração mínima das palavras "de conteúdo" do resumo que existe na fala real
 SUMMARY_SUBTITLE_FONT_SIZE = 64
+# Tarja vermelha do layout fit: título do gancho em cima + uma linha FIXA pedindo curtir/comentar/compartilhar.
+# Troque o texto com CORTES_BANNER_CTA no .env; CORTES_BANNER_CTA=0 tira a linha.
+FIT_BANNER_CTA_TEXT = "CURTA · COMENTE · COMPARTILHE"
+FIT_BANNER_TITLE_SIZE = 50      # tamanho do título quando a linha fixa está ligada (o layout antigo usa 28)
+FIT_BANNER_CTA_SIZE = 34
+FIT_BANNER_MAX_TEXT_WIDTH = 1000  # px; o texto encolhe até caber
+
 # Chamada final (CTA): depois do corte, o último quadro fica parado e a voz pede like, compartilhamento
 # e inscrição (com a mesma frase na legenda). LIGADA por padrão; desligue com --sem-cta, CORTES_CTA=0
 # ou pela caixa da interface. A frase pode ser trocada no .env (CORTES_CTA_TEXT).
 CTA_DEFAULT = True
-CTA_TEXT = "Gostou? Deixe o seu like, compartilhe com um amigo e se inscreva no canal para ver mais cortes!"
+CTA_TEXT = "Gostou? Deixe o like, comente, compartilhe com um amigo e se inscreva no canal para ver mais cortes!"
 CTA_MAX_WORDS = 25
 CTA_MAX_SPOKEN_SECONDS = 8.0
 CTA_PAUSE_AFTER = 0.6
@@ -2843,8 +2850,21 @@ def censor_profanity(text: str) -> str:
     return censored
 
 
-def create_hook_banner_image(titulo_gancho: str, pergunta_cta: str, output_path: Path) -> bool:
-    """Gera uma imagem PNG 1080x180 com o banner do gancho usando Pillow."""
+def banner_cta_line():
+    """Linha fixa da tarja do layout fit (curta/comente/compartilhe). None = sem a linha (CORTES_BANNER_CTA=0)."""
+    value = (os.environ.get("CORTES_BANNER_CTA") or "").strip()
+    if value.lower() in ("0", "false", "nao", "não", "off", "no"):
+        return None
+    text = re.sub(r"\s+", " ", value)[:60] if value else ""
+    return (text or FIT_BANNER_CTA_TEXT).upper()
+
+
+def create_hook_banner_image(titulo_gancho: str, pergunta_cta: str, output_path: Path, cta_line=None) -> bool:
+    """Gera uma imagem PNG 1080x180 com o banner do gancho usando Pillow.
+
+    cta_line (layout fit): segunda linha fixa, menor, abaixo do título (o título fica maior). Sem ela, o banner
+    é o de sempre (o layout antigo usa a faixa para a legenda karaokê no meio, então não ganha a linha).
+    """
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
@@ -2881,6 +2901,40 @@ def create_hook_banner_image(titulo_gancho: str, pergunta_cta: str, output_path:
     if font_title is None:
         print("   ⚠️  Nenhuma fonte TrueType encontrada, usando fallback")
         font_title = ImageFont.load_default()
+
+    def fit_font(text, size):
+        """Fonte do tamanho pedido, encolhida até o texto caber na largura máxima."""
+        while size > 14:
+            for fp in font_paths:
+                try:
+                    f = ImageFont.truetype(fp, size)
+                except OSError:
+                    continue
+                box = draw.textbbox((0, 0), text, font=f)
+                if box[2] - box[0] <= FIT_BANNER_MAX_TEXT_WIDTH:
+                    return f
+                break
+            else:
+                return None
+            size -= 2
+        return None
+
+    def draw_centered(text, font, y, fill):
+        box = draw.textbbox((0, 0), text, font=font)
+        x = (WIDTH - (box[2] - box[0])) // 2
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            draw.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0))
+        draw.text((x, y), text, font=font, fill=fill)
+
+    if cta_line:
+        big = fit_font(titulo_gancho, FIT_BANNER_TITLE_SIZE) if titulo_gancho else None
+        small = fit_font(cta_line, FIT_BANNER_CTA_SIZE)
+        if (big or not titulo_gancho) and small:
+            if big:
+                draw_centered(titulo_gancho, big, 22, (0xFF, 0xD7, 0x00))
+            draw_centered(cta_line, small, 112 if big else 70, (0xFF, 0xFF, 0xFF))
+            titulo_gancho = ""          # já desenhado; o desenho simples abaixo não repete
+        # sem fonte TrueType: segue com o desenho simples do título (sem a linha)
 
     if titulo_gancho:
         bbox = draw.textbbox((0, 0), titulo_gancho, font=font_title)
@@ -3593,7 +3647,8 @@ def export_fit_layout(input_path, output_path, ass_path, hook_data, effective_du
         free_top = (h - fg_h) // 2 if fg_h else 0
         if free_top >= CLIPFLOW_HOOK_BAR_HEIGHT + FIT_HOOK_GAP:
             banner_path = TEMP_DIR / "banner_gancho.png"
-            if create_hook_banner_image(hook_data.get("titulo_gancho", ""), hook_data.get("pergunta_cta", ""), banner_path):
+            if create_hook_banner_image(hook_data.get("titulo_gancho", ""), hook_data.get("pergunta_cta", ""), banner_path,
+                                        cta_line=banner_cta_line()):
                 y = free_top - CLIPFLOW_HOOK_BAR_HEIGHT - FIT_HOOK_GAP
                 cmd += ["-loop", "1", "-framerate", "30", "-t", str(effective_duration), "-i", str(banner_path)]
                 graph += f";{label}[{next_input}:v]overlay=0:{y}[withhook]"
@@ -3811,6 +3866,17 @@ def process_clipflow_layout(input_path, output_path, webcam_pos, ass_path, hook_
 # ---------------------------------------------------------------------------------------------
 # Resumo narrado no início do corte (vídeo parado no primeiro quadro + voz resumindo o assunto)
 # ---------------------------------------------------------------------------------------------
+# Por que um corte saiu SEM resumo/chamada final (para o relatório no fim da execução)
+EXTRAS_MOTIVO = {}
+EXTRAS_RELATORIO = []
+
+
+def _skip(tipo, motivo):
+    """Anota o motivo de um recurso opcional não ter sido aplicado e devolve None."""
+    EXTRAS_MOTIVO[tipo] = motivo
+    return None
+
+
 def summary_intro_enabled():
     """Resumo no início: ligado por padrão. Desliga com CORTES_RESUMO=0 (ou --sem-resumo)."""
     value = os.environ.get("CORTES_RESUMO")
@@ -4112,12 +4178,13 @@ def add_summary_intro(output_path, clip_text, api_key, streamer=None):
     Devolve um dict com o que foi feito (para o .json) ou None se não houve intro. NUNCA levanta
     erro nem estraga o corte: o arquivo só é trocado quando a versão com intro está completa.
     """
+    EXTRAS_MOTIVO.pop("resumo", None)
     if not summary_intro_enabled():
         return None
     output_path = Path(output_path)
     if not api_key:
         print("   ℹ️  Resumo no início: sem GROQ_API_KEY, o corte sai sem ele.")
-        return None
+        return _skip("resumo", "sem GROQ_API_KEY")
     stem = re.sub(r"[^A-Za-z0-9_-]+", "_", output_path.stem)[:60]
     tts_path = TEMP_DIR / f"resumo_{stem}.mp3"
     ass_path = TEMP_DIR / f"resumo_{stem}.ass"
@@ -4131,7 +4198,7 @@ def add_summary_intro(output_path, clip_text, api_key, streamer=None):
         summary = generate_summary_intro_text(clip_text, api_key, streamer)
         if not summary:
             print("   ℹ️  Sem um resumo bom o bastante para este trecho: o corte sai sem intro.")
-            return None
+            return _skip("resumo", "a IA não deu um resumo fiel à fala do trecho")
         print(f"   📝 Resumo: \"{summary}\"")
 
         ok, spoken, events = _speak_summary(summary, tts_path, TTS_RATE)
@@ -4139,38 +4206,38 @@ def add_summary_intro(output_path, clip_text, api_key, streamer=None):
             ok, spoken, events = _speak_summary(summary, tts_path, SUMMARY_FAST_RATE)
         if not ok or spoken <= 0 or spoken > SUMMARY_MAX_SPOKEN_SECONDS:
             print("   ℹ️  Não consegui uma narração curta o bastante: o corte sai sem intro.")
-            return None
+            return _skip("resumo", "não saiu uma narração curta o bastante")
         intro_seconds = spoken + SUMMARY_PAUSE_AFTER
 
         main_seconds = get_video_duration(output_path)
         if main_seconds <= 0:
-            return None
+            return _skip("resumo", "não consegui ler a duração do corte")
         if main_seconds + intro_seconds > SUMMARY_MAX_TOTAL_SECONDS:
             print(f"   ℹ️  Intro + corte passariam de {SUMMARY_MAX_TOTAL_SECONDS}s: o corte sai sem intro.")
-            return None
+            return _skip("resumo", "intro + corte passariam de 60 s")
         info = probe_stream_info(output_path)
         if not info["has_audio"]:
             print("   ℹ️  O corte não tem áudio para juntar com a intro: sai sem ela.")
-            return None
+            return _skip("resumo", "o corte não tem áudio")
 
         ok, _, err = run_cmd([FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error",
                               "-i", str(output_path), "-frames:v", "1", str(frame_path)], timeout=120)
         if not ok or not frame_path.exists():
             print(f"   ⚠️  Resumo: não consegui pegar o primeiro quadro: {err[-300:]}")
-            return None
+            return _skip("resumo", "falha ao pegar o primeiro quadro")
         if not create_intro_ass(events, ass_path, intro_seconds):
-            return None
+            return _skip("resumo", "falha ao criar a legenda da narração")
         ok, _, err = run_cmd(build_intro_cmd(frame_path, tts_path, ass_path, intro_path, intro_seconds, info), timeout=300)
         if not ok or not intro_path.exists():
             print(f"   ⚠️  Resumo: erro ao montar a intro: {err[-400:]}")
-            return None
+            return _skip("resumo", "erro do ffmpeg ao montar a intro")
         intro_real = get_video_duration(intro_path)
         expected = (intro_real or intro_seconds) + main_seconds
 
         mode, err = _concat_with_fallback(intro_path, output_path, joined_path, list_path, expected)
         if not mode:
             print(f"   ⚠️  Resumo: a junção falhou ({err[-300:]}). O corte sai sem intro.")
-            return None
+            return _skip("resumo", "a junção da intro falhou")
 
         os.replace(joined_path, output_path)
         print(f"   ✅ Resumo narrado aplicado ({intro_seconds:.1f}s no início, junção: {mode}).")
@@ -4178,7 +4245,7 @@ def add_summary_intro(output_path, clip_text, api_key, streamer=None):
                 "duracao_s": round(intro_seconds, 2), "juncao": mode}
     except Exception as e:
         print(f"   ⚠️  Resumo no início ignorado por erro: {e}")
-        return None
+        return _skip("resumo", "erro inesperado")
     finally:
         for p in temporarios:
             try:
@@ -4210,6 +4277,7 @@ def add_cta_outro(output_path):
     voz. Junção sem recodificar (plano B: recodificar). Devolve um dict para o .json ou None; nunca levanta
     erro nem estraga o corte (o arquivo só é trocado com o resultado completo).
     """
+    EXTRAS_MOTIVO.pop("cta", None)
     if not cta_outro_enabled():
         return None
     output_path = Path(output_path)
@@ -4229,28 +4297,28 @@ def add_cta_outro(output_path):
             ok, spoken, events = _speak_summary(text, tts_path, SUMMARY_FAST_RATE)
         if not ok or spoken <= 0 or spoken > CTA_MAX_SPOKEN_SECONDS:
             print("   ℹ️  Não consegui a narração da chamada final: o corte sai sem ela.")
-            return None
+            return _skip("cta", "não saiu a narração da chamada")
         outro_seconds = spoken + CTA_PAUSE_AFTER
 
         main_seconds = get_video_duration(output_path)
         if main_seconds <= 0:
-            return None
+            return _skip("cta", "não consegui ler a duração do corte")
         if main_seconds + outro_seconds > SUMMARY_MAX_TOTAL_SECONDS:
             print(f"   ℹ️  Corte + chamada final passariam de {SUMMARY_MAX_TOTAL_SECONDS}s: sai sem a chamada final.")
-            return None
+            return _skip("cta", "corte + chamada passariam de 60 s")
         info = probe_stream_info(output_path)
         if not info["has_audio"]:
             print("   ℹ️  O corte não tem áudio para juntar com a chamada final: sai sem ela.")
-            return None
+            return _skip("cta", "o corte não tem áudio")
 
         at = max(0.0, main_seconds - CTA_FRAME_BEFORE_END)
         ok, _, err = run_cmd([FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{at:.2f}",
                               "-i", str(output_path), "-frames:v", "1", str(frame_path)], timeout=120)
         if not ok or not frame_path.exists():
             print(f"   ⚠️  Chamada final: não consegui pegar o quadro: {err[-300:]}")
-            return None
+            return _skip("cta", "falha ao pegar o quadro")
         if not create_intro_ass(events, ass_path, outro_seconds):
-            return None
+            return _skip("cta", "falha ao criar a legenda da chamada")
         fade_out_at = max(0.0, outro_seconds - CTA_FADE_SECONDS)
         pre = (f"eq=brightness=-0.12,fade=t=in:st=0:d={CTA_FADE_SECONDS},"
                f"fade=t=out:st={fade_out_at:.2f}:d={CTA_FADE_SECONDS}")
@@ -4258,25 +4326,51 @@ def add_cta_outro(output_path):
                              timeout=300)
         if not ok or not outro_path.exists():
             print(f"   ⚠️  Chamada final: erro ao montar o final: {err[-400:]}")
-            return None
+            return _skip("cta", "erro do ffmpeg ao montar o final")
         expected = main_seconds + (get_video_duration(outro_path) or outro_seconds)
         mode, err = _concat_with_fallback(output_path, outro_path, joined_path, list_path, expected)
         if not mode:
             print(f"   ⚠️  Chamada final: a junção falhou ({err[-300:]}). O corte sai sem ela.")
-            return None
+            return _skip("cta", "a junção do final falhou")
 
         os.replace(joined_path, output_path)
         print(f"   ✅ Chamada final aplicada ({outro_seconds:.1f}s no fim, junção: {mode}).")
         return {"texto": text, "voz": TTS_VOICE, "duracao_s": round(outro_seconds, 2), "juncao": mode}
     except Exception as e:
         print(f"   ⚠️  Chamada final ignorada por erro: {e}")
-        return None
+        return _skip("cta", "erro inesperado")
     finally:
         for p in temporarios:
             try:
                 p.unlink()
             except OSError:
                 pass
+
+
+def relatorio_extras(itens=None):
+    """Linhas do relatório: quais cortes saíram sem resumo no início / chamada final, e por quê."""
+    itens = EXTRAS_RELATORIO if itens is None else itens
+    if not itens:
+        return []
+    linhas = []
+    for chave, rotulo, ligado in (("resumo", "resumo no início", "resumo_ligado"),
+                                  ("cta", "chamada final", "cta_ligado")):
+        if not any(i[ligado] for i in itens):
+            linhas.append(f"   {rotulo}: desligado")
+            continue
+        com = [i["corte"] for i in itens if i[chave]]
+        linhas.append(f"   {rotulo}: {len(com)} de {len(itens)} cortes")
+        for i in itens:
+            if i[ligado] and not i[chave]:
+                linhas.append(f"      ⚠️  corte {i['corte']} saiu SEM {rotulo}: {i['motivo_' + chave] or 'motivo não registrado'}")
+    return linhas
+
+
+def imprimir_relatorio_extras():
+    linhas = relatorio_extras()
+    if linhas:
+        print("\n🎙️  Resumo no início e chamada final:")
+        print("\n".join(linhas))
 
 
 STREAMER_NOME = None   # nome do streamer do vídeo atual (preenchido no main; usado no resumo)
@@ -4362,6 +4456,13 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
     intro_info = add_summary_intro(output_path, clip_text, groq_api_key, STREAMER_NOME)
     # Chamada final narrada (like, compartilhar, inscrever-se) no fim do corte; mesma regra: falhou, fica como está.
     cta_info = add_cta_outro(output_path)
+    EXTRAS_RELATORIO.append({
+        "corte": clip_num,
+        "resumo": intro_info is not None, "resumo_ligado": summary_intro_enabled(),
+        "motivo_resumo": EXTRAS_MOTIVO.get("resumo"),
+        "cta": cta_info is not None, "cta_ligado": cta_outro_enabled(),
+        "motivo_cta": EXTRAS_MOTIVO.get("cta"),
+    })
 
     json_path = output_path.with_suffix('.json')
     metadata = {
@@ -4926,6 +5027,8 @@ def main():
         print("\n🧹 Limpando arquivos temporários...")
         if TEMP_DIR.exists():
             shutil.rmtree(TEMP_DIR)
+
+        imprimir_relatorio_extras()
 
         print("\n" + "=" * 60)
         print(f"✅ CONCLUÍDO (Gameplay): {success_count}/{len(clips)} cortes gerados com sucesso")
