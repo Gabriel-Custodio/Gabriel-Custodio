@@ -219,3 +219,59 @@ Isso **descarta qualquer alteração local** nos arquivos do projeto. O `.env` e
 ## 8. Para quem desenvolve: a skill `/watch`
 
 A pasta `.claude/skills/watch/` tem uma skill do Claude Code que assiste vídeos (útil para avaliar cortes gerados). Ela **não faz parte do produto** e tem requisitos próprios (`ffmpeg`, `ffprobe` e `yt-dlp` no PATH, mais o Deno). Veja a seção "Análise Visual de Vídeos" do `CLAUDE.md`.
+
+---
+
+## 9. Interface gráfica (protótipo)
+
+Uma tela no navegador, com **preview dos cortes** e **geração pela própria tela**, sem usar o terminal. Não precisa instalar nada além do que o projeto já usa.
+
+### Como abrir
+
+Dê dois cliques em `interface.bat`. O navegador abre em `http://127.0.0.1:8765`. **Deixe a janela preta aberta** enquanto usar (ela é o servidor). Para encerrar, feche a janela ou aperte Ctrl+C.
+
+A interface só funciona **neste computador** (endereço `127.0.0.1`): ninguém na rede consegue abri-la.
+
+### O que ela faz
+
+**Aba "Gerar cortes":**
+- cole o link do vídeo, escolha o modo (Gameplay / Streamer, Narração por IA ou Áudio original);
+- no modo Gameplay, escolha quantos cortes (1 a 10); em "Opções avançadas" dá para trocar o layout e o fundo só nesta execução;
+- acompanhe o **andamento ao vivo** (as mesmas mensagens do terminal) e use **Parar** se precisar;
+- no topo aparecem os **pré-requisitos**: `ffmpeg`, chave do Groq e Node/Deno. Vermelho = não vai funcionar; amarelo = funciona com limitações.
+
+**Aba "Cortes prontos":**
+- lista os vídeos de `cortes_prontos/`, do mais novo para o mais antigo, **com player** para assistir ali mesmo;
+- mostra o título, a pergunta, a nota, de onde veio o título e o **texto falado** no corte (lido do `.json`);
+- **Aprovar** marca o corte (fica verde); **Copiar título** copia título e pergunta para colar no YouTube; **Baixar**; **Descartar** move o corte para `cortes_prontos/_descartados/` (**nada é apagado**);
+- **Abrir pasta** abre `cortes_prontos` no Windows.
+
+### Por trás
+
+A tela chama o mesmo `gerar_cortes.py` de sempre. Ele ganhou duas opções para não precisar perguntar no terminal (a tela as usa; no terminal continuam as perguntas):
+
+```
+.venv\Scripts\python.exe gerar_cortes.py "URL" --audio gameplay --cortes 5 --webcam 5
+```
+
+No layout padrão (`fit`) a pergunta da webcam não aparece, porque a webcam já está dentro do vídeo. Os logs de cada execução ficam em `app\logs\`.
+
+### Roteiro de teste da interface (QA)
+
+1. Abrir `interface.bat`: o navegador abre sozinho e os quatro selos do topo aparecem. O `ffmpeg` deve estar verde.
+2. Colar um link, escolher "Narração por IA" e clicar **Gerar cortes**: o botão fica desabilitado, o andamento aparece e o selo mostra "Rodando" com o tempo.
+3. Durante uma execução, clicar **Parar**: o selo vira "Cancelado". Depois dar para gerar de novo.
+4. Ao terminar ("Concluído"), clicar em **Ver cortes prontos**: o corte novo aparece primeiro, o vídeo toca e dá para pular pela barra.
+5. Conferir que o **título e o texto falado** batem com o que se ouve no corte.
+6. **Aprovar**, **Copiar título** (colar em um bloco de notas), **Baixar** e **Descartar** (o arquivo deve aparecer em `cortes_prontos\_descartados`).
+7. Tentar gerar com o link vazio ou inválido: a tela mostra a mensagem de erro e não inicia nada.
+8. Fechar e abrir a interface de novo: os cortes continuam na lista e os aprovados continuam marcados.
+
+Se algo falhar, mande o texto do andamento (aba "Gerar cortes") e o arquivo mais recente de `app\logs\`.
+
+### Limitações desta versão
+
+- **Não** busca métricas do YouTube nem publica vídeos: isso vem nas próximas fases.
+- Uma execução por vez.
+- Só roda a geração de cortes (o monitor de lives e o reparo continuam pelo `iniciar.bat`).
+- Testes automáticos do servidor: `python -m unittest discover -s app/tests -v` (rodam sem internet e sem ffmpeg).

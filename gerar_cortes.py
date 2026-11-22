@@ -2234,6 +2234,28 @@ def extract_video_segment(video_path, start_time, duration, output_path):
     return True
 
 
+def save_clip_metadata(output_path, clip, hook_data, modo):
+    """Grava o .json ao lado do corte (título, texto real, tempos). Nunca derruba a geração do corte."""
+    try:
+        meta = {
+            "titulo_gancho": (hook_data or {}).get("titulo_gancho", ""),
+            "pergunta_cta": (hook_data or {}).get("pergunta_cta", ""),
+            "nota": (hook_data or {}).get("nota", 0),
+            "transcricao": clip.get("text", ""),
+            "transcricao_fonte": "transcrição real do intervalo do corte",
+            "modo": modo,
+            "score_selecao": clip.get("score"),
+            "clip_start": clip.get("start"),
+            "clip_end": clip.get("end"),
+            "clip_duration": clip.get("duration"),
+            "timestamp": datetime.now().isoformat(),
+        }
+        Path(output_path).with_suffix(".json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"   ⚠️  Não foi possível salvar o .json do corte: {e}")
+
+
 def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, audio_mode="original", webcam_pos=None, groq_api_key=None):
     """Corta vídeo usando layout ClipFlow 3 camadas (1080x1920) para TODOS os modos."""
     print(f"\n🎬 Processando corte {clip_num}: {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s) [Modo: {audio_mode}]")
@@ -2334,8 +2356,12 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
 
     if not success:
         print(f"   ❌ Falha no layout ClipFlow, tentando fallback simplificado...")
-        return cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num, audio_mode, tts_audio_path, final_duration)
+        ok = cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num, audio_mode, tts_audio_path, final_duration)
+        if ok:
+            save_clip_metadata(output_path, clip, hook_data, audio_mode)
+        return ok
 
+    save_clip_metadata(output_path, clip, hook_data, audio_mode)
     print(f"✅ Corte salvo: {output_path}")
     return True
 
@@ -2437,8 +2463,8 @@ def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_
         return False
 
 
-def ask_webcam_position(video_path=None, api_key=None):
-    """Pergunta ao usuário onde fica a facecam do streamer no vídeo 16:9 original."""
+def _ask_webcam_choice():
+    """Mostra o menu da webcam no terminal e devolve '1'..'7' (None se cancelado)."""
     print("\n🎮 Posicionamento da Webcam (Facecam do Streamer)")
     print("   O vídeo original é 16:9 (horizontal). Onde fica a câmera do streamer?")
     print()
@@ -2455,11 +2481,29 @@ def ask_webcam_position(video_path=None, api_key=None):
         try:
             choice = input("   Escolha uma opção [1-7]: ").strip()
             if choice in ('1', '2', '3', '4', '5', '6', '7'):
-                break
+                return choice
             print("   ❌ Opção inválida. Digite 1, 2, 3, 4, 5, 6 ou 7.")
         except (EOFError, KeyboardInterrupt):
             print("\n   Cancelado pelo usuário.")
             return None
+
+
+def ask_webcam_position(video_path=None, api_key=None, choice=None):
+    """Define onde fica a facecam do streamer no vídeo 16:9 original.
+
+    choice ('1'..'7'): resposta já conhecida (opção --webcam), sem perguntar no terminal.
+    Retorna o dict da posição, None para "sem webcam" (opção 7) ou False se foi cancelado/inválido.
+    """
+    if choice is not None:
+        choice = str(choice).strip()
+        if choice not in ('1', '2', '3', '4', '5', '6', '7'):
+            print(f"   ❌ --webcam inválido: {choice}. Use de 1 a 7.")
+            return False
+        print(f"\n🎮 Posicionamento da Webcam: opção {choice} (definida por --webcam)")
+    else:
+        choice = _ask_webcam_choice()
+        if choice is None:
+            return False
 
     if choice == '7':
         print("   ✅ Modo: Apenas gameplay (crop central 9:16)")
@@ -3911,6 +3955,10 @@ def main():
     parser.add_argument("url", nargs="?", help="URL do vídeo do YouTube")
     parser.add_argument("--audio", choices=["original", "ia", "gameplay"], default="original",
                         help="Modo de áudio: original (padrão), ia (narração com edge-tts) ou gameplay (tela dividida streamer)")
+    parser.add_argument("--webcam", choices=["1", "2", "3", "4", "5", "6", "7"],
+                        help="Modo gameplay: posição da webcam (1-7), sem perguntar no terminal")
+    parser.add_argument("--cortes", type=int, metavar="N",
+                        help="Modo gameplay: quantidade de cortes (1-10), sem perguntar no terminal")
     parser.add_argument("--repair", metavar="CLIP_PATH", help="Reparar/Reprocessar clipe existente: corrige sincronia A/V e aplica layout ClipFlow 3 camadas")
     args = parser.parse_args()
 
@@ -4083,10 +4131,15 @@ def main():
 
         audio_mode = "original"
 
-        webcam_pos = ask_webcam_position(video_path, groq_api_key)
-        if webcam_pos is None:
-            print("❌ Opção inválida. Cancelando.")
-            sys.exit(1)
+        if args.webcam is None and get_layout() == "fit":
+            # No layout fit o vídeo aparece inteiro (a webcam já está dentro dele): nada a recortar.
+            print("\n🎮 Layout fit: o vídeo aparece inteiro, a webcam não é recortada (pergunta dispensada).")
+            webcam_pos = None
+        else:
+            webcam_pos = ask_webcam_position(video_path, groq_api_key, choice=args.webcam)
+            if webcam_pos is False:
+                print("❌ Posição da webcam inválida ou cancelada. Cancelando.")
+                sys.exit(1)
 
         if video_duration <= 90:
             print(f"\n⚡ Vídeo curto detectado ({video_duration:.1f}s <= 90s): usando vídeo inteiro como único corte")
@@ -4103,8 +4156,12 @@ def main():
             }]
             print(f"   ✅ Clip único criado: 0s - {video_duration:.1f}s ({video_duration:.1f}s)")
         else:
-            print(f"\n📊 Quantidade de cortes (padrão: {GAMEPLAY_DEFAULT_CLIPS}, min: {GAMEPLAY_MIN_CLIPS}, max: {GAMEPLAY_MAX_CLIPS}):")
-            while True:
+            if args.cortes is not None:
+                num_clips = max(GAMEPLAY_MIN_CLIPS, min(GAMEPLAY_MAX_CLIPS, args.cortes))
+                print(f"\n📊 Quantidade de cortes: {num_clips} (definida por --cortes)")
+            else:
+                print(f"\n📊 Quantidade de cortes (padrão: {GAMEPLAY_DEFAULT_CLIPS}, min: {GAMEPLAY_MIN_CLIPS}, max: {GAMEPLAY_MAX_CLIPS}):")
+            while args.cortes is None:
                 try:
                     num_clips_input = input(f"   Quantos cortes deseja gerar? [{GAMEPLAY_DEFAULT_CLIPS}]: ").strip()
                     if not num_clips_input:

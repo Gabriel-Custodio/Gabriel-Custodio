@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fábrica de Cortes</title>
+  <link rel="stylesheet" href="/static/estilo.css">
+</head>
+<body>
+  <header class="topo">
+    <h1>Fábrica de Cortes</h1>
+    <div id="prereq" class="prereq" aria-live="polite"></div>
+  </header>
+
+  <nav class="abas" role="tablist" aria-label="Seções">
+    <button type="button" role="tab" id="aba-gerar" aria-selected="true" aria-controls="painel-gerar">Gerar cortes</button>
+    <button type="button" role="tab" id="aba-cortes" aria-selected="false" aria-controls="painel-cortes" tabindex="-1">
+      Cortes prontos <span id="contador" class="contador">0</span>
+    </button>
+  </nav>
+
+  <main>
+    <!-- ======================= GERAR ======================= -->
+    <section id="painel-gerar" role="tabpanel" aria-labelledby="aba-gerar">
+      <form id="form-gerar" class="cartao" autocomplete="off" novalidate>
+        <div class="campo">
+          <label for="url">Link do vídeo (YouTube)</label>
+          <input id="url" name="url" type="text" inputmode="url" required
+                 placeholder="https://www.youtube.com/watch?v=...">
+        </div>
+
+        <fieldset class="campo">
+          <legend>Modo</legend>
+          <label class="opcao"><input type="radio" name="modo" value="gameplay" checked>
+            <span><strong>Gameplay / Streamer</strong><small>Áudio original da live, cortes espalhados pelo vídeo todo.</small></span></label>
+          <label class="opcao"><input type="radio" name="modo" value="ia">
+            <span><strong>Narração por IA</strong><small>Reescreve o trecho e narra com voz sintética (pt-BR).</small></span></label>
+          <label class="opcao"><input type="radio" name="modo" value="original">
+            <span><strong>Áudio original</strong><small>Vídeo comum com fala: mantém o áudio e legenda o trecho.</small></span></label>
+        </fieldset>
+
+        <div id="opcoes-gameplay" class="grade-campos">
+          <div class="campo">
+            <label for="cortes">Quantos cortes (1 a 10)</label>
+            <input id="cortes" name="cortes" type="number" min="1" max="10" value="5">
+          </div>
+          <div class="campo">
+            <label for="webcam">Webcam (só no layout antigo)</label>
+            <select id="webcam" name="webcam">
+              <option value="">Não recortar (padrão)</option>
+              <option value="1">Canto inferior esquerdo</option>
+              <option value="2">Canto superior esquerdo</option>
+              <option value="3">Canto inferior direito</option>
+              <option value="4">Canto superior direito</option>
+              <option value="5">Meio-direita / acima do minimapa</option>
+              <option value="6">Detectar com IA</option>
+              <option value="7">Sem webcam</option>
+            </select>
+          </div>
+        </div>
+
+        <details class="avancado">
+          <summary>Opções avançadas</summary>
+          <div class="grade-campos">
+            <div class="campo">
+              <label for="layout">Layout</label>
+              <select id="layout" name="layout">
+                <option value="">Padrão: vídeo inteiro, sem zoom</option>
+                <option value="fit">Vídeo inteiro, sem zoom (fit)</option>
+                <option value="clipflow">Antigo de 3 camadas (com zoom)</option>
+              </select>
+            </div>
+            <div class="campo">
+              <label for="fundo">Fundo atrás do vídeo</label>
+              <select id="fundo" name="fundo">
+                <option value="">Padrão: desfocado</option>
+                <option value="blur">Desfocado</option>
+                <option value="black">Preto</option>
+              </select>
+            </div>
+          </div>
+        </details>
+
+        <div class="acoes-form">
+          <button type="submit" id="btn-gerar" class="btn primario">Gerar cortes</button>
+          <button type="button" id="btn-parar" class="btn perigo" hidden>Parar</button>
+          <span id="estado-job" class="selo" role="status">Parado</span>
+        </div>
+        <p id="erro-form" class="erro" role="alert" hidden></p>
+      </form>
+
+      <section class="cartao" aria-labelledby="titulo-log">
+        <div class="cabeca-log">
+          <h2 id="titulo-log">Andamento</h2>
+          <label class="inline"><input type="checkbox" id="rolar" checked> Rolar automaticamente</label>
+        </div>
+        <pre id="log" class="log" tabindex="0" role="log" aria-live="off">Nada em execução ainda.</pre>
+        <p id="fim-job" class="aviso-fim" hidden>
+          <span id="fim-texto"></span>
+          <button type="button" id="ver-cortes" class="btn">Ver cortes prontos</button>
+        </p>
+      </section>
+    </section>
+
+    <!-- ======================= CORTES ======================= -->
+    <section id="painel-cortes" role="tabpanel" aria-labelledby="aba-cortes" hidden>
+      <div class="barra">
+        <label class="inline" for="filtro">Mostrar
+          <select id="filtro">
+            <option value="todos">Todos</option>
+            <option value="novo">Novos</option>
+            <option value="aprovado">Aprovados</option>
+          </select>
+        </label>
+        <span class="espaco"></span>
+        <button type="button" id="btn-atualizar" class="btn">Atualizar</button>
+        <button type="button" id="btn-pasta" class="btn">Abrir pasta</button>
+      </div>
+      <p id="vazio" class="vazio" hidden>Nenhum corte por aqui ainda. Gere um na aba “Gerar cortes”.</p>
+      <div id="lista" class="lista"></div>
+    </section>
+  </main>
+
+  <template id="tpl-corte">
+    <article class="corte">
+      <video controls preload="metadata" playsinline></video>
+      <div class="info">
+        <h3 class="titulo"></h3>
+        <p class="pergunta"></p>
+        <div class="selos"></div>
+        <p class="meta"></p>
+        <details class="fala">
+          <summary>Texto falado neste corte</summary>
+          <p class="transcricao"></p>
+        </details>
+        <div class="acoes">
+          <button type="button" class="btn aprovar">Aprovar</button>
+          <button type="button" class="btn copiar">Copiar título</button>
+          <a class="btn baixar" download>Baixar</a>
+          <button type="button" class="btn perigo descartar">Descartar</button>
+        </div>
+      </div>
+    </article>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

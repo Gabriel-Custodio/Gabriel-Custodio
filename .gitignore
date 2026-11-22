@@ -21,3 +21,6 @@ temp_watch/
 
 # Configuracao local do Claude Code (tem caminhos e permissoes da maquina de cada um)
 .claude/settings.local.json
+
+# Logs das execucoes feitas pela interface (app/servidor.py)
+app/logs/

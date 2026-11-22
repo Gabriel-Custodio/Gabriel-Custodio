@@ -129,6 +129,15 @@ with open(output_path, "wb") as f:
 - **Fallbacks** (`cut_simple_vertical`, `cut_simple_gameplay`, `_try_simple_cut_clipflow`): no layout fit chamam `fit_fallback()`, que corta o trecho certo com `-ss`/`-t` direto do vídeo COMPLETO. NUNCA passar o vídeo inteiro sem `-ss`/`-t` (já aconteceu: codificava o vídeo todo e o fade deixava o resto preto) e NUNCA usar o pré-corte como entrada do fallback (ele é apagado antes).
 - Exige ffmpeg 5.1+ (`-fps_mode`) e Pillow (faixa do gancho).
 
+## Interface Gráfica (app/) — protótipo, fases 1 e 2
+- `app/servidor.py` + `app/static/` (HTML/CSS/JS): tela no navegador com preview dos cortes (`cortes_prontos/`, `.json` ao lado) e geração pela tela. **Só biblioteca padrão do Python** (nada novo no `requirements.txt`). Abrir: `interface.bat` (porta 8765).
+- **O `gerar_cortes.py` roda como processo separado** (`sys.executable -u gerar_cortes.py URL --audio MODO [--cortes N] [--webcam N]`, `stdin` fechado, saída UTF-8). A interface NUNCA reimplementa a lógica de corte. Não adicionar `input()` novo ao `gerar_cortes.py`: tudo que a tela precisa perguntar vira opção de linha de comando (como `--cortes` e `--webcam`).
+- **Segurança (não afrouxar):** escuta só em `127.0.0.1`; toda rota de API/vídeo exige o cookie com token aleatório (`SameSite=Strict`) e o `Host` precisa ser `127.0.0.1`/`localhost` (proteção contra DNS rebinding); `POST` exige `X-Requested-With: fabrica` e `Origin` próprio. Nome de arquivo só aceita nome simples `.mp4` dentro de `cortes_prontos/` (sem `..`, sem `_` no início). O comando é uma LISTA de argumentos (sem shell) com URL validada. A chave do Groq NUNCA sai do servidor (só um booleano).
+- **No front-end, todo texto vindo de fora (título, fala, log) entra com `textContent`**, nunca `innerHTML`: títulos e transcrições vêm de vídeos de terceiros.
+- Descartar = mover para `cortes_prontos/_descartados/` (nunca apagar). Aprovações ficam em `cortes_prontos/_status.json`. Logs em `app/logs/` (ignorado pelo git).
+- Testes: `python -m unittest discover -s app/tests -v` (31 testes, sem internet/ffmpeg/Groq; usam um `gerar_cortes.py` falso). Rodar antes de mexer em `servidor.py`.
+- Não implementado (fases 3 e 4): métricas do YouTube (Data API/Analytics API) e publicação. Quando entrarem, chaves e tokens ficam no `.env`, nunca no repositório.
+
 ## Análise Visual de Vídeos (Projeto Todo)
 - Sempre que precisar avaliar a qualidade de um corte gerado, analisar um vídeo de referência ou entender o contexto visual antes de editar qualquer script do projeto, utilize a skill `/watch` (`.claude/skills/watch/SKILL.md`). Ela serve para quem DESENVOLVE o projeto (o Claude Code assistindo vídeos); o produto (`gerar_cortes.py`) não a usa.
 - **Origem:** a skill é uma cópia do projeto MIT [bradautomates/claude-video](https://github.com/bradautomates/claude-video) (versão e commit em `.claude/skills/watch/UPSTREAM.md`). **Não edite os arquivos dela**; para atualizar, copie de novo a pasta `skills/watch/` do original e atualize o `UPSTREAM.md`.
