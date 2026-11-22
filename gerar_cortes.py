@@ -732,6 +732,8 @@ def _pick_climax_frames(described, num_clips=3, min_gap=TARGET_DURATION_MAX, min
     for frame in sorted(described, key=lambda f: f['score'], reverse=True):
         if frame['score'] < min_score:
             break
+        if HISTORICO is not None and HISTORICO.repetido(frame['timestamp'] - 20, frame['timestamp'] + 20):
+            continue                      # esse momento já virou corte antes
         if all(abs(frame['timestamp'] - c['timestamp']) >= min_gap for c in chosen):
             chosen.append(frame)
             if len(chosen) >= num_clips:
@@ -950,6 +952,7 @@ def generate_climax_clips_from_visual(video_path, _frame_paths, climax_moments, 
 
         print(f"   ✅ Corte visual salvo: {output_path}")
         generated_clips.append(str(output_path))
+        registrar_corte_no_historico(clip_obj['start'], clip_obj['end'], "visual", output_path, hook_data.get("titulo_gancho", ""))
 
     return generated_clips
 
@@ -1181,6 +1184,150 @@ def pick_subtitle_file(directory, name_glob):
         if files:
             return files[0]
     return None
+
+
+# ========== HISTÓRICO DE CORTES (não repetir trechos entre execuções) ==========
+HISTORICO_NOME = "_historico_cortes.json"   # fica em cortes_prontos/ (a interface ignora arquivos com "_")
+HISTORICO_MARGEM_S = 15                     # folga (s) em volta de cada corte já feito
+HISTORICO_MAX_SOBREPOSICAO = 0.2            # candidato com mais que isso do tamanho sobreposto = repetido
+HISTORICO = None                            # preenchido no main()
+
+
+def video_key_from_url(url):
+    """Identificador estável do vídeo: o mesmo para links com &t=..., &pp=..., youtu.be e shorts."""
+    url = (url or "").strip()
+    match = re.search(r'(?:[?&]v=|youtu\.be/|/shorts/|/live/|/embed/)([A-Za-z0-9_-]{11})', url)
+    if match:
+        return "yt_" + match.group(1)
+    return "url_" + hashlib.md5(url.lower().encode("utf-8")).hexdigest()[:12]
+
+
+class HistoricoCortes:
+    """Lembra quais trechos de cada vídeo já viraram corte, para as próximas execuções pularem.
+
+    Cortes descartados na interface também contam como usados: foram vistos e recusados.
+    Com ativo=False (--repetir) nada é filtrado, mas os novos cortes continuam sendo registrados.
+    """
+
+    def __init__(self, caminho, video_key, video_url="", ativo=True):
+        self.caminho = Path(caminho)
+        self.video_key = video_key
+        self.video_url = video_url
+        self.ativo = ativo
+        self.dados = self._ler()
+
+    def _ler(self):
+        try:
+            dados = json.loads(self.caminho.read_text(encoding="utf-8"))
+            if isinstance(dados, dict) and isinstance(dados.get("videos"), dict):
+                return dados
+        except (OSError, ValueError):
+            pass
+        return {"versao": 1, "videos": {}}
+
+    def _gravar(self):
+        self.caminho.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.caminho.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.dados, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.caminho)
+
+    def _cortes(self):
+        video = self.dados["videos"].get(self.video_key) or {}
+        return [c for c in video.get("cortes", []) if isinstance(c, dict)]
+
+    def usados(self):
+        """Intervalos (início, fim) em segundos já cortados deste vídeo."""
+        faixas = []
+        for c in self._cortes():
+            try:
+                faixas.append((float(c["inicio"]), float(c["fim"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return faixas
+
+    def repetido(self, inicio, fim):
+        """True se o intervalo cobre (quase) o mesmo trecho de um corte já feito."""
+        if not self.ativo:
+            return False
+        duracao = max(fim - inicio, 0.001)
+        for usado_ini, usado_fim in self.usados():
+            sobreposto = min(fim, usado_fim + HISTORICO_MARGEM_S) - max(inicio, usado_ini - HISTORICO_MARGEM_S)
+            if sobreposto > 0 and sobreposto / duracao > HISTORICO_MAX_SOBREPOSICAO:
+                return True
+        return False
+
+    def filtrar(self, candidatos, chave_inicio="start", chave_fim="end"):
+        """Devolve (candidatos_novos, quantos_foram_ignorados)."""
+        if not self.ativo:
+            return list(candidatos), 0
+        novos = [c for c in candidatos if not self.repetido(c[chave_inicio], c[chave_fim])]
+        return novos, len(candidatos) - len(novos)
+
+    def registrar(self, inicio, fim, modo, arquivo="", titulo=""):
+        video = self.dados["videos"].setdefault(self.video_key, {"url": self.video_url, "cortes": []})
+        if self.video_url:
+            video["url"] = self.video_url
+        video.setdefault("cortes", []).append({
+            "inicio": round(float(inicio), 2), "fim": round(float(fim), 2), "modo": modo,
+            "arquivo": arquivo, "titulo": titulo, "quando": datetime.now().isoformat(timespec="seconds"),
+        })
+        self._gravar()
+
+    def esquecer_video(self):
+        self.dados["videos"].pop(self.video_key, None)
+        self._gravar()
+
+    def importar_existentes(self, pastas):
+        """Marca como usados os cortes que já estão nas pastas (lê o .json ao lado de cada .mp4).
+
+        Só use quando TODOS vieram deste vídeo: os cortes feitos antes do histórico existir não
+        guardam de qual vídeo saíram. Retorna quantos foram marcados.
+        """
+        ja = {(round(a, 2), round(b, 2)) for a, b in self.usados()}
+        novos = 0
+        for pasta in pastas:
+            pasta = Path(pasta)
+            if not pasta.is_dir():
+                continue
+            for arq in sorted(pasta.glob("*.json")):
+                if arq.name.startswith("_"):
+                    continue
+                try:
+                    meta = json.loads(arq.read_text(encoding="utf-8"))
+                    ini, fim = float(meta["clip_start"]), float(meta["clip_end"])
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+                if meta.get("video_id") not in (None, self.video_key) or (round(ini, 2), round(fim, 2)) in ja:
+                    continue
+                self.registrar(ini, fim, str(meta.get("modo") or "importado"), arq.with_suffix(".mp4").name,
+                               str(meta.get("titulo_gancho") or ""))
+                ja.add((round(ini, 2), round(fim, 2)))
+                novos += 1
+        return novos
+
+
+def filtrar_repetidos(candidatos, chave_inicio="start", chave_fim="end"):
+    """Tira dos candidatos os trechos já cortados antes (sem histórico ativo, não tira nada)."""
+    if HISTORICO is None:
+        return list(candidatos), 0
+    return HISTORICO.filtrar(candidatos, chave_inicio, chave_fim)
+
+
+def registrar_corte_no_historico(inicio, fim, modo, arquivo, titulo=""):
+    """Anota um corte gerado com sucesso. Nunca derruba a geração."""
+    if HISTORICO is None:
+        return
+    try:
+        HISTORICO.registrar(inicio, fim, modo, Path(arquivo).name, titulo)
+    except Exception as e:
+        print(f"   ⚠️  Não foi possível atualizar o histórico de cortes: {e}")
+
+
+def dica_historico_esgotado():
+    """Mensagem para quando o histórico deixou poucos ou nenhum trecho novo."""
+    if HISTORICO is not None and HISTORICO.ativo and HISTORICO.usados():
+        print(f"   📚 Este vídeo já tem {len(HISTORICO.usados())} trecho(s) cortado(s) antes, ignorados nesta execução.")
+        print("      Para permitir repetir trechos, use --repetir (na interface: \"Permitir repetir trechos\").")
 
 
 def clean_filename(name):
@@ -1565,6 +1712,10 @@ def find_best_clips(segments, video_duration, num_clips=NUM_CLIPS):
 
     candidates.sort(key=lambda x: x['score'], reverse=True)
 
+    candidates, ignorados = filtrar_repetidos(candidates)
+    if ignorados:
+        print(f"   🚫 {ignorados} janela(s) ignorada(s) por repetirem cortes já feitos deste vídeo")
+
     selected = []
     for c in candidates:
         overlap = False
@@ -1787,7 +1938,14 @@ def find_best_clips_gameplay_ai(segments, video_duration, api_key, num_clips=GAM
     print(f"\n🤖 Modo Gameplay IA: montando candidatos a partir da transcrição real...")
     all_pool = build_gameplay_candidates(segments, video_duration)
     print(f"   🧩 {len(all_pool)} trechos candidatos com fala suficiente em todo o vídeo")
+    all_pool, ignorados = filtrar_repetidos(all_pool)
+    if ignorados:
+        print(f"   🚫 {ignorados} candidato(s) ignorado(s) por repetirem cortes já feitos deste vídeo; restam {len(all_pool)}")
     if not all_pool:
+        if ignorados:
+            print("   ⚠️  Todos os trechos com fala deste vídeo já foram cortados antes.")
+            dica_historico_esgotado()
+            return []
         print("   ⚠️  Nenhum trecho com fala suficiente, usando método tradicional...")
         return find_best_clips(segments, video_duration, num_clips)
 
@@ -2244,6 +2402,8 @@ def save_clip_metadata(output_path, clip, hook_data, modo):
             "transcricao": clip.get("text", ""),
             "transcricao_fonte": "transcrição real do intervalo do corte",
             "modo": modo,
+            "video_id": HISTORICO.video_key if HISTORICO else None,
+            "video_url": HISTORICO.video_url if HISTORICO else None,
             "score_selecao": clip.get("score"),
             "clip_start": clip.get("start"),
             "clip_end": clip.get("end"),
@@ -3704,6 +3864,8 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
         "nota": hook_data.get("nota", 0),
         "transcricao": clip_text,
         "transcricao_fonte": "transcrição real do intervalo do corte",
+        "video_id": HISTORICO.video_key if HISTORICO else None,
+        "video_url": HISTORICO.video_url if HISTORICO else None,
         "palavras": clip_words,
         "palavras_por_segundo": round(clip_wps, 2) if clip_wps is not None else None,
         "fonte_titulo": hook_source,
@@ -3959,6 +4121,10 @@ def main():
                         help="Modo gameplay: posição da webcam (1-7), sem perguntar no terminal")
     parser.add_argument("--cortes", type=int, metavar="N",
                         help="Modo gameplay: quantidade de cortes (1-10), sem perguntar no terminal")
+    parser.add_argument("--repetir", action="store_true",
+                        help="Permite repetir trechos que já viraram corte em execuções anteriores deste vídeo")
+    parser.add_argument("--importar-existentes", action="store_true",
+                        help="Marca como já usados os cortes que estão em cortes_prontos/ (use só se todos vieram deste vídeo)")
     parser.add_argument("--repair", metavar="CLIP_PATH", help="Reparar/Reprocessar clipe existente: corrige sincronia A/V e aplica layout ClipFlow 3 camadas")
     args = parser.parse_args()
 
@@ -4075,6 +4241,20 @@ def main():
 
     ensure_dirs()
 
+    # Histórico: lembra os trechos já cortados deste vídeo para não repeti-los entre execuções
+    global HISTORICO
+    url_limpa = clean_youtube_url(url)
+    HISTORICO = HistoricoCortes(OUTPUT_DIR / HISTORICO_NOME, video_key_from_url(url_limpa), url_limpa,
+                                ativo=not args.repetir)
+    if args.importar_existentes:
+        n = HISTORICO.importar_existentes([OUTPUT_DIR, OUTPUT_DIR / "_descartados"])
+        print(f"📚 {n} corte(s) que já estavam na pasta foram marcados como usados deste vídeo.")
+    if args.repetir:
+        print("📚 Histórico: --repetir ativo, trechos já cortados antes PODEM se repetir.")
+    elif HISTORICO.usados():
+        print(f"📚 Histórico: {len(HISTORICO.usados())} trecho(s) deste vídeo já foram cortados antes e serão ignorados "
+              f"(use --repetir para permitir).")
+
     prefix = hashlib.md5(url.encode()).hexdigest()[:12]
 
     video_path, subtitle_path = download_video(url, prefix)
@@ -4185,7 +4365,11 @@ def main():
 
             if not clips:
                 print("❌ Não foi possível identificar trechos viáveis.")
+                dica_historico_esgotado()
                 sys.exit(1)
+            if len(clips) < num_clips:
+                print(f"⚠️  Só {len(clips)} trecho(s) novo(s) (você pediu {num_clips}).")
+                dica_historico_esgotado()
 
         print(f"\n🎯 {len(clips)} melhores trechos identificados:")
         for i, clip in enumerate(clips, 1):
@@ -4205,6 +4389,8 @@ def main():
 
             if cut_and_export_gameplay(video_path, clip, segments, output_path, i, webcam_pos, groq_api_key):
                 success_count += 1
+                registrar_corte_no_historico(clip['start'], clip['end'], "gameplay", output_path,
+                                             (clip.get('hook_data') or {}).get('titulo_gancho', ''))
 
         print("\n🧹 Limpando arquivos temporários...")
         if TEMP_DIR.exists():
@@ -4239,6 +4425,7 @@ def main():
 
     if not clips:
         print("❌ Não foi possível identificar trechos viáveis.")
+        dica_historico_esgotado()
         sys.exit(1)
 
     print(f"\n🎯 {len(clips)} melhores trechos identificados:")
@@ -4259,6 +4446,7 @@ def main():
 
         if cut_and_export_vertical(video_path, clip, segments, output_path, i, audio_mode):
             success_count += 1
+            registrar_corte_no_historico(clip['start'], clip['end'], audio_mode, output_path)
 
     print("\n🧹 Limpando arquivos temporários...")
     if TEMP_DIR.exists():

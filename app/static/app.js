@@ -139,7 +139,8 @@ $("form-gerar").addEventListener("submit", async (ev) => {
   const f = new FormData(ev.target);
   const modo = f.get("modo");
   const corpo = { url: String(f.get("url") || "").trim(), modo,
-                  layout: f.get("layout") || "", fundo: f.get("fundo") || "" };
+                  layout: f.get("layout") || "", fundo: f.get("fundo") || "",
+                  repetir: f.get("repetir") === "on", importar_existentes: f.get("importar") === "on" };
   if (modo === "gameplay") {
     corpo.cortes = Number(f.get("cortes") || 5);
     corpo.webcam = f.get("webcam") || "";

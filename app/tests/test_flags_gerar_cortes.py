@@ -53,7 +53,7 @@ class TestOpcoesDoPrograma(unittest.TestCase):
     def test_help_lista_as_opcoes(self):
         saida = subprocess.run([sys.executable, "-I", str(RAIZ / "gerar_cortes.py"), "--help"],
                                capture_output=True, text=True, encoding="utf-8", cwd=str(RAIZ), timeout=60).stdout
-        for opcao in ("--webcam", "--cortes", "--audio", "--repair"):
+        for opcao in ("--webcam", "--cortes", "--audio", "--repair", "--repetir", "--importar-existentes"):
             self.assertIn(opcao, saida)
 
 

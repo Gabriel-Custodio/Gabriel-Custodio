@@ -277,6 +277,13 @@ class Estado:
                     raise ValueError("Posição da webcam inválida.")
                 comando += ["--webcam", webcam]
                 params["webcam"] = webcam
+        for chave, flag in (("repetir", "--repetir"), ("importar_existentes", "--importar-existentes")):
+            valor = dados.get(chave)
+            if valor is not None and not isinstance(valor, bool):      # 1 == True em Python: exige bool de verdade
+                raise ValueError("Opção inválida.")
+            if valor is True:
+                comando.append(flag)
+                params[chave] = True
         env = {}
         layout = str(dados.get("layout") or "").strip().lower()
         if layout:

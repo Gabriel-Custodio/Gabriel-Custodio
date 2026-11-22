@@ -156,6 +156,21 @@ Para mudar, edite o arquivo `.env` (veja o `.env.example`):
 | `CORTES_LAYOUT` | `fit` (padrão) ou `clipflow` | `clipflow` volta ao layout antigo de 3 camadas, com zoom |
 | `CORTES_FUNDO` | `blur` (padrão) ou `preto` | fundo desfocado ou preto atrás do vídeo |
 
+### Não repetir trechos (histórico)
+
+O programa **lembra** quais trechos de cada vídeo já viraram corte. Se você processar o **mesmo vídeo de novo**, ele pula esses trechos e escolhe outros. O histórico fica em `cortes_prontos\_historico_cortes.json` e vale para qualquer forma do link (`watch?v=...`, com `&t=...`, `youtu.be`, `shorts`).
+
+- Um trecho conta como repetido se ele se sobrepõe a um corte anterior ou fica colado nele (uns 15 segundos de folga). Cortes **descartados** na interface também contam como usados.
+- Quando o vídeo acaba os trechos novos, o programa avisa (`Só N trecho(s) novo(s)`) em vez de repetir.
+- **Para permitir repetir:** use `--repetir` na linha de comando, ou marque "Permitir repetir trechos" nas opções avançadas da interface. Os cortes novos continuam sendo anotados.
+- **Cortes feitos antes do histórico existir** não guardam de qual vídeo saíram. Se todos os que estão na pasta vieram do mesmo vídeo, rode uma vez com `--importar-existentes` (ou marque a caixa correspondente na interface) para marcá-los como usados:
+
+```
+.venv\Scripts\python.exe gerar_cortes.py "URL_DO_VIDEO" --audio gameplay --importar-existentes
+```
+
+- **Para esquecer tudo:** apague o arquivo `_historico_cortes.json`.
+
 ---
 
 ## 6. Roteiro de teste para o QA
@@ -187,7 +202,8 @@ Anote para cada item: **passou ou falhou**, a **URL** usada, a **opção** do me
 9. **Vídeo sem legenda** (ou só música/gameplay sem fala). Deve cair na transcrição por áudio e, se não houver fala, na análise visual. Sem `GROQ_API_KEY`, deve avisar e **não** gerar corte inventado.
 10. **Sem o ffmpeg** (renomeie `bin` temporariamente e tire o PATH, se souber). Deve parar com a mensagem clara da seção 2.
 11. **URL inválida ou vídeo privado.** Deve falhar com mensagem legível, sem travar.
-12. **Opção 5 (monitor de lives):** só teste com uma live **sua** ou com autorização de quem a faz.
+12. **Sem repetir (histórico):** gere cortes de um vídeo, depois gere de novo **o mesmo vídeo** (pode ser com outro formato de link). Os cortes da segunda vez **não podem repetir** os da primeira (compare o `clip_start`/`clip_end` dos `.json` ou os trechos assistidos). Depois repita marcando "Permitir repetir trechos": agora pode repetir.
+13. **Opção 5 (monitor de lives):** só teste com uma live **sua** ou com autorização de quem a faz.
 
 ### O que mandar quando algo falhar
 

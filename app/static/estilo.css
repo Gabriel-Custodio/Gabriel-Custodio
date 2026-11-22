@@ -100,6 +100,8 @@ input[type="text"], input[type="number"], select {
 .cabeca-log { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .inline { display: inline-flex; gap: 8px; align-items: center; font-weight: 400; color: var(--suave); }
 .inline select { width: auto; }
+.caixa { display: flex; align-items: flex-start; margin-bottom: 10px; }
+.caixa input { margin-top: 4px; }
 .log {
   margin: 0; background: var(--log-fundo); color: var(--log-texto); border-radius: 8px; padding: 12px;
   height: 340px; overflow: auto; white-space: pre-wrap; word-break: break-word;

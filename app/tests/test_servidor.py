@@ -267,6 +267,7 @@ class TestExecucao(Base):
             {"url": URL_OK, "modo": "gameplay", "cortes": "abc"}, {"url": URL_OK, "modo": "gameplay", "webcam": "9"},
             {"url": URL_OK, "modo": "ia", "layout": "xyz"}, {"url": URL_OK, "modo": "ia", "fundo": "rosa"},
             {"url": "https://x.com/" + "a" * 2100, "modo": "ia"},
+            {"url": URL_OK, "modo": "ia", "repetir": "sim"}, {"url": URL_OK, "modo": "ia", "importar_existentes": 1},
         ]
         for corpo in ruins:
             status, dados = self.json("POST", "/api/executar", corpo)
@@ -305,6 +306,15 @@ class TestExecucao(Base):
         self.json("POST", "/api/executar", {"url": URL_OK, "modo": "original", "cortes": 7, "webcam": "3"})
         texto = "\n".join(self.esperar_fim()["linhas"])
         self.assertIn(f"ARGS: ['{URL_OK}', '--audio', 'original']", texto)        # flags só no gameplay
+
+    def test_opcoes_de_repeticao_viram_flags(self):
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 2,
+                                            "repetir": True, "importar_existentes": True})
+        texto = "\n".join(self.esperar_fim()["linhas"])
+        self.assertIn("'--cortes', '2', '--repetir', '--importar-existentes']", texto)
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "ia", "repetir": False})
+        texto = "\n".join(self.esperar_fim()["linhas"])
+        self.assertNotIn("--repetir", texto.split("ARGS:")[-1])       # desmarcado: sem a flag
 
     def test_codigo_de_erro(self):
         self.json("POST", "/api/executar", {"url": "https://x.com/falha", "modo": "ia"})

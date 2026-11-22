@@ -138,6 +138,14 @@ with open(output_path, "wb") as f:
 - Testes: `python -m unittest discover -s app/tests -v` (31 testes, sem internet/ffmpeg/Groq; usam um `gerar_cortes.py` falso). Rodar antes de mexer em `servidor.py`.
 - Não implementado (fases 3 e 4): métricas do YouTube (Data API/Analytics API) e publicação. Quando entrarem, chaves e tokens ficam no `.env`, nunca no repositório.
 
+## Histórico de Cortes (REGRA: o mesmo vídeo não repete trechos entre execuções)
+- `HistoricoCortes` (`gerar_cortes.py`) grava em `cortes_prontos/_historico_cortes.json` os intervalos (início/fim) já cortados de cada vídeo. A chave do vídeo é `video_key_from_url(clean_youtube_url(url))` (`yt_<ID>` ou `url_<hash>`): o mesmo vídeo com `&t=...`, `youtu.be` ou `shorts` cai na mesma chave.
+- **Todo seletor de trechos DEVE filtrar com `filtrar_repetidos()`** antes de escolher: `find_best_clips` (modos original/ia), `find_best_clips_gameplay_ai` (candidatos reais, antes da IA ver) e `_pick_climax_frames` (Passo C, janela ±20 s). Ao criar um novo seletor, inclua o filtro.
+- **Todo corte gerado com sucesso DEVE ser anotado** com `registrar_corte_no_historico()` (já feito nos loops de gameplay, original/ia e Passo C). Cortes descartados na interface continuam contando como usados.
+- Regra de repetição: o candidato é repetido se `HISTORICO_MAX_SOBREPOSICAO` (20%) do seu tamanho cai dentro do corte antigo + `HISTORICO_MARGEM_S` (15 s) de folga. `--repetir` desliga o filtro (mas continua registrando); `--importar-existentes` marca como usados os `.json` já presentes em `cortes_prontos/` e `_descartados/` (só quando todos vieram do mesmo vídeo).
+- Os `.json` dos cortes guardam `video_id` e `video_url` (a base para as métricas do YouTube da fase 3).
+- Se o histórico esgotar os trechos, avisar (`dica_historico_esgotado`) e nunca repetir em silêncio. Testes: `app/tests/test_historico.py`.
+
 ## Análise Visual de Vídeos (Projeto Todo)
 - Sempre que precisar avaliar a qualidade de um corte gerado, analisar um vídeo de referência ou entender o contexto visual antes de editar qualquer script do projeto, utilize a skill `/watch` (`.claude/skills/watch/SKILL.md`). Ela serve para quem DESENVOLVE o projeto (o Claude Code assistindo vídeos); o produto (`gerar_cortes.py`) não a usa.
 - **Origem:** a skill é uma cópia do projeto MIT [bradautomates/claude-video](https://github.com/bradautomates/claude-video) (versão e commit em `.claude/skills/watch/UPSTREAM.md`). **Não edite os arquivos dela**; para atualizar, copie de novo a pasta `skills/watch/` do original e atualize o `UPSTREAM.md`.
