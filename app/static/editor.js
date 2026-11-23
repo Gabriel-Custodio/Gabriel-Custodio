@@ -5,6 +5,7 @@
 const ED_LARGURA = 1080, ED_ALTURA = 1920, ED_FAIXA = 220;
 const ED_CAM_MIN = 300, ED_CAM_MAX = 1100;
 const ED_MIN_LARGURA = 0.05;                       // caixa nunca menor que 5% da largura do quadro
+let ED_Z = 10;
 
 const ED = {
   quadro: null,                                    // nome do quadro no servidor
@@ -121,7 +122,8 @@ function edIniciarArraste(ev, tipo, el) {
   ev.preventDefault();
   const canto = ev.target.dataset ? ev.target.dataset.canto : undefined;
   const p0 = edPonto(ev), c0 = { ...ED[tipo] };
-  el.parentElement.appendChild(el);                   // a caixa mexida fica por cima (antes da captura: mover no DOM a solta)
+  ED_Z += 1;
+  el.style.zIndex = String(ED_Z);                     // a caixa mexida fica por cima (sem mexer no DOM: isso pode interromper o arraste)
   try { el.setPointerCapture(ev.pointerId); } catch (_) { /* sem captura: os eventos seguem no próprio elemento */ }
   const mover = (e) => {
     const p = edPonto(e), c = ED[tipo];
@@ -188,10 +190,11 @@ document.querySelectorAll('input[name="ed-ordem"]').forEach((el) => el.addEventL
 // ---------------------------------------------------------------- quadro (do vídeo ou enviado)
 function edCaixasPadrao() {
   ED.cam = { x: 0.74, y: 0.35, w: 0.24, h: 0 };
-  ED.game = { x: 0, y: 0, w: 1, h: 1 };
+  ED.game = { x: 0, y: 0, w: 0.8 / edRazao("game"), h: 0 };   // 80% da altura: sobra espaço para mover nos dois sentidos
   edAjustar("cam");
   edAjustar("game");
   ED.game.x = (1 - ED.game.w) / 2;
+  ED.game.y = (1 - ED.game.h) / 2;
 }
 
 function edCarregarImagem(nomeQuadro, manterCaixas) {
