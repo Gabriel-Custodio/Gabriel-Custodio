@@ -170,6 +170,15 @@ LAYOUTS_DIR = Path("layouts_salvos")
 CUSTOM_CAM_MIN_HEIGHT = 300
 CUSTOM_CAM_MAX_HEIGHT = 1100
 CUSTOM_ORDERS = ("cam_primeiro", "game_primeiro")
+# Escolha do layout durante a geração (--esperar-layout, usado pela interface): depois de baixar o vídeo e
+# escolher os trechos, o script tira alguns quadros, avisa a interface com uma linha marcada e ESPERA o arquivo
+# decisao.json (layout salvo ou padrão) antes de renderizar. Sem resposta no prazo, segue com o layout padrão.
+LAYOUT_WAIT_DIR = Path("temp_layout")
+LAYOUT_WAIT_TIMEOUT = 1800          # segundos
+LAYOUT_WAIT_POLL = 1.0
+LAYOUT_WAIT_MAX_FRAMES = 4
+LAYOUT_MARK_WAITING = "@@LAYOUT_AGUARDANDO@@"
+LAYOUT_MARK_DONE = "@@LAYOUT_DECIDIDO@@"
 CAM_SUBTITLE_CENTER_Y = 86      # centro da legenda (px, dentro da faixa)
 CAM_BAND_CTA_SIZE = 34          # fonte da linha fixa dentro da faixa
 CAM_BAND_CTA_Y = 160            # posição vertical (px dentro da faixa) da linha fixa
@@ -3906,6 +3915,63 @@ def activate_saved_layout(name):
     return True
 
 
+def wait_for_layout_choice(video_path, clips, timeout=None, poll=None):
+    """Pausa a geração até a interface devolver a escolha do layout. Devolve 'salvo', 'padrao' ou 'tempo'.
+
+    Tira um quadro do meio de cada trecho escolhido (até LAYOUT_WAIT_MAX_FRAMES) em temp_layout/espera-N.jpg,
+    imprime LAYOUT_MARK_WAITING com os nomes e espera temp_layout/decisao.json:
+    {"acao": "salvo", "slug": "..."} ou {"acao": "padrao"}. Nunca levanta erro: qualquer problema = layout padrão.
+    """
+    timeout = LAYOUT_WAIT_TIMEOUT if timeout is None else timeout
+    poll = LAYOUT_WAIT_POLL if poll is None else poll
+    folder = LAYOUT_WAIT_DIR
+    shutil.rmtree(folder, ignore_errors=True)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"   ⚠️  Não foi possível preparar a escolha de layout ({e}); usando o layout padrão.")
+        return "padrao"
+    frames = []
+    for i, clip in enumerate(clips[:LAYOUT_WAIT_MAX_FRAMES], 1):
+        out = folder / f"espera-{i}.jpg"
+        at = clip["start"] + clip["duration"] * 0.4
+        ok, _, _ = run_cmd([FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{at:.2f}",
+                            "-i", str(video_path), "-vframes", "1", "-q:v", "2", str(out)])
+        if ok and out.exists():
+            frames.append(out.name)
+    if not frames:
+        print("   ⚠️  Não foi possível tirar quadros do vídeo para a escolha de layout; usando o layout padrão.")
+        shutil.rmtree(folder, ignore_errors=True)
+        return "padrao"
+    print(f"\n⏸  Vídeo pronto. Escolha o layout na interface (aba Layout); o corte continua depois da sua escolha "
+          f"(espera até {int(timeout // 60)} min).")
+    print(f"{LAYOUT_MARK_WAITING} {' '.join(frames)}", flush=True)
+    decision_file = folder / "decisao.json"
+    decision, deadline = None, time.time() + timeout
+    while time.time() < deadline:
+        if decision_file.exists():
+            try:
+                decision = json.loads(decision_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                time.sleep(0.2)                  # arquivo ainda sendo gravado
+                continue
+            break
+        time.sleep(poll)
+    print(LAYOUT_MARK_DONE, flush=True)
+    shutil.rmtree(folder, ignore_errors=True)
+    if not isinstance(decision, dict):
+        print("   ⚠️  Sem resposta sobre o layout no prazo: usando o layout padrão.")
+        return "tempo"
+    if decision.get("acao") == "salvo":
+        if activate_saved_layout(str(decision.get("slug") or "")):
+            print(f"🎨 Layout escolhido: {CUSTOM_LAYOUT.get('nome') or CUSTOM_LAYOUT['slug']}")
+            return "salvo"
+        print("   ⚠️  O layout escolhido não foi encontrado ou é inválido: usando o layout padrão.")
+        return "padrao"
+    print("🎨 Layout padrão escolhido.")
+    return "padrao"
+
+
 def custom_geometry(src_w, src_h, layout):
     """Medidas do layout personalizado (mesmo formato do cam_geometry), ou None se não der."""
     if src_w <= 0 or src_h <= 0 or not layout:
@@ -5118,6 +5184,8 @@ def main():
                              "ex.: 0.78,0.37,0.21,0.22. Tem prioridade sobre --webcam e a detecção por IA")
     parser.add_argument("--layout-salvo", metavar="NOME",
                         help="Modo gameplay: usa um layout criado no editor da interface (pasta layouts_salvos/)")
+    parser.add_argument("--esperar-layout", action="store_true",
+                        help="Modo gameplay (usado pela interface): depois de baixar o vídeo, pausa até o layout ser escolhido no editor")
     parser.add_argument("--cortes", type=int, metavar="N",
                         help="Modo gameplay: quantidade de cortes (1-10), sem perguntar no terminal")
     parser.add_argument("--repetir", action="store_true",
@@ -5432,6 +5500,9 @@ def main():
             print(f"  {i}. {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s) | Score: {clip['score']:.1f}")
             print(f"     Motivo: {clip.get('reason', 'N/A')}")
             print(f"     Texto: {clip['text'][:120]}...")
+
+        if args.esperar_layout and not CUSTOM_LAYOUT:
+            wait_for_layout_choice(video_path, clips)
 
         print("\n" + "=" * 60)
         print("🎬 INICIANDO EXPORTAÇÃO DOS CORTES (GAMEPLAY - ClipFlow 3 Camadas)")

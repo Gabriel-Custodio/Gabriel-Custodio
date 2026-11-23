@@ -71,6 +71,7 @@ function alternarOpcoes() {
   $("opcoes-gameplay").hidden = modo !== "gameplay";
   $("campo-streamer").hidden = modo !== "gameplay";
   $("campo-camera").hidden = modo !== "gameplay";
+  $("linha-esperar").hidden = modo !== "gameplay";
   $("linha-cta").hidden = modo !== "gameplay";
   $("linha-resumo").hidden = modo !== "gameplay";   // o resumo no início só existe no modo gameplay
 }
@@ -88,6 +89,7 @@ function atualizarEstadoJob(job) {
   selo.className = "selo" + (job ? ` ${job.estado}` : "");
   selo.textContent = job ? `${nomes[job.estado] || job.estado} · ${formatarTempo(job.segundos)}` : "Parado";
   $("btn-gerar").disabled = rodando;
+  if (typeof edAoMudarJob === "function") edAoMudarJob(job);      // editor.js: abre o editor se o script estiver pausado
   $("btn-parar").hidden = !rodando;
   if (job && !rodando) {
     const ok = job.estado === "concluido";
@@ -153,6 +155,7 @@ $("form-gerar").addEventListener("submit", async (ev) => {
     if (salvo) corpo.layout_salvo = salvo;        // layout criado no editor (só no modo gameplay)
     corpo.resumo = f.get("resumo") === "on";
     corpo.cta = f.get("cta") === "on";
+    corpo.esperar_layout = f.get("esperar") === "on";
     corpo.streamer = String(f.get("streamer") || "").trim();
   }
   try {

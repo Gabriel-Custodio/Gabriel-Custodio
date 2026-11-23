@@ -149,6 +149,10 @@ input[type="text"], input[type="number"], select {
 .ed-lista { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
 .ed-lista li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; border: 1px solid var(--borda); border-radius: 8px; }
 .ed-nome-item { flex: 1; min-width: 120px; font-weight: 600; overflow-wrap: anywhere; }
+.ed-decisao { border-color: var(--primaria); }
+.ed-quadros { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ed-quadros .btn.ativo { background: var(--foco); border-color: var(--foco); color: #fff; }
+.aviso-layout { border: 1px solid var(--primaria); border-radius: 8px; padding: 10px 12px; margin: 0 0 12px; }
 @media (max-width: 800px) { .ed-grade { grid-template-columns: 1fr; } }
 
 @media (max-width: 600px) {

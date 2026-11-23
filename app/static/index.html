@@ -77,6 +77,9 @@
         <label id="linha-cta" class="inline caixa"><input type="checkbox" id="cta" name="cta" checked>
           Chamada final (no fim do corte, a voz pede like, compartilhamento e inscrição no canal)</label>
 
+        <label id="linha-esperar" class="inline caixa"><input type="checkbox" id="esperar" name="esperar" checked>
+          Escolher o layout no editor depois de baixar o vídeo (a geração pausa até você decidir; vale só se você não escolheu um “Meu layout” nas opções avançadas)</label>
+
         <details class="avancado">
           <summary>Opções avançadas</summary>
           <label class="inline caixa"><input type="checkbox" id="repetir" name="repetir">
@@ -117,6 +120,10 @@
           <h2 id="titulo-log">Andamento</h2>
           <label class="inline"><input type="checkbox" id="rolar" checked> Rolar automaticamente</label>
         </div>
+        <p id="aviso-layout" class="aviso-fim aviso-layout" role="status" hidden>
+          <span>⏸ O vídeo foi baixado e os trechos escolhidos. A geração está pausada esperando você definir o layout.</span>
+          <button type="button" id="abrir-editor" class="btn primario">Escolher o layout</button>
+        </p>
         <pre id="log" class="log" tabindex="0" role="log" aria-live="off">Nada em execução ainda.</pre>
         <p id="fim-job" class="aviso-fim" hidden>
           <span id="fim-texto"></span>
@@ -146,6 +153,18 @@
 
   <!-- ======================= LAYOUT (editor) ======================= -->
   <section id="painel-layout" role="tabpanel" aria-labelledby="aba-layout" hidden class="painel-layout">
+    <div id="ed-decisao" class="cartao ed-decisao" role="status" hidden>
+      <h2>Escolha o layout deste vídeo</h2>
+      <p class="ajuda">O vídeo foi baixado e os trechos foram escolhidos. Abaixo estão quadros do próprio vídeo: ajuste as caixas e clique em <strong>Usar este layout</strong> para continuar a gerar os cortes, ou use o layout padrão.</p>
+      <div class="acoes-form">
+        <span id="ed-quadros" class="ed-quadros"></span>
+      </div>
+      <div class="acoes-form">
+        <button type="button" id="ed-usar-este" class="btn primario">Usar este layout e continuar</button>
+        <button type="button" id="ed-usar-padrao" class="btn">Usar o layout padrão</button>
+      </div>
+    </div>
+
     <div class="cartao">
       <h2>Editor de layout</h2>
       <p class="ajuda">Escolha como a câmera e o gameplay aparecem no vídeo vertical: carregue um quadro do vídeo, arraste e redimensione as duas caixas e veja o resultado ao lado. Salve com um nome (por exemplo, o do streamer) e use nos cortes pela caixa “Layout” da aba “Gerar cortes”. Vale para o modo Gameplay / Streamer.</p>

@@ -218,6 +218,7 @@ $("ed-carregar").addEventListener("click", async () => {
   try {
     const r = await post("/api/quadro", { url, segundo: Number($("ed-segundo").value || 0) });
     edCarregarImagem(r.quadro, ED.slugEditando !== null);
+    if (r.aviso) edEstado(r.aviso);
   } catch (e) {
     edErro(e.message);
     edEstado("");
@@ -309,7 +310,69 @@ function edAtualizarOpcoesDoFormulario() {
   sel.value = [...sel.options].some((o) => o.value === atual) ? atual : "";
 }
 
+// ---------------------------------------------------------------- geração pausada esperando o layout
+let edEsperando = false;
+
+function edAoMudarJob(job) {
+  const quadros = job && job.estado === "rodando" && Array.isArray(job.aguardando_layout) ? job.aguardando_layout : [];
+  const esperando = quadros.length > 0;
+  $("aviso-layout").hidden = !esperando;
+  if (esperando && !edEsperando) {
+    edEsperando = true;
+    $("ed-decisao").hidden = false;
+    const caixa = $("ed-quadros");
+    caixa.replaceChildren();
+    quadros.forEach((nome, i) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "btn"; b.textContent = `Quadro ${i + 1}`;
+      b.addEventListener("click", () => {
+        caixa.querySelectorAll(".btn").forEach((x) => x.classList.remove("ativo"));
+        b.classList.add("ativo");
+        edCarregarImagem(nome, true);                 // troca o quadro e mantém as caixas
+      });
+      caixa.appendChild(b);
+    });
+    caixa.firstChild.classList.add("ativo");
+    edErro("");
+    edCarregarImagem(quadros[0], ED.slugEditando !== null);
+    mostrarAba("layout");
+  } else if (!esperando && edEsperando) {
+    edEsperando = false;
+    $("ed-decisao").hidden = true;
+  }
+}
+
+$("abrir-editor").addEventListener("click", () => mostrarAba("layout"));
+
+async function edDecidir(corpo) {
+  try {
+    await post("/api/layout/decidir", corpo);
+    edEsperando = false;
+    $("ed-decisao").hidden = true;
+    $("aviso-layout").hidden = true;
+    mostrarAba("gerar");
+  } catch (e) {
+    edErro(e.message);
+  }
+}
+
+$("ed-usar-padrao").addEventListener("click", () => edDecidir({ acao: "padrao" }));
+$("ed-usar-este").addEventListener("click", async () => {
+  edErro("");
+  if (!edImgOk()) { edErro("Espere o quadro carregar."); return; }
+  const nome = $("ed-nome").value.trim() || `Layout ${new Date().toLocaleString("pt-BR")}`;
+  try {
+    const r = await post("/api/layouts", { nome, cam: ED.cam, game: ED.game, cam_altura: ED.camAltura, ordem: ED.ordem });
+    ED.slugEditando = r.layout.slug;
+    await edCarregarLista();
+    await edDecidir({ acao: "salvo", slug: r.layout.slug });
+  } catch (e) {
+    edErro(e.message);
+  }
+});
+
 function edUsar(l) {
+  if (edEsperando) { edDecidir({ acao: "salvo", slug: l.slug }); return; }
   $("layout").value = `salvo:${l.slug}`;
   const modo = document.querySelector('input[name="modo"][value="gameplay"]');
   if (modo) { modo.checked = true; modo.dispatchEvent(new Event("change")); }

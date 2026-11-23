@@ -43,6 +43,9 @@ LAYOUTS = {"cam", "fit", "clipflow"}
 FUNDOS = {"blur", "black"}
 RE_SLUG = re.compile(r"^[a-z0-9_-]{1,40}$")
 RE_QUADRO = re.compile(r"^[0-9a-f]{16}\.(jpg|png|webp)$")
+RE_ESPERA = re.compile(r"^espera-[1-9]\.jpg$")          # quadros do vídeo que está sendo processado (temp_layout/)
+MARCA_AGUARDANDO = "@@LAYOUT_AGUARDANDO@@"             # linhas que o gerar_cortes.py imprime ao pausar/continuar
+MARCA_DECIDIDO = "@@LAYOUT_DECIDIDO@@"
 MAX_IMAGEM = 8 * 1024 * 1024
 MAX_QUADROS = 12                       # quadros guardados em app/quadros (os mais antigos são apagados)
 CAM_ALTURA_MIN, CAM_ALTURA_MAX, CAM_ALTURA_PADRAO = 300, 1100, 600
@@ -89,6 +92,14 @@ def caixa_valida(caixa):
     if not (0 <= x < 1 and 0 <= y < 1 and 0 < w <= 1 and 0 < h <= 1 and x + w <= 1.0001 and y + h <= 1.0001):
         return None
     return {"x": round(x, 5), "y": round(y, 5), "w": round(min(w, 1 - x), 5), "h": round(min(h, 1 - y), 5)}
+
+
+def limpar_url(url):
+    """Tira esquemas repetidos (https://https://...) e, no YouTube, deixa só o ID do vídeo (como o gerar_cortes.py)."""
+    url = re.sub(r"^(?:https?://)+(?=https?://)", "", str(url or "").strip(), flags=re.IGNORECASE)
+    m = (re.search(r"(?:youtube\.com/watch\?(?:[^#\s]*&)?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([A-Za-z0-9_-]{11})", url)
+         or re.search(r"youtube\.com/shorts/([A-Za-z0-9_-]{11})", url))
+    return f"https://www.youtube.com/watch?v={m.group(1)}" if m else url
 
 
 def tipo_de_imagem(dados):
@@ -154,8 +165,16 @@ class Job:
         self.proc = None
         self.lock = threading.Lock()
         self.arquivo_log = None
+        self.aguardando_layout = None      # nomes dos quadros (espera-N.jpg) enquanto o script espera a escolha do layout
 
     def adicionar(self, linha):
+        if linha.startswith(MARCA_AGUARDANDO):
+            nomes = [n for n in linha[len(MARCA_AGUARDANDO):].split() if RE_ESPERA.match(n)]
+            self.aguardando_layout = nomes or None
+            linha = "⏸ Aguardando você escolher o layout (aba Layout da interface)..." if nomes else "⚠ Pausa de layout sem quadros."
+        elif linha.startswith(MARCA_DECIDIDO):
+            self.aguardando_layout = None
+            linha = "▶ Layout decidido, continuando..."
         with self.lock:
             self.linhas.append(linha)
             if len(self.linhas) > MAX_LINHAS_LOG:
@@ -182,6 +201,7 @@ class Job:
             "estado": self.estado,
             "codigo": self.codigo,
             "parametros": self.parametros,
+            "aguardando_layout": self.aguardando_layout if self.estado == "rodando" else None,
             "segundos": round(fim - self.inicio),
         }
 
@@ -197,6 +217,7 @@ class Estado:
         self.logs = APP_DIR / "logs"
         self.layouts = self.raiz / "layouts_salvos"
         self.quadros = APP_DIR / "quadros"
+        self.espera = self.raiz / "temp_layout"
         self.python = python or sys.executable
         self.token = secrets.token_urlsafe(32)
         self.job = None
@@ -340,6 +361,27 @@ class Estado:
     def layout_existe(self, slug):
         return isinstance(slug, str) and bool(RE_SLUG.match(slug)) and (self.layouts / f"{slug}.json").is_file()
 
+    def decidir_layout(self, dados):
+        """Entrega ao gerar_cortes.py (que está pausado) a escolha do layout. Levanta ValueError."""
+        job = self.job
+        if not job or job.estado != "rodando" or not job.aguardando_layout:
+            raise ValueError("Nenhuma geração está esperando a escolha do layout.")
+        acao = dados.get("acao")
+        if acao == "salvo":
+            slug = dados.get("slug")
+            if not self.layout_existe(slug):
+                raise ValueError("Layout salvo não encontrado.")
+            conteudo = {"acao": "salvo", "slug": slug}
+        elif acao == "padrao":
+            conteudo = {"acao": "padrao"}
+        else:
+            raise ValueError("Escolha inválida.")
+        self.espera.mkdir(parents=True, exist_ok=True)
+        tmp = self.espera / "decisao.tmp"
+        tmp.write_text(json.dumps(conteudo), encoding="utf-8")
+        tmp.replace(self.espera / "decisao.json")
+        job.aguardando_layout = None
+
     # ---- quadros (imagem do vídeo usada no editor)
     def _guardar_quadro(self, dados, ext):
         self.quadros.mkdir(parents=True, exist_ok=True)
@@ -363,6 +405,9 @@ class Estado:
         return self._guardar_quadro(dados, ext)
 
     def caminho_quadro(self, nome):
+        if isinstance(nome, str) and RE_ESPERA.match(nome):
+            caminho = self.espera / nome
+            return caminho if caminho.is_file() else None
         if not isinstance(nome, str) or not RE_QUADRO.match(nome):
             return None
         caminho = self.quadros / nome
@@ -373,8 +418,12 @@ class Estado:
         return str(local) if local.is_file() else shutil.which("ffmpeg")
 
     def capturar_quadro(self, url, segundo):
-        """Baixa só ~6 s do vídeo (yt-dlp --download-sections) e tira um quadro com o ffmpeg. ValueError se falhar."""
-        url = str(url or "").strip()
+        """Baixa só ~6 s do vídeo (yt-dlp --download-sections) e tira um quadro com o ffmpeg.
+
+        Devolve (nome_do_quadro, aviso). Se o segundo pedido passar do fim do vídeo, tenta o segundo 10 e avisa.
+        Levanta ValueError (com o motivo que o yt-dlp deu) se falhar.
+        """
+        url = limpar_url(url)
         if not RE_URL.match(url) or len(url) > 2000 or url.startswith("-"):
             raise ValueError("Cole um link que comece com http:// ou https://")
         try:
@@ -389,24 +438,21 @@ class Estado:
         import tempfile
         with tempfile.TemporaryDirectory(prefix="quadro_") as tmp:
             tmp = Path(tmp)
-            js = next((n for n in ("deno", "node", "bun") if shutil.which(n)), None)
-            cmd = [self.python, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
-                   "--ffmpeg-location", str(Path(ffmpeg).parent),
-                   "-f", "bv*[height<=1080]/b[height<=1080]",
-                   "--download-sections", f"*{segundo}-{segundo + 6}",
-                   "-o", str(tmp / "video.%(ext)s")]
-            if js and js != "deno":
-                cmd += ["--js-runtimes", js]
-            cmd += ["--", url]
-            env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
-            try:
-                r = subprocess.run(cmd, cwd=str(self.raiz), env=env, capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace", timeout=180)
-            except (OSError, subprocess.TimeoutExpired):
-                raise ValueError("Não foi possível baixar o trecho do vídeo (demorou demais ou o yt-dlp não abriu).")
+            tentativas = [segundo] + ([10] if segundo > 10 else [])
+            motivo, usado = "", None
+            for tentativa in tentativas:
+                for cliente in ("android,web", "web"):
+                    for velho in tmp.glob("video.*"):
+                        velho.unlink()
+                    ok, motivo = self._baixar_trecho(url, tentativa, cliente, ffmpeg, tmp)
+                    if ok:
+                        usado = tentativa
+                        break
+                if usado is not None:
+                    break
+            if usado is None:
+                raise ValueError(f"Não foi possível baixar o trecho do vídeo. Confira o link e o segundo. Detalhe: {motivo or 'sem detalhe'}")
             baixados = [a for a in tmp.glob("video.*") if a.is_file()]
-            if r.returncode != 0 or not baixados:
-                raise ValueError("Não foi possível baixar o trecho do vídeo. Confira o link e o segundo (o vídeo precisa durar mais que isso).")
             saida = tmp / "quadro.jpg"
             try:
                 r = subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(baixados[0]),
@@ -416,7 +462,37 @@ class Estado:
                 raise ValueError("O ffmpeg não conseguiu tirar o quadro.")
             if r.returncode != 0 or not saida.is_file():
                 raise ValueError("O ffmpeg não conseguiu tirar o quadro.")
-            return self._guardar_quadro(saida.read_bytes(), "jpg")
+            aviso = None
+            if usado != segundo:
+                aviso = f"O vídeo é mais curto que {segundo} s: usei o segundo {usado}."
+            return self._guardar_quadro(saida.read_bytes(), "jpg"), aviso
+
+    def _baixar_trecho(self, url, segundo, cliente, ffmpeg, pasta):
+        """Uma tentativa de baixar ~6 s com o yt-dlp. Devolve (ok, motivo)."""
+        js = next((n for n in ("deno", "node", "bun") if shutil.which(n)), None)
+        cmd = [self.python, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+               "--ffmpeg-location", str(Path(ffmpeg).parent),
+               "-f", "bv*[height<=1080]/b[height<=1080]",
+               "--download-sections", f"*{segundo}-{segundo + 6}",
+               "-o", str(pasta / "video.%(ext)s")]
+        if "youtube.com" in url:
+            cmd += ["--extractor-args", f"youtube:player_client={cliente}"]
+            if js and js != "deno":
+                cmd += ["--js-runtimes", js]
+        cmd += ["--", url]
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+        try:
+            r = subprocess.run(cmd, cwd=str(self.raiz), env=env, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=180)
+        except subprocess.TimeoutExpired:
+            return False, "demorou demais"
+        except OSError as e:
+            return False, f"o yt-dlp não abriu ({e})"
+        if r.returncode == 0 and any(a.is_file() for a in pasta.glob("video.*")):
+            return True, ""
+        linhas = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
+        erro = next((l for l in reversed(linhas) if l.startswith("ERROR")), linhas[-1] if linhas else "")
+        return False, erro[:240]
 
     # ---- pré-requisitos (só informativo)
     def prerequisitos(self):
@@ -432,7 +508,7 @@ class Estado:
     # ---- execução
     def montar_comando(self, dados):
         """Valida o pedido da tela e monta a lista de argumentos (sem shell). Levanta ValueError."""
-        url = str(dados.get("url", "")).strip()
+        url = re.sub(r"^(?:https?://)+(?=https?://)", "", str(dados.get("url", "")).strip(), flags=re.IGNORECASE)
         if not RE_URL.match(url) or len(url) > 2000 or url.startswith("-"):
             raise ValueError("Cole um link que comece com http:// ou https://")
         modo = dados.get("modo")
@@ -478,6 +554,9 @@ class Estado:
             if cta is False:
                 comando.append("--sem-cta")
                 params["cta"] = False
+            esperar = dados.get("esperar_layout")
+            if esperar is not None and not isinstance(esperar, bool):
+                raise ValueError("Opção inválida.")
             layout_salvo = dados.get("layout_salvo")
             if layout_salvo is not None and not isinstance(layout_salvo, str):
                 raise ValueError("Layout salvo inválido.")
@@ -486,6 +565,9 @@ class Estado:
                     raise ValueError("Layout salvo não encontrado. Crie ou escolha outro na aba Layout.")
                 comando.append(f"--layout-salvo={layout_salvo}")
                 params["layout_salvo"] = layout_salvo
+            elif esperar:
+                comando.append("--esperar-layout")           # pausa para escolher o layout no editor
+                params["esperar_layout"] = True
             camera = dados.get("camera")
             if camera is not None and not isinstance(camera, str):
                 raise ValueError("Câmera manual inválida.")
@@ -734,9 +816,16 @@ class Manipulador(BaseHTTPRequestHandler):
             return self._json({"ok": True}) if self.estado.apagar_layout(dados.get("slug")) else self._erro(404, "Layout não encontrado.")
         if caminho == "/api/quadro":
             try:
-                return self._json({"quadro": self.estado.capturar_quadro(dados.get("url"), dados.get("segundo", 60))}, 201)
+                quadro, aviso = self.estado.capturar_quadro(dados.get("url"), dados.get("segundo", 60))
+                return self._json({"quadro": quadro, "aviso": aviso}, 201)
             except ValueError as e:
                 return self._erro(400, str(e))
+        if caminho == "/api/layout/decidir":
+            try:
+                self.estado.decidir_layout(dados)
+                return self._json({"ok": True})
+            except ValueError as e:
+                return self._erro(409, str(e))
         if caminho == "/api/executar":
             try:
                 job, erro = self.estado.iniciar(dados)
