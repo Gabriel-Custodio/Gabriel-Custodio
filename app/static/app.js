@@ -30,7 +30,7 @@ function formatarTempo(segundos) {
 }
 
 // ------------------------------------------------------------- abas
-const ABAS = ["gerar", "cortes", "layout"];
+const ABAS = ["gerar", "cortes"];
 function mostrarAba(nome) {
   for (const a of ABAS) {
     const ativa = a === nome;
@@ -70,10 +70,7 @@ function alternarOpcoes() {
   const modo = document.querySelector('input[name="modo"]:checked').value;
   $("opcoes-gameplay").hidden = modo !== "gameplay";
   $("campo-streamer").hidden = modo !== "gameplay";
-  $("campo-camera").hidden = modo !== "gameplay";
-  $("linha-esperar").hidden = modo !== "gameplay";
-  $("linha-cta").hidden = modo !== "gameplay";
-  $("linha-resumo").hidden = modo !== "gameplay";   // o resumo no início só existe no modo gameplay
+  $("aviso-bruto").hidden = modo !== "gameplay";
 }
 document.querySelectorAll('input[name="modo"]').forEach((el) => el.addEventListener("change", alternarOpcoes));
 
@@ -89,7 +86,6 @@ function atualizarEstadoJob(job) {
   selo.className = "selo" + (job ? ` ${job.estado}` : "");
   selo.textContent = job ? `${nomes[job.estado] || job.estado} · ${formatarTempo(job.segundos)}` : "Parado";
   $("btn-gerar").disabled = rodando;
-  if (typeof edAoMudarJob === "function") edAoMudarJob(job);      // editor.js: abre o editor se o script estiver pausado
   $("btn-parar").hidden = !rodando;
   if (job && !rodando) {
     const ok = job.estado === "concluido";
@@ -143,19 +139,11 @@ $("form-gerar").addEventListener("submit", async (ev) => {
   mostrarErroForm("");
   const f = new FormData(ev.target);
   const modo = f.get("modo");
-  const layoutEscolhido = String(f.get("layout") || "");
-  const salvo = layoutEscolhido.startsWith("salvo:") ? layoutEscolhido.slice(6) : "";
   const corpo = { url: String(f.get("url") || "").trim(), modo,
-                  layout: salvo ? "" : layoutEscolhido, fundo: f.get("fundo") || "",
+                  layout: f.get("layout") || "", fundo: f.get("fundo") || "",
                   repetir: f.get("repetir") === "on", importar_existentes: f.get("importar") === "on" };
   if (modo === "gameplay") {
     corpo.cortes = Number(f.get("cortes") || 5);
-    corpo.webcam = f.get("webcam") || "";
-    corpo.camera = String(f.get("camera") || "").trim();
-    if (salvo) corpo.layout_salvo = salvo;        // layout criado no editor (só no modo gameplay)
-    corpo.resumo = f.get("resumo") === "on";
-    corpo.cta = f.get("cta") === "on";
-    corpo.esperar_layout = f.get("esperar") === "on";
     corpo.streamer = String(f.get("streamer") || "").trim();
   }
   try {
@@ -203,6 +191,8 @@ function montarCorte(c) {
   if (c.nota != null) selos.append(selo(`nota ${c.nota}`));
   if (c.score != null) selos.append(selo(`score ${Number(c.score).toFixed(1)}`));
   if (c.modo) selos.append(selo(c.modo));
+  if (c.bruto) selos.append(selo("bruto: sem edição", "aviso"));
+  else if (c.edicao && c.edicao.estado === "renderizado") selos.append(selo("editado", "concluido"));
   if (c.resumo) selos.append(selo("com resumo no início"));
   if (c.cta) selos.append(selo("com chamada final"));
   const origem = fonteTitulo(c.fonte_titulo);
@@ -222,6 +212,10 @@ function montarCorte(c) {
   const resumo = no.querySelector(".resumo-intro");
   resumo.hidden = !c.resumo;
   no.querySelector(".texto-resumo").textContent = c.resumo || "";
+
+  const editar = no.querySelector(".editar");
+  editar.hidden = !c.editavel;                      // só cortes gerados no modo bruto guardam a versão original
+  editar.addEventListener("click", () => edAbrir(c));
 
   const aprovar = no.querySelector(".aprovar");
   aprovar.textContent = c.estado === "aprovado" ? "Desfazer aprovação" : "Aprovar";

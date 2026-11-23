@@ -28,12 +28,12 @@ class TestEscolhaDeLayout(unittest.TestCase):
         if self.antigo is not None:
             os.environ["CORTES_LAYOUT"] = self.antigo
 
-    def test_padrao_e_cam(self):
-        self.assertEqual(g.get_layout(), "cam")
+    def test_padrao_volta_a_ser_fit(self):
+        self.assertEqual(g.get_layout(), "fit")
         self.assertTrue(g.uses_fit_family())
 
     def test_valores_validos_e_invalidos(self):
-        for valor, esperado in [("fit", "fit"), ("CLIPFLOW", "clipflow"), ("cam", "cam"), ("xyz", "cam")]:
+        for valor, esperado in [("fit", "fit"), ("CLIPFLOW", "clipflow"), ("cam", "cam"), ("xyz", "fit")]:
             os.environ["CORTES_LAYOUT"] = valor
             self.assertEqual(g.get_layout(), esperado)
 
@@ -221,6 +221,7 @@ class TestFluxo(unittest.TestCase):
             audio_mode=audio_mode)
 
     def test_com_camera_usa_o_cam(self):
+        os.environ["CORTES_LAYOUT"] = "cam"                      # o cam deixou de ser o padrão: precisa ser pedido
         self.assertTrue(self.processa(CAM_DIREITA))
         self.assertEqual(g.LAYOUT_APLICADO, "cam")
         self.assertGreater(g.CAM_AMPLIACAO, 1.0)

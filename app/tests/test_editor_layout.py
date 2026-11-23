@@ -3,11 +3,8 @@
 Tudo com mocks: nenhum ffmpeg, yt-dlp ou rede. Rodar na pasta do projeto:
     python -m unittest discover -s app/tests -v
 """
-import http.client
 import json
-import math
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -23,30 +20,16 @@ import gerar_cortes as g  # noqa: E402
 import servidor  # noqa: E402
 from test_servidor import Base, URL_OK  # noqa: E402
 
-JPG = b"\xff\xd8\xff\xe0" + b"0" * 200
-PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 200
-WEBP = b"RIFF\x10\x00\x00\x00WEBPVP8 " + b"0" * 100
 LAYOUT = {"nome": "Alan Zoka", "cam": {"x": 0.76, "y": 0.35, "w": 0.22, "h": 0.2},
           "game": {"x": 0.2, "y": 0.0, "w": 0.55, "h": 1.0}, "cam_altura": 640, "ordem": "cam_primeiro"}
 
 
-class BaseEditor(Base):
-    def setUp(self):
-        super().setUp()
-        self.srv.estado.quadros = self.raiz / "quadros"          # não suja app/quadros
+SALVO = {"nome": "Alan Zoka", "cam": {"x": 0.76, "y": 0.35, "w": 0.22, "h": 0.2},
+         "game": {"x": 0.2, "y": 0.0, "w": 0.55, "h": 1.0}, "cam_altura": 640, "ordem": "cam_primeiro"}
 
-    def enviar_bytes(self, caminho, dados, tipo="image/jpeg", cookie=True, csrf=True):
-        con = http.client.HTTPConnection("127.0.0.1", self.porta, timeout=15)
-        cab = {"Host": f"127.0.0.1:{self.porta}", "Content-Type": tipo}
-        if cookie:
-            cab["Cookie"] = f"{servidor.COOKIE}={self.token}"
-        if csrf:
-            cab["X-Requested-With"] = "fabrica"
-        con.request("POST", caminho, body=dados, headers=cab)
-        resp = con.getresponse()
-        corpo = resp.read()
-        con.close()
-        return resp.status, json.loads(corpo.decode("utf-8") or "{}")
+
+class BaseEditor(Base):
+    pass
 
 
 class TestLayoutsSalvos(BaseEditor):
@@ -112,120 +95,6 @@ class TestLayoutsSalvos(BaseEditor):
         self.assertEqual(self.json("GET", "/api/layouts", cookie=False)[0], 403)
         self.assertEqual(self.json("POST", "/api/layouts", LAYOUT, csrf=False)[0], 403)
         self.assertEqual(self.json("POST", "/api/layouts", LAYOUT, cookie=False)[0], 403)
-
-    def test_layout_salvo_vira_flag_com_igual(self):
-        self.json("POST", "/api/layouts", LAYOUT)
-        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1, "layout_salvo": "alan-zoka"})
-        self.assertIn("'--layout-salvo=alan-zoka'", "\n".join(self.esperar_fim()["linhas"]))
-
-    def test_layout_salvo_inexistente_ou_perigoso_da_400(self):
-        for ruim in ("nao-existe", "../x", "A B", 5, ["x"], "a" * 50):
-            status, _ = self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "layout_salvo": ruim})
-            self.assertEqual(status, 400, repr(ruim))
-
-    def test_layout_salvo_ignorado_fora_do_gameplay(self):
-        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "ia", "layout_salvo": "qualquer"})
-        self.assertNotIn("--layout-salvo", "\n".join(self.esperar_fim()["linhas"]).split("ARGS:")[-1])
-
-
-class TestQuadros(BaseEditor):
-    def test_enviar_imagem_e_baixar(self):
-        for dados, tipo in ((JPG, "image/jpeg"), (PNG, "image/png"), (WEBP, "image/webp")):
-            status, r = self.enviar_bytes("/api/quadro/enviar", dados, tipo)
-            self.assertEqual(status, 201, tipo)
-            resp = self.req("GET", f"/api/quadro?id={r['quadro']}")
-            self.assertEqual((resp.status, resp.dados, resp.getheader("Content-Type")), (200, dados, tipo))
-
-    def test_o_tipo_vem_dos_bytes_e_nao_do_cabecalho(self):
-        status, r = self.enviar_bytes("/api/quadro/enviar", PNG, "image/jpeg")
-        self.assertTrue(r["quadro"].endswith(".png"))
-
-    def test_nao_imagem_vazio_e_grande_demais(self):
-        self.assertEqual(self.enviar_bytes("/api/quadro/enviar", b"isto nao e imagem")[0], 400)
-        self.assertEqual(self.enviar_bytes("/api/quadro/enviar", b"<svg onload=alert(1)>", "image/svg+xml")[0], 400)
-        self.assertIn(self.enviar_bytes("/api/quadro/enviar", b"")[0], (400, 413))
-        try:                                  # o servidor recusa sem ler o corpo: o cliente pode ver 413 ou a conexão fechada
-            self.assertEqual(self.enviar_bytes("/api/quadro/enviar", JPG + b"0" * (servidor.MAX_IMAGEM + 1))[0], 413)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        self.assertFalse((self.raiz / "quadros").exists() and any((self.raiz / "quadros").iterdir()))
-
-    def test_seguranca_do_envio(self):
-        self.assertEqual(self.enviar_bytes("/api/quadro/enviar", JPG, cookie=False)[0], 403)
-        self.assertEqual(self.enviar_bytes("/api/quadro/enviar", JPG, csrf=False)[0], 403)
-
-    def test_id_de_quadro_invalido(self):
-        for ruim in ("../x.jpg", "abc", "0123456789abcdef.exe", "0123456789abcdef.jpg", "", "0123456789abcdef.jpg/../a"):
-            self.assertEqual(self.req("GET", f"/api/quadro?id={ruim}").status, 404, ruim)
-        self.assertEqual(self.req("GET", "/api/quadro?id=0123456789abcdef.jpg", cookie=False).status, 403)
-
-    def test_guarda_so_os_ultimos(self):
-        for _ in range(servidor.MAX_QUADROS + 4):
-            self.enviar_bytes("/api/quadro/enviar", JPG)
-        self.assertEqual(len(list((self.raiz / "quadros").iterdir())), servidor.MAX_QUADROS)
-
-
-class TestCapturaDeQuadro(BaseEditor):
-    def setUp(self):
-        super().setUp()
-        self.srv.estado._ffmpeg = lambda: "/opt/ffmpeg/ffmpeg"
-        self.chamadas = []
-
-    def falso(self, falha_ytdlp=False, falha_ffmpeg=False):
-        def run(cmd, **kw):
-            self.chamadas.append((cmd, kw))
-            if "yt_dlp" in cmd:
-                if not falha_ytdlp:
-                    destino = Path(cmd[cmd.index("-o") + 1].replace("%(ext)s", "mp4"))
-                    destino.write_bytes(b"video")
-                return subprocess.CompletedProcess(cmd, 1 if falha_ytdlp else 0, "", "erro")
-            Path(cmd[-1]).write_bytes(JPG)
-            return subprocess.CompletedProcess(cmd, 1 if falha_ffmpeg else 0, "", "")
-        return run
-
-    def test_baixa_trecho_curto_e_tira_o_quadro(self):
-        with mock.patch.object(servidor.subprocess, "run", self.falso()):
-            status, r = self.json("POST", "/api/quadro", {"url": URL_OK, "segundo": 90})
-        self.assertEqual(status, 201)
-        self.assertTrue(r["quadro"].endswith(".jpg"))
-        ytdlp = self.chamadas[0][0]
-        self.assertEqual(ytdlp[ytdlp.index("--download-sections") + 1], "*90-96")
-        self.assertEqual(ytdlp[-2:], ["--", URL_OK])                    # a URL nunca vira opção
-        self.assertNotIn("shell", self.chamadas[0][1])
-        self.assertEqual(self.req("GET", f"/api/quadro?id={r['quadro']}").dados, JPG)
-
-    def test_url_ou_segundo_invalidos(self):
-        with mock.patch.object(servidor.subprocess, "run", self.falso()):
-            for corpo in ({"url": "ftp://x"}, {"url": "-o x"}, {"url": ""}, {"url": URL_OK, "segundo": "a"},
-                          {"url": URL_OK, "segundo": -1}, {"url": URL_OK, "segundo": 99999}, {}):
-                self.assertEqual(self.json("POST", "/api/quadro", corpo)[0], 400, repr(corpo))
-        self.assertEqual(self.chamadas, [])
-
-    def test_falhas_viram_mensagem(self):
-        with mock.patch.object(servidor.subprocess, "run", self.falso(falha_ytdlp=True)):
-            status, r = self.json("POST", "/api/quadro", {"url": URL_OK})
-        self.assertEqual(status, 400)
-        self.assertIn("baixar", r["erro"])
-        with mock.patch.object(servidor.subprocess, "run", self.falso(falha_ffmpeg=True)):
-            self.assertEqual(self.json("POST", "/api/quadro", {"url": URL_OK})[0], 400)
-
-    def test_timeout_vira_mensagem(self):
-        def run(cmd, **kw):
-            raise subprocess.TimeoutExpired(cmd, 1)
-        with mock.patch.object(servidor.subprocess, "run", run):
-            status, r = self.json("POST", "/api/quadro", {"url": URL_OK})
-        self.assertEqual(status, 400)
-        self.assertIn("demorou", r["erro"])
-
-    def test_sem_ffmpeg(self):
-        self.srv.estado._ffmpeg = lambda: None
-        self.assertEqual(self.json("POST", "/api/quadro", {"url": URL_OK})[0], 400)
-
-
-# ------------------------------------------------------------------ gerar_cortes: layout personalizado
-SALVO = {"nome": "Alan Zoka", "cam": {"x": 0.76, "y": 0.35, "w": 0.22, "h": 0.2},
-         "game": {"x": 0.2, "y": 0.0, "w": 0.55, "h": 1.0}, "cam_altura": 640, "ordem": "cam_primeiro"}
-
 
 class TestLayoutPersonalizadoNoGerarCortes(unittest.TestCase):
     def setUp(self):
@@ -347,142 +216,7 @@ class TestLayoutPersonalizadoNoGerarCortes(unittest.TestCase):
 
 
 
-# ------------------------------------------------------------------ pausa para escolher o layout durante a geração
-ESPERA_FALSO = r'''
-import json, pathlib, sys, time
-d = pathlib.Path("temp_layout"); d.mkdir(exist_ok=True)
-(d / "espera-1.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"1" * 50)
-(d / "espera-2.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"2" * 50)
-print("ARGS:", sys.argv[1:], flush=True)
-print("@@LAYOUT_AGUARDANDO@@ espera-1.jpg espera-2.jpg ../x.jpg espera-99.jpg", flush=True)
-for _ in range(300):
-    if (d / "decisao.json").exists():
-        break
-    time.sleep(0.1)
-print("DECISAO:", (d / "decisao.json").read_text(), flush=True)
-print("@@LAYOUT_DECIDIDO@@", flush=True)
-'''
-
-
-class TestPausaParaEscolherLayout(BaseEditor):
-    def setUp(self):
-        super().setUp()
-        (self.raiz / "gerar_cortes.py").write_text(ESPERA_FALSO, encoding="utf-8")
-
-    def esperar_pausa(self, limite=15):
-        import time
-        fim = time.time() + limite
-        while time.time() < fim:
-            _, dados = self.json("GET", "/api/log?desde=0")
-            if dados["job"] and dados["job"]["aguardando_layout"]:
-                return dados
-            time.sleep(0.1)
-        self.fail("o job não ficou aguardando o layout")
-
-    def iniciar(self, **extra):
-        status, _ = self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1, **extra})
-        self.assertEqual(status, 201)
-
-    def test_marca_vira_estado_e_texto_amigavel(self):
-        self.iniciar(esperar_layout=True)
-        dados = self.esperar_pausa()
-        # "../x.jpg" é descartado; "espera-99.jpg" também (só espera-1 a espera-9 são nomes válidos)
-        self.assertEqual(dados["job"]["aguardando_layout"], ["espera-1.jpg", "espera-2.jpg"])
-        texto = "\n".join(dados["linhas"])
-        self.assertNotIn("@@LAYOUT", texto)
-        self.assertIn("Aguardando você escolher o layout", texto)
-        self.assertIn("'--esperar-layout'", texto)
-        self.srv.estado.parar()
-
-    def test_quadros_da_espera_sao_servidos(self):
-        self.iniciar(esperar_layout=True)
-        self.esperar_pausa()
-        resp = self.req("GET", "/api/quadro?id=espera-1.jpg")
-        self.assertEqual((resp.status, resp.getheader("Content-Type")), (200, "image/jpeg"))
-        self.assertTrue(resp.dados.startswith(b"\xff\xd8\xff"))
-        for ruim in ("espera-0.jpg", "espera-10.jpg", "espera-1.png", "../espera-1.jpg", "espera-9.jpg"):
-            self.assertEqual(self.req("GET", f"/api/quadro?id={ruim}").status, 404, ruim)
-        self.assertEqual(self.req("GET", "/api/quadro?id=espera-1.jpg", cookie=False).status, 403)
-        self.srv.estado.parar()
-
-    def test_decidir_padrao_libera_o_script(self):
-        self.iniciar(esperar_layout=True)
-        self.esperar_pausa()
-        self.assertEqual(self.json("POST", "/api/layout/decidir", {"acao": "padrao"})[0], 200)
-        fim = self.esperar_fim()
-        texto = "\n".join(fim["linhas"])
-        self.assertIn('DECISAO: {"acao": "padrao"}', texto)
-        self.assertIn("Layout decidido", texto)
-        self.assertIsNone(fim["job"]["aguardando_layout"])
-        self.assertFalse((self.raiz / "temp_layout" / "decisao.tmp").exists())
-
-    def test_decidir_com_layout_salvo(self):
-        self.json("POST", "/api/layouts", LAYOUT)
-        self.iniciar(esperar_layout=True)
-        self.esperar_pausa()
-        self.assertEqual(self.json("POST", "/api/layout/decidir", {"acao": "salvo", "slug": "alan-zoka"})[0], 200)
-        self.assertIn('"slug": "alan-zoka"', "\n".join(self.esperar_fim()["linhas"]))
-
-    def test_decisoes_invalidas(self):
-        self.iniciar(esperar_layout=True)
-        self.esperar_pausa()
-        for ruim in ({"acao": "salvo", "slug": "nao-existe"}, {"acao": "salvo", "slug": "../x"}, {"acao": "salvo"},
-                     {"acao": "outra"}, {}, {"acao": "salvo", "slug": 5}):
-            self.assertEqual(self.json("POST", "/api/layout/decidir", ruim)[0], 409, repr(ruim))
-        self.assertFalse((self.raiz / "temp_layout" / "decisao.json").exists())      # nada foi entregue ao script
-        self.assertEqual(self.json("POST", "/api/layout/decidir", {"acao": "padrao"})[0], 200)
-        self.assertEqual(self.json("POST", "/api/layout/decidir", {"acao": "padrao"})[0], 409)   # já decidido
-        self.esperar_fim()
-
-    def test_sem_geracao_esperando(self):
-        self.assertEqual(self.json("POST", "/api/layout/decidir", {"acao": "padrao"})[0], 409)
-
-    def test_seguranca_da_decisao(self):
-        self.assertEqual(self.json("POST", "/api/layout/decidir", {"acao": "padrao"}, cookie=False)[0], 403)
-        self.assertEqual(self.json("POST", "/api/layout/decidir", {"acao": "padrao"}, csrf=False)[0], 403)
-
-    def test_parar_enquanto_espera(self):
-        self.iniciar(esperar_layout=True)
-        self.esperar_pausa()
-        self.assertTrue(self.srv.estado.parar())
-        fim = self.esperar_fim()
-        self.assertEqual(fim["job"]["estado"], "cancelado")
-        self.assertIsNone(fim["job"]["aguardando_layout"])
-
-    def test_parametro_esperar_layout(self):
-        self.iniciar(esperar_layout=False)
-        self.assertNotIn("--esperar-layout", "\n".join(self.esperar_pausa()["linhas"]).split("ARGS:")[-1].split("\n")[0])
-        self.srv.estado.parar()
-        self.esperar_fim()
-        for ruim in (1, "sim", [True]):
-            self.assertEqual(self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "esperar_layout": ruim})[0], 400)
-
-    def test_layout_salvo_tem_prioridade_e_modo_ia_ignora(self):
-        self.json("POST", "/api/layouts", LAYOUT)
-        self.iniciar(esperar_layout=True, layout_salvo="alan-zoka")
-        linha = "\n".join(self.esperar_pausa()["linhas"]).split("ARGS:")[-1].split("\n")[0]
-        self.assertIn("--layout-salvo=alan-zoka", linha)
-        self.assertNotIn("--esperar-layout", linha)
-        self.srv.estado.parar()
-        self.esperar_fim()
-        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "ia", "esperar_layout": True})
-        self.assertNotIn("--esperar-layout", "\n".join(self.esperar_pausa()["linhas"]).split("ARGS:")[-1].split("\n")[0])
-        self.srv.estado.parar()
-
-
 class TestUrlDuplicada(BaseEditor):
-    def test_limpar_url(self):
-        casos = {
-            "https://https://youtu.be/sCRi_1a6cOk": "https://www.youtube.com/watch?v=sCRi_1a6cOk",
-            "https://www.youtube.com/watch?v=sCRi_1a6cOk&t=30s&list=abc": "https://www.youtube.com/watch?v=sCRi_1a6cOk",
-            "https://www.youtube.com/shorts/sCRi_1a6cOk?feature=share": "https://www.youtube.com/watch?v=sCRi_1a6cOk",
-            "https://twitch.tv/videos/123": "https://twitch.tv/videos/123",
-            "http://https://twitch.tv/videos/123": "https://twitch.tv/videos/123",
-            "  https://x.com/a  ": "https://x.com/a",
-        }
-        for entrada, esperado in casos.items():
-            self.assertEqual(servidor.limpar_url(entrada), esperado, entrada)
-
     def test_executar_aceita_esquema_duplicado(self):
         self.json("POST", "/api/executar", {"url": "https://https://twitch.tv/videos/123", "modo": "ia"})
         texto = "\n".join(self.esperar_fim()["linhas"])
@@ -490,179 +224,425 @@ class TestUrlDuplicada(BaseEditor):
         self.assertNotIn("https://https://", texto)
 
 
-class TestCapturaComRepeticao(BaseEditor):
-    def setUp(self):
-        super().setUp()
-        self.srv.estado._ffmpeg = lambda: "/opt/ffmpeg/ffmpeg"
 
-    def falso(self, falha_se=lambda cmd: False, mensagem="ERROR: Requested section is out of range"):
-        self.chamadas = []
 
-        def run(cmd, **kw):
-            self.chamadas.append(cmd)
-            if "yt_dlp" in cmd:
-                if falha_se(cmd):
-                    return subprocess.CompletedProcess(cmd, 1, "", "linha qualquer\n" + mensagem + "\n")
-                Path(cmd[cmd.index("-o") + 1].replace("%(ext)s", "mp4")).write_bytes(b"video")
-                return subprocess.CompletedProcess(cmd, 0, "", "")
-            Path(cmd[-1]).write_bytes(JPG)
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        return run
+# ------------------------------------------------------------------ servidor: menu Editar dos cortes
+OPCOES_EMPILHADO = {"layout": "empilhado", "tarja": True, "legenda": True, "resumo": False, "cta": True,
+                    "cam": {"x": 0.76, "y": 0.35, "w": 0.22, "h": 0.2}, "game": {"x": 0.2, "y": 0.0, "w": 0.55, "h": 1.0},
+                    "cam_altura": 640, "ordem": "cam_primeiro"}
+OPCOES_INTEIRO = {"layout": "inteiro", "tarja": False, "legenda": True, "resumo": True, "cta": False}
 
-    def test_segundo_alem_do_fim_tenta_o_segundo_10_e_avisa(self):
-        alem = lambda cmd: "*44500-44506" in cmd
-        with mock.patch.object(servidor.subprocess, "run", self.falso(alem)):
-            status, r = self.json("POST", "/api/quadro", {"url": "https://https://youtu.be/sCRi_1a6cOk", "segundo": 44500})
+
+class TestEdicaoNoServidor(BaseEditor):
+    NOME = "corte_gameplay_1_TESTE.mp4"
+
+    def criar_bruto(self, nome=None, com_bruto=True, meta=None):
+        nome = nome or self.NOME
+        self.criar_corte(nome, 600, meta={"titulo_gancho": "T", "bruto": True, "edicao": {"estado": "bruto"}, **(meta or {})})
+        if com_bruto:
+            (self.saida / "_brutos").mkdir(exist_ok=True)
+            (self.saida / "_brutos" / nome).write_bytes(b"BRUTO" * 300)
+        return nome
+
+    def editar(self, opcoes, nome=None):
+        return self.json("POST", "/api/cortes/editar", {"nome": nome or self.NOME, "opcoes": opcoes})
+
+    def test_listagem_mostra_se_e_editavel_e_bruto(self):
+        self.criar_bruto()
+        self.criar_bruto("corte_gameplay_2_SEM.mp4", com_bruto=False)
+        _, dados = self.json("GET", "/api/cortes")
+        por_nome = {c["nome"]: c for c in dados["cortes"]}
+        c = por_nome[self.NOME]
+        self.assertEqual((c["editavel"], c["bruto"], c["edicao"]), (True, True, {"estado": "bruto"}))
+        self.assertFalse(por_nome["corte_gameplay_2_SEM.mp4"]["editavel"])
+
+    def test_video_bruto_e_video_atual_sao_arquivos_diferentes(self):
+        self.criar_bruto()
+        atual = self.req("GET", f"/video?nome={self.NOME}")
+        bruto = self.req("GET", f"/video?nome={self.NOME}&bruto=1")
+        self.assertEqual(bruto.status, 200)
+        self.assertEqual(bruto.dados, b"BRUTO" * 300)
+        self.assertNotEqual(atual.dados, bruto.dados)
+        self.assertEqual(self.req("GET", "/video?nome=nao_existe.mp4&bruto=1").status, 404)
+        for ruim in ("../x.mp4", "_x.mp4", "a/b.mp4", ".mp4"):
+            self.assertEqual(self.req("GET", f"/video?nome={ruim}&bruto=1").status, 404, ruim)
+        self.assertEqual(self.req("GET", f"/video?nome={self.NOME}&bruto=1", cookie=False).status, 403)
+
+    def test_editar_grava_opcoes_e_inicia_o_processo(self):
+        self.criar_bruto()
+        status, r = self.editar(OPCOES_EMPILHADO)
         self.assertEqual(status, 201)
-        self.assertIn("44500", r["aviso"])
-        self.assertIn("segundo 10", r["aviso"])
-        usadas = [c[c.index("--download-sections") + 1] for c in self.chamadas if "yt_dlp" in c]
-        self.assertIn("*10-16", usadas)
-        self.assertEqual(self.chamadas[0][-1], "https://www.youtube.com/watch?v=sCRi_1a6cOk")     # URL limpa
+        self.assertEqual(r["job"]["parametros"]["modo"], "edicao")
+        texto = "\n".join(self.esperar_fim()["linhas"])
+        self.assertIn(f"'--renderizar', '{self.NOME}'", texto)
+        salvo = json.loads((self.saida / "_edicoes" / "corte_gameplay_1_TESTE.json").read_text(encoding="utf-8"))
+        self.assertEqual((salvo["layout"], salvo["cam_altura"], salvo["resumo"]), ("empilhado", 640, False))
+        self.assertTrue(g.normalize_edit_options(salvo))              # o script aceita o que o servidor gravou
 
-    def test_tenta_os_dois_clientes_do_youtube(self):
-        so_web = lambda cmd: "youtube:player_client=android,web" in cmd
-        with mock.patch.object(servidor.subprocess, "run", self.falso(so_web)):
-            status, r = self.json("POST", "/api/quadro", {"url": "https://youtu.be/sCRi_1a6cOk", "segundo": 5})
-        self.assertEqual(status, 201)
-        self.assertIsNone(r["aviso"])
-        clientes = [c[c.index("--extractor-args") + 1] for c in self.chamadas if "yt_dlp" in c]
-        self.assertEqual(clientes, ["youtube:player_client=android,web", "youtube:player_client=web"])
+    def test_editar_tela_inteira(self):
+        self.criar_bruto()
+        self.assertEqual(self.editar(OPCOES_INTEIRO)[0], 201)
+        self.esperar_fim()
+        salvo = json.loads((self.saida / "_edicoes" / "corte_gameplay_1_TESTE.json").read_text(encoding="utf-8"))
+        self.assertEqual(salvo, {"layout": "inteiro", "tarja": False, "legenda": True, "resumo": True, "cta": False})
+        self.assertTrue(g.normalize_edit_options(salvo))
 
-    def test_erro_mostra_o_motivo_do_ytdlp(self):
-        with mock.patch.object(servidor.subprocess, "run", self.falso(lambda cmd: True, "ERROR: Sign in to confirm you are not a bot")):
-            status, r = self.json("POST", "/api/quadro", {"url": URL_OK, "segundo": 5})
-        self.assertEqual(status, 400)
-        self.assertIn("Sign in to confirm", r["erro"])
+    def test_editar_pedidos_invalidos(self):
+        self.criar_bruto()
+        self.criar_bruto("corte_gameplay_2_SEM.mp4", com_bruto=False)
+        casos = [
+            ({"nome": "nao_existe.mp4", "opcoes": OPCOES_INTEIRO}, "corte inexistente"),
+            ({"nome": "corte_gameplay_2_SEM.mp4", "opcoes": OPCOES_INTEIRO}, "sem bruto"),
+            ({"nome": "../x.mp4", "opcoes": OPCOES_INTEIRO}, "caminho"),
+            ({"nome": self.NOME}, "sem opcoes"),
+            ({"nome": self.NOME, "opcoes": "texto"}, "opcoes texto"),
+            ({"nome": self.NOME, "opcoes": {**OPCOES_INTEIRO, "layout": "outro"}}, "layout invalido"),
+            ({"nome": self.NOME, "opcoes": {**OPCOES_INTEIRO, "tarja": 1}}, "bool"),
+            ({"nome": self.NOME, "opcoes": {**OPCOES_INTEIRO, "legenda": "sim"}}, "bool 2"),
+            ({"nome": self.NOME, "opcoes": {**OPCOES_EMPILHADO, "cam_altura": 50}}, "altura"),
+            ({"nome": self.NOME, "opcoes": {**OPCOES_EMPILHADO, "cam": {"x": 0.9, "y": 0, "w": 0.3, "h": 0.2}}}, "caixa fora"),
+            ({"nome": self.NOME, "opcoes": {k: v for k, v in OPCOES_EMPILHADO.items() if k != "game"}}, "sem game"),
+            ({"nome": self.NOME, "opcoes": {**OPCOES_EMPILHADO, "ordem": "x"}}, "ordem"),
+        ]
+        for corpo, rotulo in casos:
+            self.assertEqual(self.json("POST", "/api/cortes/editar", corpo)[0], 400, rotulo)
+        self.assertFalse((self.saida / "_edicoes").exists())            # nada foi gravado nem executado
 
-    def test_fora_do_youtube_nao_leva_opcoes_do_youtube(self):
-        with mock.patch.object(servidor.subprocess, "run", self.falso()):
-            self.json("POST", "/api/quadro", {"url": "https://www.twitch.tv/videos/123", "segundo": 5})
-        self.assertNotIn("--extractor-args", self.chamadas[0])
+    def test_nao_edita_com_outra_execucao_rodando(self):
+        self.criar_bruto()
+        self.assertEqual(self.json("POST", "/api/executar", {"url": "https://x.com/lento", "modo": "ia"})[0], 201)
+        status, _ = self.editar(OPCOES_INTEIRO)
+        self.assertEqual(status, 409)
+        self.srv.estado.parar()
+
+    def test_seguranca(self):
+        self.criar_bruto()
+        corpo = {"nome": self.NOME, "opcoes": OPCOES_INTEIRO}
+        self.assertEqual(self.json("POST", "/api/cortes/editar", corpo, cookie=False)[0], 403)
+        self.assertEqual(self.json("POST", "/api/cortes/editar", corpo, csrf=False)[0], 403)
+
+    def test_descartar_leva_o_bruto_junto(self):
+        self.criar_bruto()
+        self.assertEqual(self.json("POST", "/api/cortes/acao", {"nome": self.NOME, "acao": "descartar"})[0], 200)
+        self.assertFalse((self.saida / "_brutos" / self.NOME).exists())
+        self.assertTrue((self.saida / "_descartados" / "_brutos" / self.NOME).is_file())
+        self.assertTrue((self.saida / "_descartados" / self.NOME).is_file())
+
+    def test_o_gerar_cortes_falso_nao_recebe_opcoes_de_geracao_antigas(self):
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1})
+        texto = "\n".join(self.esperar_fim()["linhas"]).split("ARGS:")[-1].split("\n")[0]
+        self.assertNotIn("--layout-salvo", texto)
+        self.assertNotIn("--esperar-layout", texto)
 
 
-# ------------------------------------------------------------------ gerar_cortes.wait_for_layout_choice
-class TestEsperaNoScript(unittest.TestCase):
+# ------------------------------------------------------------------ gerar_cortes: corte bruto e --renderizar
+class BaseScript(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(self.tmp.name)
-        (self.dir / "layouts").mkdir()
-        self.espera = self.dir / "espera"
-        for alvo, valor in (("LAYOUTS_DIR", self.dir / "layouts"), ("LAYOUT_WAIT_DIR", self.espera)):
+        self.out = self.dir / "cortes_prontos"
+        self.temp = self.dir / "temp"
+        self.out.mkdir()
+        self.temp.mkdir()
+        for alvo, valor in (("OUTPUT_DIR", self.out), ("TEMP_DIR", self.temp), ("HISTORICO", None),
+                            ("GAMEPLAY_WATERMARK_PATH", str(self.dir / "nao_existe.png"))):
             p = mock.patch.object(g, alvo, valor)
             p.start()
             self.addCleanup(p.stop)
-        self.antigo = os.environ.pop("CORTES_LAYOUT", None)
+        self.env_antigo = {k: os.environ.get(k) for k in ("CORTES_GAMEPLAY_BRUTO", "CORTES_LAYOUT", "CORTES_RESUMO", "CORTES_CTA")}
+        for k in self.env_antigo:
+            os.environ.pop(k, None)
         self.addCleanup(self._restaurar)
         g.CUSTOM_LAYOUT = None
-        self.chamadas = []
-
-        def run(cmd, *a, **k):
-            self.chamadas.append(cmd)
-            Path(cmd[-1]).write_bytes(JPG)
-            return True, "", ""
-        p = mock.patch.object(g, "run_cmd", run)
-        p.start()
-        self.addCleanup(p.stop)
-        self.clips = [{"start": 100.0, "duration": 30.0}, {"start": 500.0, "duration": 40.0}]
+        g.STREAMER_NOME = None
 
     def _restaurar(self):
         g.CUSTOM_LAYOUT = None
-        os.environ.pop("CORTES_LAYOUT", None)
-        if self.antigo is not None:
-            os.environ["CORTES_LAYOUT"] = self.antigo
+        g.STREAMER_NOME = None
+        g.FIT_SUBTITLE_BELOW_VIDEO = False
+        for k, v in self.env_antigo.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
 
-    def decidir_depois(self, conteudo, atraso=0.3):
-        def escrever():
-            import time
-            time.sleep(atraso)
-            self.espera.mkdir(parents=True, exist_ok=True)
-            (self.espera / "decisao.json").write_text(json.dumps(conteudo), encoding="utf-8")
-        import threading
-        t = threading.Thread(target=escrever, daemon=True)
-        t.start()
-        return t
 
-    def rodar(self, **k):
-        import contextlib
-        import io
-        saida = io.StringIO()
-        with contextlib.redirect_stdout(saida):
-            resultado = g.wait_for_layout_choice(self.dir / "video.mp4", self.clips, poll=0.05, **k)
-        return resultado, saida.getvalue()
+SEGMENTOS = [
+    {"start": 95.0, "end": 103.0, "text": "antes do corte", "words": [{"word": "antes", "start": 95.0, "end": 96.0}]},
+    {"start": 100.0, "end": 108.0, "text": "olha so isso aqui", "words": [
+        {"word": "olha", "start": 101.0, "end": 101.5}, {"word": "so", "start": 101.5, "end": 102.0},
+        {"word": "isso", "start": 107.5, "end": 109.0}]},
+    {"start": 120.0, "end": 125.0, "text": "depois do fim", "words": []},
+    {"start": 200.0, "end": 210.0, "text": "bem depois"},
+]
 
-    def test_escolha_de_layout_salvo(self):
-        (self.dir / "layouts" / "alan-zoka.json").write_text(json.dumps(SALVO), encoding="utf-8")
-        t = self.decidir_depois({"acao": "salvo", "slug": "alan-zoka"})
-        resultado, texto = self.rodar(timeout=10)
-        t.join()
-        self.assertEqual(resultado, "salvo")
-        self.assertEqual(g.get_layout(), "custom")
-        self.assertIn(f"{g.LAYOUT_MARK_WAITING} espera-1.jpg espera-2.jpg", texto)
-        self.assertIn(g.LAYOUT_MARK_DONE, texto)
-        self.assertFalse(self.espera.exists())                         # limpou a pasta
 
-    def test_escolha_do_padrao(self):
-        t = self.decidir_depois({"acao": "padrao"})
-        resultado, _ = self.rodar(timeout=10)
-        t.join()
-        self.assertEqual(resultado, "padrao")
-        self.assertIsNone(g.CUSTOM_LAYOUT)
+class TestCorteBruto(BaseScript):
+    def test_padrao_ligado_e_desliga_com_env(self):
+        self.assertTrue(g.gameplay_bruto_enabled())
+        for v in ("0", "false", "off", "não"):
+            os.environ["CORTES_GAMEPLAY_BRUTO"] = v
+            self.assertFalse(g.gameplay_bruto_enabled(), v)
+        os.environ["CORTES_GAMEPLAY_BRUTO"] = "1"
+        self.assertTrue(g.gameplay_bruto_enabled())
 
-    def test_layout_inexistente_cai_no_padrao(self):
-        t = self.decidir_depois({"acao": "salvo", "slug": "fantasma"})
-        resultado, texto = self.rodar(timeout=10)
-        t.join()
-        self.assertEqual(resultado, "padrao")
-        self.assertIsNone(g.CUSTOM_LAYOUT)
-        self.assertIn("não foi encontrado", texto)
+    def test_segmentos_relativos(self):
+        rel = g.relative_segments(SEGMENTOS, 100.0, 110.0)
+        self.assertEqual([r["text"] for r in rel], ["antes do corte", "olha so isso aqui"])    # só os que tocam o trecho
+        self.assertEqual((rel[0]["start"], rel[0]["end"]), (-5.0, 3.0))
+        self.assertNotIn("words", rel[0])                                    # a palavra de antes do corte não entra
+        palavras = rel[1]["words"]
+        self.assertEqual([(w["word"], w["start"], w["end"]) for w in palavras],
+                         [("olha", 1.0, 1.5), ("so", 1.5, 2.0), ("isso", 7.5, 9.0)])
+        longa = [{"start": 100.0, "end": 120.0, "text": "x", "words": [{"word": "x", "start": 108.0, "end": 115.0}]}]
+        self.assertEqual(g.relative_segments(longa, 100.0, 110.0)[0]["words"], [{"word": "x", "start": 8.0, "end": 10.0}])
+        self.assertEqual(g.relative_segments(None, 0, 10), [])
 
-    def test_sem_resposta_no_prazo(self):
-        resultado, texto = self.rodar(timeout=0.3)
-        self.assertEqual(resultado, "tempo")
-        self.assertIn("no prazo", texto)
-        self.assertIn(g.LAYOUT_MARK_DONE, texto)
+    def test_export_raw_gameplay(self):
+        seg = self.temp / "segmento.mp4"
+        seg.write_bytes(b"VIDEO-BRUTO" * 100)
+        saida = self.out / "corte_gameplay_1_X.mp4"
+        clip = {"start": 100.0, "end": 110.0, "duration": 10.0, "score": 8.0, "reason": "r", "fonte": "f", "band": 2}
+        g.STREAMER_NOME = "Alan"
+        ok = g.export_raw_gameplay(clip, SEGMENTOS, saida, seg, {"titulo_gancho": "TÍTULO", "pergunta_cta": "E AÍ?", "nota": 88},
+                                   "ia_trecho_real", "olha so isso aqui", 4, 0.4)
+        self.assertTrue(ok)
+        bruto = self.out / "_brutos" / saida.name
+        self.assertEqual(bruto.read_bytes(), b"VIDEO-BRUTO" * 100)
+        self.assertEqual(saida.read_bytes(), bruto.read_bytes())
+        self.assertFalse(seg.exists())                                       # o pré-corte foi movido, não duplicado
+        self.assertNotEqual(os.stat(saida).st_ino, os.stat(bruto).st_ino)      # cópias independentes (não links)
+        meta = json.loads(saida.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual((meta["bruto"], meta["edicao"], meta["streamer"], meta["duracao_final_s"]),
+                         (True, {"estado": "bruto"}, "Alan", 10.0))
+        self.assertEqual((meta["titulo_gancho"], meta["clip_start"], meta["transcricao"]), ("TÍTULO", 100.0, "olha so isso aqui"))
+        self.assertEqual(len(meta["legenda_segmentos"]), 2)
+        self.assertNotIn("layout", meta)                                     # nenhum layout aplicado ainda
 
-    def test_decisao_velha_nao_vale(self):
-        self.espera.mkdir()
-        (self.espera / "decisao.json").write_text(json.dumps({"acao": "padrao"}), encoding="utf-8")
-        resultado, _ = self.rodar(timeout=0.3)
-        self.assertEqual(resultado, "tempo")                            # a pasta foi limpa no início
+    def test_export_raw_sem_segmento_falha_sem_criar_nada(self):
+        saida = self.out / "x.mp4"
+        self.assertFalse(g.export_raw_gameplay({"start": 0, "end": 5, "duration": 5}, [], saida, None, {}, "p", "t", 1, 0.1))
+        self.assertFalse(g.export_raw_gameplay({"start": 0, "end": 5, "duration": 5}, [], saida, self.temp / "nao.mp4", {}, "p", "t", 1, 0.1))
+        self.assertEqual(list(self.out.iterdir()), [])
 
-    def test_arquivo_estragado_e_ignorado_ate_ficar_valido(self):
-        def escrever():
-            import time
-            time.sleep(0.2)
-            self.espera.mkdir(parents=True, exist_ok=True)
-            (self.espera / "decisao.json").write_text("{pela metade", encoding="utf-8")
-            time.sleep(0.3)
-            (self.espera / "decisao.json").write_text(json.dumps({"acao": "padrao"}), encoding="utf-8")
-        import threading
-        threading.Thread(target=escrever, daemon=True).start()
-        resultado, _ = self.rodar(timeout=10)
-        self.assertEqual(resultado, "padrao")
+    def test_cut_and_export_gameplay_no_modo_bruto_nao_aplica_efeito_nenhum(self):
+        def pre_corte(video, start, dur, saida):
+            Path(saida).write_bytes(b"PRECORTE" * 50)
+            return True
 
-    def test_quadros_sao_do_meio_de_cada_trecho_e_no_maximo_quatro(self):
-        self.clips = [{"start": 100.0 * i, "duration": 50.0} for i in range(1, 8)]
-        self.rodar(timeout=0.2)
-        self.assertEqual(len(self.chamadas), g.LAYOUT_WAIT_MAX_FRAMES)
-        primeiro = self.chamadas[0]
-        self.assertEqual(primeiro[primeiro.index("-ss") + 1], "120.00")           # 100 + 40% de 50
+        def nao_pode(*a, **k):
+            raise AssertionError("não deve renderizar layout/legenda/resumo/chamada no modo bruto")
+        clip = {"start": 100.0, "end": 110.0, "duration": 10.0, "sem_checagem_fala": True,
+                "hook_data": {"titulo_gancho": "T", "pergunta_cta": "P", "nota": 90}}
+        saida = self.out / "corte_gameplay_1_Y.mp4"
+        with mock.patch.object(g, "extract_video_segment", pre_corte), \
+                mock.patch.object(g, "process_clipflow_layout", nao_pode), \
+                mock.patch.object(g, "create_karaoke_ass_subtitle", nao_pode), \
+                mock.patch.object(g, "add_summary_intro", nao_pode), mock.patch.object(g, "add_cta_outro", nao_pode):
+            ok = g.cut_and_export_gameplay(self.dir / "video.mp4", clip, SEGMENTOS, saida, 1, None, None)
+        self.assertTrue(ok)
+        self.assertEqual((self.out / "_brutos" / saida.name).read_bytes(), b"PRECORTE" * 50)
+        self.assertEqual(saida.read_bytes(), b"PRECORTE" * 50)
 
-    def test_sem_quadros_nao_espera(self):
-        with mock.patch.object(g, "run_cmd", lambda *a, **k: (False, "", "erro")):
+    def test_modo_antigo_continua_disponivel(self):
+        os.environ["CORTES_GAMEPLAY_BRUTO"] = "0"
+        chamadas = []
+
+        def pre_corte(video, start, dur, saida):
+            Path(saida).write_bytes(b"x" * 2000)
+            return True
+
+        def layout(**k):
+            chamadas.append(k)
+            Path(k["output_path"]).write_bytes(b"final")
+            return True
+        clip = {"start": 100.0, "end": 110.0, "duration": 10.0, "sem_checagem_fala": True,
+                "hook_data": {"titulo_gancho": "T", "pergunta_cta": "P", "nota": 90}}
+        saida = self.out / "corte_gameplay_1_Z.mp4"
+        with mock.patch.object(g, "extract_video_segment", pre_corte), mock.patch.object(g, "process_clipflow_layout", layout), \
+                mock.patch.object(g, "add_summary_intro", lambda *a, **k: None), mock.patch.object(g, "add_cta_outro", lambda *a, **k: None):
+            self.assertTrue(g.cut_and_export_gameplay(self.dir / "video.mp4", clip, SEGMENTOS, saida, 1, None, None))
+        self.assertEqual(len(chamadas), 1)
+        self.assertFalse((self.out / "_brutos").exists())
+
+    def test_main_pula_a_pergunta_da_webcam_no_modo_bruto(self):
+        fonte = (RAIZ / "gerar_cortes.py").read_text(encoding="utf-8")
+        self.assertIn("if gameplay_bruto_enabled():", fonte)
+        self.assertIn("Modo bruto: o corte sai com a tela completa", fonte)
+        self.assertEqual(g.DEFAULT_LAYOUT, "fit")
+
+
+class TestOpcoesDeEdicao(unittest.TestCase):
+    def test_validas(self):
+        o = g.normalize_edit_options(OPCOES_EMPILHADO)
+        self.assertEqual((o["layout"], o["cam_altura"], o["tarja"], o["resumo"]), ("empilhado", 640, True, False))
+        self.assertEqual(g.normalize_edit_options(OPCOES_INTEIRO),
+                         {"layout": "inteiro", "tarja": False, "legenda": True, "resumo": True, "cta": False})
+        self.assertEqual(g.normalize_edit_options({"layout": "inteiro"})["tarja"], True)       # padrão: tudo ligado
+
+    def test_invalidas(self):
+        for ruim in (None, [], {}, {"layout": "x"}, {**OPCOES_INTEIRO, "tarja": "sim"}, {**OPCOES_INTEIRO, "cta": None},
+                     {**OPCOES_EMPILHADO, "cam_altura": 5}, {**OPCOES_EMPILHADO, "ordem": "z"},
+                     {k: v for k, v in OPCOES_EMPILHADO.items() if k != "cam"},
+                     {**OPCOES_EMPILHADO, "game": {"x": 2, "y": 0, "w": 0.5, "h": 0.5}}):
+            self.assertIsNone(g.normalize_edit_options(ruim), repr(ruim)[:80])
+
+
+class TestRenderizarEdicao(BaseScript):
+    NOME = "corte_gameplay_1_X.mp4"
+
+    def montar(self, opcoes, meta_extra=None, com_bruto=True):
+        (self.out / "_brutos").mkdir()
+        (self.out / "_edicoes").mkdir()
+        if com_bruto:
+            (self.out / "_brutos" / self.NOME).write_bytes(b"BRUTO" * 100)
+        (self.out / self.NOME).write_bytes(b"BRUTO" * 100)
+        meta = {"titulo_gancho": "TÍTULO", "pergunta_cta": "E AÍ?", "nota": 90, "transcricao": "olha so isso aqui",
+                "clip_duration": 10.0, "streamer": "Alan", "bruto": True, "edicao": {"estado": "bruto"},
+                "legenda_segmentos": g.relative_segments(SEGMENTOS, 100.0, 110.0), **(meta_extra or {})}
+        (self.out / self.NOME).with_suffix(".json").write_text(json.dumps(meta), encoding="utf-8")
+        (self.out / "_edicoes" / "corte_gameplay_1_X.json").write_text(json.dumps(opcoes), encoding="utf-8")
+
+    def renderizar(self, ffmpeg_ok=True):
+        self.cmds = []
+        self.extras = {}
+
+        def run(cmd, *a, **k):
+            self.cmds.append(cmd)
+            if ffmpeg_ok and "-filter_complex" in cmd:
+                Path(cmd[-1]).write_bytes(b"EDITADO" * 100)
+            return ffmpeg_ok, "", ""
+
+        def intro(path, texto, chave, streamer=None):
+            self.extras["intro"] = (texto, streamer, os.environ.get("CORTES_RESUMO"))
+            return {"duracao_s": 7.0, "texto": "resumo"} if os.environ.get("CORTES_RESUMO") == "1" else None
+
+        def cta(path):
+            self.extras["cta"] = os.environ.get("CORTES_CTA")
+            return {"duracao_s": 5.0} if os.environ.get("CORTES_CTA") == "1" else None
+        with mock.patch.object(g, "run_cmd", run), mock.patch.object(g, "get_video_dimensions", lambda *_: (1920, 1080)), \
+                mock.patch.object(g, "load_env_file", lambda *a, **k: None), mock.patch.object(g, "get_groq_key", lambda: "chave"), \
+                mock.patch.object(g, "add_summary_intro", intro), mock.patch.object(g, "add_cta_outro", cta):
             import contextlib
             import io
-            with contextlib.redirect_stdout(io.StringIO()) as saida:
-                resultado = g.wait_for_layout_choice(self.dir / "video.mp4", self.clips, timeout=30, poll=0.05)
-        self.assertEqual(resultado, "padrao")
-        self.assertNotIn(g.LAYOUT_MARK_WAITING, saida.getvalue())
+            with contextlib.redirect_stdout(io.StringIO()):
+                return g.render_edit(self.NOME)
 
-    def test_flag_existe_e_so_espera_sem_layout_salvo(self):
+    def meta(self):
+        return json.loads((self.out / self.NOME).with_suffix(".json").read_text(encoding="utf-8"))
+
+    def test_empilhado_com_tudo(self):
+        self.montar({**OPCOES_EMPILHADO, "resumo": True, "cta": True})
+        self.assertTrue(self.renderizar())
+        self.assertEqual((self.out / self.NOME).read_bytes(), b"EDITADO" * 100)             # o visível foi trocado
+        self.assertEqual((self.out / "_brutos" / self.NOME).read_bytes(), b"BRUTO" * 100)    # o bruto não foi tocado
+        m = self.meta()
+        self.assertEqual((m["bruto"], m["layout"], m["edicao"]["estado"]), (False, "custom", "renderizado"))
+        self.assertEqual(m["edicao"]["opcoes"]["layout"], "empilhado")
+        self.assertEqual(m["duracao_final_s"], 22.0)                                    # 10 + resumo 7 + chamada 5
+        self.assertEqual(self.extras["intro"][:2], ("olha so isso aqui", "Alan"))
+        grafo = [c for c in self.cmds if "-filter_complex" in c][0]
+        grafo = grafo[grafo.index("-filter_complex") + 1]
+        self.assertIn("vstack=inputs=3", grafo)
+        self.assertIn("subtitles=", grafo)
+        self.assertEqual(str(self.out / "_brutos" / self.NOME), [c for c in self.cmds if "-filter_complex" in c][0][self.cmds[0].index("-i") + 1])
+
+    def test_opcoes_desligadas_nao_chamam_resumo_nem_chamada(self):
+        self.montar({**OPCOES_EMPILHADO, "tarja": False, "legenda": False, "resumo": False, "cta": False})
+        self.assertTrue(self.renderizar())
+        self.assertEqual((self.extras["intro"][2], self.extras["cta"]), ("0", "0"))
+        grafo = self.cmds[0][self.cmds[0].index("-filter_complex") + 1]
+        self.assertIn("vstack=inputs=2", grafo)                       # sem tarja: só os dois blocos
+        self.assertNotIn("subtitles=", grafo)                         # sem legenda
+        self.assertNotIn("-loop", self.cmds[0])                       # e sem imagem da faixa
+        m = self.meta()
+        self.assertEqual((m["resumo_intro"], m["cta_final"], m["duracao_final_s"]), (None, None, 10.0))
+
+    def test_tela_inteira_usa_o_fit_com_legenda_embaixo(self):
+        self.montar({**OPCOES_INTEIRO, "tarja": True})
+        self.assertTrue(self.renderizar())
+        self.assertEqual(self.meta()["layout"], "fit")
+        self.assertEqual(os.environ.get("CORTES_LAYOUT"), "fit")
+        gerados = list(self.temp.glob("*_fit.ass"))
+        self.assertTrue(gerados)
+        texto = gerados[0].read_text(encoding="utf-8")
+        import re
+        y = int(re.search(r"\\pos\(540,(\d+)\)", texto).group(1))
+        self.assertGreater(y, (1920 + 608) // 2)                       # abaixo da borda de baixo do vídeo, não por cima dele
+
+    def test_tela_inteira_sem_tarja_nao_desenha_o_titulo(self):
+        self.montar({**OPCOES_INTEIRO, "tarja": False})
+        with mock.patch.object(g, "create_hook_banner_image", side_effect=AssertionError("sem tarja não há banner")):
+            self.assertTrue(self.renderizar())
+
+    def test_falha_do_ffmpeg_deixa_o_corte_como_estava(self):
+        self.montar(OPCOES_EMPILHADO)
+        self.assertFalse(self.renderizar(ffmpeg_ok=False))
+        self.assertEqual((self.out / self.NOME).read_bytes(), b"BRUTO" * 100)
+        self.assertTrue(self.meta()["bruto"])
+
+    def test_sem_bruto_ou_opcoes_invalidas_ou_nome_ruim(self):
+        self.montar(OPCOES_EMPILHADO, com_bruto=False)
+        self.assertFalse(self.renderizar())
+        self.montar_invalida = (self.out / "_edicoes" / "corte_gameplay_1_X.json")
+        (self.out / "_brutos" / self.NOME).write_bytes(b"BRUTO")
+        self.montar_invalida.write_text(json.dumps({"layout": "x"}), encoding="utf-8")
+        self.assertFalse(self.renderizar())
+        for ruim in ("../x.mp4", "_x.mp4", "x.txt", ".mp4"):
+            self.assertFalse(g.render_edit(ruim), ruim)
+
+    def test_sem_legenda_guardada_renderiza_sem_ela(self):
+        self.montar(OPCOES_EMPILHADO, meta_extra={"legenda_segmentos": []})
+        self.assertTrue(self.renderizar())
+        grafo = self.cmds[0][self.cmds[0].index("-filter_complex") + 1]
+        self.assertNotIn("subtitles=", grafo)
+
+    def test_editar_de_novo_parte_sempre_do_bruto(self):
+        self.montar(OPCOES_EMPILHADO)
+        self.assertTrue(self.renderizar())
+        (self.out / "_edicoes" / "corte_gameplay_1_X.json").write_text(json.dumps(OPCOES_INTEIRO), encoding="utf-8")
+        self.assertTrue(self.renderizar())
+        entrada = self.cmds[0][self.cmds[0].index("-i") + 1]
+        self.assertEqual(entrada, str(self.out / "_brutos" / self.NOME))
+        self.assertEqual(self.meta()["edicao"]["opcoes"]["layout"], "inteiro")
+
+    def test_flag_renderizar_existe(self):
         fonte = (RAIZ / "gerar_cortes.py").read_text(encoding="utf-8")
-        self.assertIn('"--esperar-layout"', fonte)
-        self.assertIn("if args.esperar_layout and not CUSTOM_LAYOUT:", fonte)
+        self.assertIn('"--renderizar"', fonte)
+        self.assertIn("render_edit(args.renderizar)", fonte)
+
+
+class TestLayoutSemTarja(BaseScript):
+    def test_geometria_sem_faixa(self):
+        lay = g.normalize_saved_layout({**SALVO, "tarja": False})
+        geo = g.custom_geometry(1920, 1080, lay)
+        self.assertEqual((geo["band_h"], geo["cam_h"], geo["game_h"]), (0, 640, 1920 - 640))
+        self.assertEqual((geo["y_cam"], geo["y_band"], geo["y_game"]), (0, 640, 640))
+        lay = g.normalize_saved_layout({**SALVO, "tarja": False, "ordem": "game_primeiro"})
+        geo = g.custom_geometry(1920, 1080, lay)
+        self.assertEqual((geo["y_game"], geo["y_band"], geo["y_cam"]), (0, 1280, 1280))
+
+    def test_tarja_precisa_ser_bool(self):
+        self.assertIsNone(g.normalize_saved_layout({**SALVO, "tarja": "sim"}))
+        self.assertTrue(g.normalize_saved_layout(SALVO)["tarja"])                     # padrão: com tarja
+
+    def test_comando_sem_faixa(self):
+        geo = g.custom_geometry(1920, 1080, g.normalize_saved_layout({**SALVO, "tarja": False}))
+        ass = self.temp / "s.ass"
+        ass.write_text("Style: Default,Arial,62,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,40,40,320,1\n"
+                       "Dialogue: 0,0:00:01.00,0:00:02.00,Karaoke,,0,0,0,karaoke,{\\pos(540,835)}OI\n", encoding="utf-8")
+        cmd = g.build_cam_cmd(self.dir / "in.mp4", self.dir / "out.mp4", ass, self.dir / "faixa.png", geo, 30.0)
+        grafo = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("[cam][game]vstack=inputs=2", grafo)
+        self.assertNotIn("[1:v]", grafo)
+        self.assertNotIn("-loop", cmd)
+        self.assertIn("\\pos(540,640)", (self.temp / "s_cam.ass").read_text(encoding="utf-8"))    # legenda na junção dos blocos
+
+    def test_com_faixa_continua_igual(self):
+        geo = g.custom_geometry(1920, 1080, g.normalize_saved_layout(SALVO))
+        cmd = g.build_cam_cmd(self.dir / "in.mp4", self.dir / "out.mp4", None, self.dir / "faixa.png", geo, 30.0)
+        self.assertIn("[cam][1:v][game]vstack=inputs=3", cmd[cmd.index("-filter_complex") + 1])
+        self.assertIn("-loop", cmd)
 
 if __name__ == "__main__":
     unittest.main()

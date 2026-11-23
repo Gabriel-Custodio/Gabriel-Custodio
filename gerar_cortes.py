@@ -153,7 +153,7 @@ CLIPFLOW_KARAOKE_MARGIN_V = 220                # MarginV para área do gameplay 
 # Nada é recortado nem ampliado além do necessário para caber na largura; o espaço que sobra em
 # cima e embaixo recebe um fundo (cópia desfocada do próprio vídeo, ou preto). O layout antigo
 # de 3 camadas (webcam recortada + gameplay com zoom) fica disponível com CORTES_LAYOUT=clipflow.
-DEFAULT_LAYOUT = "cam"          # "cam", "fit" ou "clipflow"; troque no .env com CORTES_LAYOUT
+DEFAULT_LAYOUT = "fit"          # "fit", "cam" ou "clipflow"; troque no .env com CORTES_LAYOUT
 # Layout "cam" (PADRÃO no modo gameplay): de cima para baixo, a CÂMERA do streamer (largura toda), uma faixa
 # vermelha com a legenda e a linha fixa "curta, comente e compartilhe" e o GAMEPLAY preenchendo o resto
 # (recorte central, sem barras). A câmera é recortada na proporção do bloco, com uma folga em volta da caixa
@@ -170,20 +170,13 @@ LAYOUTS_DIR = Path("layouts_salvos")
 CUSTOM_CAM_MIN_HEIGHT = 300
 CUSTOM_CAM_MAX_HEIGHT = 1100
 CUSTOM_ORDERS = ("cam_primeiro", "game_primeiro")
-# Escolha do layout durante a geração (--esperar-layout, usado pela interface): depois de baixar o vídeo e
-# escolher os trechos, o script tira alguns quadros, avisa a interface com uma linha marcada e ESPERA o arquivo
-# decisao.json (layout salvo ou padrão) antes de renderizar. Sem resposta no prazo, segue com o layout padrão.
-LAYOUT_WAIT_DIR = Path("temp_layout")
-LAYOUT_WAIT_TIMEOUT = 1800          # segundos
-LAYOUT_WAIT_POLL = 1.0
-LAYOUT_WAIT_MAX_FRAMES = 4
-LAYOUT_MARK_WAITING = "@@LAYOUT_AGUARDANDO@@"
-LAYOUT_MARK_DONE = "@@LAYOUT_DECIDIDO@@"
 CAM_SUBTITLE_CENTER_Y = 86      # centro da legenda (px, dentro da faixa)
 CAM_BAND_CTA_SIZE = 34          # fonte da linha fixa dentro da faixa
 CAM_BAND_CTA_Y = 160            # posição vertical (px dentro da faixa) da linha fixa
 FIT_BACKGROUND = "blur"         # "blur" (fundo desfocado) ou "black" (preto); .env: CORTES_FUNDO
 FIT_SHOW_HOOK = True            # faixa do gancho acima do vídeo, se sobrar espaço
+FIT_SUBTITLE_BELOW_VIDEO = False  # True (só na edição do corte): a legenda karaokê vai para baixo do vídeo, não por cima
+FIT_SUBTITLE_BELOW_GAP = 130    # distância (px) do centro da legenda até a borda de baixo do vídeo
 FIT_HOOK_GAP = 24               # distância (px) entre a faixa do gancho e o vídeo
 FIT_SUBTITLE_MARGIN_V = 420     # altura da legenda (px a partir da base), na área abaixo do vídeo
 QUALITY_CRF = 17                # qualidade da saída (menor = melhor; 17 é quase sem perdas visíveis)
@@ -3698,7 +3691,13 @@ def export_fit_layout(input_path, output_path, ass_path, hook_data, effective_du
                 next_input += 1
 
     if ass_path and Path(ass_path).exists():
-        fit_ass = retarget_ass_for_fit(ass_path, TEMP_DIR / f"{Path(ass_path).stem}_fit.ass")
+        sub_y = None
+        if FIT_SUBTITLE_BELOW_VIDEO and not simple:
+            sw, sh = get_video_dimensions(input_path)
+            _, fgh = fit_geometry(sw, sh)
+            if fgh:
+                sub_y = min((h + fgh) // 2 + FIT_SUBTITLE_BELOW_GAP, h - 120)
+        fit_ass = retarget_ass_for_fit(ass_path, TEMP_DIR / f"{Path(ass_path).stem}_fit.ass", pos_y=sub_y)
         graph += f";{label}subtitles='{Path(fit_ass).as_posix().replace(':', chr(92) + ':')}'[withsubs]"
         label = "[withsubs]"
 
@@ -3844,6 +3843,7 @@ def cam_geometry(src_w, src_h, webcam_pos):
     return {
         "crop_x": x0, "crop_y": y0, "crop_w": crop_w, "crop_h": crop_h,
         "ampliacao": round(VERTICAL_WIDTH / crop_w, 2),
+        "band_h": CAM_BAND_HEIGHT,
         "cam_h": CAM_TOP_HEIGHT, "game_h": CAM_GAME_HEIGHT, "game_crop": None,   # None = recorte central
         "y_cam": 0, "y_band": CAM_TOP_HEIGHT, "y_game": CAM_TOP_HEIGHT + CAM_BAND_HEIGHT,
     }
@@ -3882,8 +3882,11 @@ def normalize_saved_layout(data):
     ordem = data.get("ordem", "cam_primeiro")
     if ordem not in CUSTOM_ORDERS:
         return None
+    tarja = data.get("tarja", True)                 # faixa vermelha entre os blocos (sem ela, os blocos ficam colados)
+    if not isinstance(tarja, bool):
+        return None
     return {"nome": str(data.get("nome") or "")[:60], "cam": cam, "game": game,
-            "cam_altura": cam_altura, "ordem": ordem}
+            "cam_altura": cam_altura, "ordem": ordem, "tarja": tarja}
 
 
 def load_saved_layout(name):
@@ -3915,63 +3918,6 @@ def activate_saved_layout(name):
     return True
 
 
-def wait_for_layout_choice(video_path, clips, timeout=None, poll=None):
-    """Pausa a geração até a interface devolver a escolha do layout. Devolve 'salvo', 'padrao' ou 'tempo'.
-
-    Tira um quadro do meio de cada trecho escolhido (até LAYOUT_WAIT_MAX_FRAMES) em temp_layout/espera-N.jpg,
-    imprime LAYOUT_MARK_WAITING com os nomes e espera temp_layout/decisao.json:
-    {"acao": "salvo", "slug": "..."} ou {"acao": "padrao"}. Nunca levanta erro: qualquer problema = layout padrão.
-    """
-    timeout = LAYOUT_WAIT_TIMEOUT if timeout is None else timeout
-    poll = LAYOUT_WAIT_POLL if poll is None else poll
-    folder = LAYOUT_WAIT_DIR
-    shutil.rmtree(folder, ignore_errors=True)
-    try:
-        folder.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        print(f"   ⚠️  Não foi possível preparar a escolha de layout ({e}); usando o layout padrão.")
-        return "padrao"
-    frames = []
-    for i, clip in enumerate(clips[:LAYOUT_WAIT_MAX_FRAMES], 1):
-        out = folder / f"espera-{i}.jpg"
-        at = clip["start"] + clip["duration"] * 0.4
-        ok, _, _ = run_cmd([FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{at:.2f}",
-                            "-i", str(video_path), "-vframes", "1", "-q:v", "2", str(out)])
-        if ok and out.exists():
-            frames.append(out.name)
-    if not frames:
-        print("   ⚠️  Não foi possível tirar quadros do vídeo para a escolha de layout; usando o layout padrão.")
-        shutil.rmtree(folder, ignore_errors=True)
-        return "padrao"
-    print(f"\n⏸  Vídeo pronto. Escolha o layout na interface (aba Layout); o corte continua depois da sua escolha "
-          f"(espera até {int(timeout // 60)} min).")
-    print(f"{LAYOUT_MARK_WAITING} {' '.join(frames)}", flush=True)
-    decision_file = folder / "decisao.json"
-    decision, deadline = None, time.time() + timeout
-    while time.time() < deadline:
-        if decision_file.exists():
-            try:
-                decision = json.loads(decision_file.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                time.sleep(0.2)                  # arquivo ainda sendo gravado
-                continue
-            break
-        time.sleep(poll)
-    print(LAYOUT_MARK_DONE, flush=True)
-    shutil.rmtree(folder, ignore_errors=True)
-    if not isinstance(decision, dict):
-        print("   ⚠️  Sem resposta sobre o layout no prazo: usando o layout padrão.")
-        return "tempo"
-    if decision.get("acao") == "salvo":
-        if activate_saved_layout(str(decision.get("slug") or "")):
-            print(f"🎨 Layout escolhido: {CUSTOM_LAYOUT.get('nome') or CUSTOM_LAYOUT['slug']}")
-            return "salvo"
-        print("   ⚠️  O layout escolhido não foi encontrado ou é inválido: usando o layout padrão.")
-        return "padrao"
-    print("🎨 Layout padrão escolhido.")
-    return "padrao"
-
-
 def custom_geometry(src_w, src_h, layout):
     """Medidas do layout personalizado (mesmo formato do cam_geometry), ou None se não der."""
     if src_w <= 0 or src_h <= 0 or not layout:
@@ -3988,15 +3934,16 @@ def custom_geometry(src_w, src_h, layout):
     if min(cw, ch, gw, gh) < 16:
         return None
     cam_h = int(layout["cam_altura"])
-    game_h = VERTICAL_HEIGHT - cam_h - CAM_BAND_HEIGHT
+    band_h = CAM_BAND_HEIGHT if layout.get("tarja", True) else 0
+    game_h = VERTICAL_HEIGHT - cam_h - band_h
     if layout.get("ordem") == "game_primeiro":
-        y_game, y_band, y_cam = 0, game_h, game_h + CAM_BAND_HEIGHT
+        y_game, y_band, y_cam = 0, game_h, game_h + band_h
     else:
-        y_cam, y_band, y_game = 0, cam_h, cam_h + CAM_BAND_HEIGHT
+        y_cam, y_band, y_game = 0, cam_h, cam_h + band_h
     return {
         "crop_x": cx, "crop_y": cy, "crop_w": cw, "crop_h": ch,
         "ampliacao": round(VERTICAL_WIDTH / cw, 2),
-        "cam_h": cam_h, "game_h": game_h, "game_crop": (gx, gy, gw, gh),
+        "band_h": band_h, "cam_h": cam_h, "game_h": game_h, "game_crop": (gx, gy, gw, gh),
         "y_cam": y_cam, "y_band": y_band, "y_game": y_game,
     }
 
@@ -4057,7 +4004,9 @@ def build_cam_cmd(input_path, output_path, ass_path, band_path, geo, effective_d
         game_src = f"crop={gw}:{gh}:{gx}:{gy},"
     else:                                     # layout cam: recorte central
         game_src = ""
-    ordem = "[cam][1:v][game]" if geo["y_cam"] < geo["y_game"] else "[game][1:v][cam]"
+    band_h = geo.get("band_h", CAM_BAND_HEIGHT)
+    primeiro, segundo = ("[cam]", "[game]") if geo["y_cam"] < geo["y_game"] else ("[game]", "[cam]")
+    ordem = f"{primeiro}[1:v]{segundo}" if band_h > 0 else f"{primeiro}{segundo}"
     graph = (
         f"[0:v]setpts=PTS-STARTPTS,split=2[a][b];"
         f"[a]crop={geo['crop_w']}:{geo['crop_h']}:{geo['crop_x']}:{geo['crop_y']},"
@@ -4065,14 +4014,15 @@ def build_cam_cmd(input_path, output_path, ass_path, band_path, geo, effective_d
         f"crop={w}:{geo['cam_h']},setsar=1[cam];"
         f"[b]{game_src}scale={w}:{geo['game_h']}:force_original_aspect_ratio=increase:flags=lanczos,"
         f"crop={w}:{geo['game_h']},setsar=1[game];"
-        f"{ordem}vstack=inputs=3[canvas]"
+        f"{ordem}vstack=inputs={3 if band_h > 0 else 2}[canvas]"
     )
     label = "[canvas]"
 
     if ass_path and Path(ass_path).exists():
         # a legenda karaokê usa \pos fixo: é ele que precisa ir para dentro da faixa
         cam_ass = retarget_ass_for_fit(ass_path, TEMP_DIR / f"{Path(ass_path).stem}_cam.ass",
-                                       alignment="5", margin_v=0, pos_y=geo["y_band"] + CAM_SUBTITLE_CENTER_Y)
+                                       alignment="5", margin_v=0,
+                                       pos_y=geo["y_band"] + (CAM_SUBTITLE_CENTER_Y if band_h > 0 else 0))
         graph += f";{label}subtitles='{Path(cam_ass).as_posix().replace(':', chr(92) + ':')}'[withsubs]"
         label = "[withsubs]"
 
@@ -4090,7 +4040,7 @@ def build_cam_cmd(input_path, output_path, ass_path, band_path, geo, effective_d
     return [
         FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error", "-fflags", "+genpts",
         "-i", str(input_path),
-        "-loop", "1", "-framerate", "30", "-t", str(effective_duration), "-i", str(band_path),
+        *(["-loop", "1", "-framerate", "30", "-t", str(effective_duration), "-i", str(band_path)] if band_h > 0 else []),
         "-filter_complex", graph,
         "-map", "[vout]", "-map", "0:a?",
         "-af", af,
@@ -4124,7 +4074,7 @@ def process_cam_layout(input_path, output_path, webcam_pos, ass_path, hook_data,
     if geo is None:
         return to_fit("caixa da câmera/gameplay inválida")
     band_path = TEMP_DIR / "faixa_cam.png"
-    if not create_cam_band_image(banner_cta_line(), band_path):
+    if geo.get("band_h", CAM_BAND_HEIGHT) > 0 and not create_cam_band_image(banner_cta_line(), band_path):
         return to_fit("não foi possível desenhar a faixa vermelha")
 
     if custom:
@@ -4818,6 +4768,206 @@ def imprimir_relatorio_extras():
 
 STREAMER_NOME = None   # nome do streamer do vídeo atual (preenchido no main; usado no resumo)
 
+# Modo gameplay "bruto" (padrão): a geração só RECORTA o trecho (tela completa, sem fundo desfocado, tarja, legenda,
+# resumo nem chamada final) e guarda o necessário para editar depois (menu Editar da interface, --renderizar):
+#   cortes_prontos/NOME.mp4            versão atual (começa igual ao bruto; vira a versão editada)
+#   cortes_prontos/_brutos/NOME.mp4    o bruto original, que nunca é alterado (cada edição parte dele)
+#   cortes_prontos/_edicoes/NOME.json  as últimas opções de edição
+#   cortes_prontos/NOME.json           metadados + legenda (palavras com tempo, relativas ao início do corte)
+# Volta ao comportamento antigo (renderiza o layout na hora) com CORTES_GAMEPLAY_BRUTO=0 no .env.
+GAMEPLAY_BRUTO_DEFAULT = True
+BRUTOS_DIR_NAME = "_brutos"
+EDICOES_DIR_NAME = "_edicoes"
+
+
+def gameplay_bruto_enabled():
+    value = os.environ.get("CORTES_GAMEPLAY_BRUTO")
+    if value is None or not value.strip():
+        return GAMEPLAY_BRUTO_DEFAULT
+    return value.strip().lower() not in ("0", "false", "nao", "não", "off", "no")
+
+
+def relative_segments(segments, start, end):
+    """Segmentos da transcrição que tocam [start, end], com os tempos relativos ao início do corte."""
+    length = end - start
+    out = []
+    for seg in segments or []:
+        if seg['end'] <= start or seg['start'] >= end:
+            continue
+        item = {'start': round(seg['start'] - start, 3), 'end': round(seg['end'] - start, 3), 'text': seg['text']}
+        words = []
+        for w in seg.get('words') or []:
+            ws, we = w['start'] - start, w['end'] - start
+            if we > 0 and ws < length:
+                words.append({'word': w['word'], 'start': round(max(0.0, ws), 3), 'end': round(min(length, we), 3)})
+        if words:
+            item['words'] = words
+        out.append(item)
+    return out
+
+
+def export_raw_gameplay(clip, segments, output_path, segment_path, hook_data, hook_source, clip_text, clip_words, clip_wps):
+    """Guarda o corte BRUTO (o pré-corte, sem nenhum efeito) e o .json com tudo para editar depois."""
+    if segment_path is None or not Path(segment_path).exists():
+        print("   ❌ Não foi possível recortar o trecho do vídeo.")
+        return False
+    output_path = Path(output_path)
+    raw_dir = OUTPUT_DIR / BRUTOS_DIR_NAME
+    try:
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        raw_path = raw_dir / output_path.name
+        shutil.move(str(segment_path), str(raw_path))
+        shutil.copy2(str(raw_path), str(output_path))
+    except OSError as e:
+        print(f"   ❌ Não foi possível guardar o corte bruto: {e}")
+        return False
+    metadata = {
+        "titulo_gancho": hook_data.get("titulo_gancho", ""),
+        "pergunta_cta": hook_data.get("pergunta_cta", ""),
+        "nota": hook_data.get("nota", 0),
+        "transcricao": clip_text,
+        "transcricao_fonte": "transcrição real do intervalo do corte",
+        "video_id": HISTORICO.video_key if HISTORICO else None,
+        "video_url": HISTORICO.video_url if HISTORICO else None,
+        "palavras": clip_words,
+        "palavras_por_segundo": round(clip_wps, 2) if clip_wps is not None else None,
+        "fonte_titulo": hook_source,
+        "score_selecao": clip.get('score'),
+        "motivo_selecao": clip.get('reason'),
+        "fonte_selecao": clip.get('fonte'),
+        "faixa_do_video": clip.get('band'),
+        "clip_start": clip['start'],
+        "clip_end": clip['end'],
+        "clip_duration": clip['duration'],
+        "streamer": STREAMER_NOME,
+        "bruto": True,
+        "edicao": {"estado": "bruto"},
+        "legenda_segmentos": relative_segments(segments, clip['start'], clip['end']),
+        "duracao_final_s": round(clip['duration'], 2),
+        "timestamp": datetime.now().isoformat(),
+    }
+    try:
+        with open(output_path.with_suffix('.json'), 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+        print(f"   📄 Metadados salvos: {output_path.with_suffix('.json').name}")
+    except Exception as e:
+        print(f"   ⚠️  Erro ao salvar JSON: {e}")
+    print(f"✅ Corte bruto salvo: {output_path}  (edite o layout, a tarja e a legenda na aba Cortes prontos)")
+    return True
+
+
+def normalize_edit_options(data):
+    """Valida as opções de edição de um corte. None se algo estiver errado (nunca levanta erro)."""
+    if not isinstance(data, dict) or data.get("layout") not in ("inteiro", "empilhado"):
+        return None
+    opts = {"layout": data["layout"]}
+    for key in ("tarja", "legenda", "resumo", "cta"):
+        value = data.get(key, True)
+        if not isinstance(value, bool):
+            return None
+        opts[key] = value
+    if opts["layout"] == "empilhado":
+        lay = normalize_saved_layout({"nome": data.get("nome_layout") or "", "cam": data.get("cam"), "game": data.get("game"),
+                                      "cam_altura": data.get("cam_altura", CAM_TOP_HEIGHT),
+                                      "ordem": data.get("ordem", "cam_primeiro"), "tarja": opts["tarja"]})
+        if lay is None:
+            return None
+        opts.update({"cam": lay["cam"], "game": lay["game"], "cam_altura": lay["cam_altura"], "ordem": lay["ordem"]})
+    return opts
+
+
+def render_edit(name):
+    """Renderiza de novo um corte a partir do BRUTO, com as opções de _edicoes/NOME.json. True se deu certo.
+
+    Só troca o arquivo visível (cortes_prontos/NOME.mp4) quando o resultado completo está pronto: se algo falhar,
+    o corte continua como estava.
+    """
+    global CUSTOM_LAYOUT, STREAMER_NOME, FIT_SUBTITLE_BELOW_VIDEO
+    name = Path(str(name)).name
+    if not name.lower().endswith(".mp4") or name.startswith((".", "_")):
+        print(f"❌ Nome de corte inválido: {name!r}")
+        return False
+    visible = OUTPUT_DIR / name
+    raw = OUTPUT_DIR / BRUTOS_DIR_NAME / name
+    meta_path = visible.with_suffix(".json")
+    opts_path = OUTPUT_DIR / EDICOES_DIR_NAME / f"{visible.stem}.json"
+    if not raw.is_file():
+        print(f"❌ O corte bruto não foi encontrado ({raw}). Só dá para editar cortes gerados no modo bruto.")
+        return False
+    try:
+        opts = normalize_edit_options(json.loads(opts_path.read_text(encoding="utf-8")))
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        opts, meta = None, None
+    if opts is None or not isinstance(meta, dict):
+        print("❌ Opções de edição ou metadados inválidos.")
+        return False
+
+    print(f"🎬 Renderizando de novo: {name}")
+    print(f"   Layout: {'câmera + gameplay (caixas)' if opts['layout'] == 'empilhado' else 'tela inteira'} | "
+          f"tarja: {'sim' if opts['tarja'] else 'não'} | legenda: {'sim' if opts['legenda'] else 'não'} | "
+          f"resumo: {'sim' if opts['resumo'] else 'não'} | chamada final: {'sim' if opts['cta'] else 'não'}")
+    load_env_file()
+    groq_api_key = get_groq_key()
+    ensure_dirs()
+    duration = float(meta.get("clip_duration") or 0) or get_video_duration(raw)
+    text = str(meta.get("transcricao") or "")
+    hook = {"titulo_gancho": meta.get("titulo_gancho", ""), "pergunta_cta": meta.get("pergunta_cta", ""), "nota": meta.get("nota", 0)}
+    STREAMER_NOME = meta.get("streamer") or None
+    os.environ["CORTES_RESUMO"] = "1" if opts["resumo"] else "0"
+    os.environ["CORTES_CTA"] = "1" if opts["cta"] else "0"
+
+    ass_path = None
+    if opts["legenda"]:
+        ass_path = TEMP_DIR / f"edicao_{visible.stem}_subs.ass"
+        segs = meta.get("legenda_segmentos") or []
+        if not segs or not create_karaoke_ass_subtitle(segs, 0.0, duration, duration, ass_path):
+            print("   ⚠️  Sem legenda disponível para este corte; renderizando sem ela.")
+            ass_path = None
+
+    if opts["layout"] == "empilhado":
+        CUSTOM_LAYOUT = {"nome": "edição do corte", "slug": "edicao", "cam": opts["cam"], "game": opts["game"],
+                         "cam_altura": opts["cam_altura"], "ordem": opts["ordem"], "tarja": opts["tarja"]}
+        os.environ["CORTES_LAYOUT"] = "custom"
+    else:
+        CUSTOM_LAYOUT = None
+        os.environ["CORTES_LAYOUT"] = "fit"
+        FIT_SUBTITLE_BELOW_VIDEO = True
+
+    tmp_out = TEMP_DIR / f"edicao_{visible.stem}.mp4"
+    ok = process_clipflow_layout(input_path=raw, output_path=tmp_out, webcam_pos=None, ass_path=ass_path,
+                                 hook_data=hook if opts["tarja"] else None, clip_duration=duration,
+                                 groq_api_key=groq_api_key, clip_text=text, audio_mode="original")
+    if not ok or not tmp_out.exists():
+        print("❌ Falha ao renderizar: o corte continua como estava.")
+        return False
+    intro_info = add_summary_intro(tmp_out, text, groq_api_key, STREAMER_NOME)
+    cta_info = add_cta_outro(tmp_out)
+    try:
+        os.replace(str(tmp_out), str(visible))
+    except OSError as e:
+        print(f"❌ Não foi possível trocar o corte: {e}")
+        return False
+    meta.update({
+        "bruto": False, "layout": LAYOUT_APLICADO, "camera_ampliacao": CAM_AMPLIACAO,
+        "layout_salvo": None, "resumo_intro": intro_info, "cta_final": cta_info,
+        "duracao_final_s": round(duration + (intro_info["duracao_s"] if intro_info else 0)
+                                 + (cta_info["duracao_s"] if cta_info else 0), 2),
+        "edicao": {"estado": "renderizado", "opcoes": opts, "em": datetime.now().isoformat()},
+    })
+    try:
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as e:
+        print(f"   ⚠️  Erro ao salvar JSON: {e}")
+    for pendente in (ass_path, ):
+        if pendente:
+            try:
+                Path(pendente).unlink()
+            except OSError:
+                pass
+    print(f"✅ Corte renderizado: {visible}")
+    return True
+
 
 def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, webcam_pos, groq_api_key=None):
     """Corta vídeo no modo Gameplay/Streamer (layout cam por padrão; fit e clipflow disponíveis), 1080x1920."""
@@ -4853,7 +5003,9 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
         use_temp_segment = True
 
     ass_path = TEMP_DIR / f"gameplay_clip_{clip_num}_subs.ass"
-    if not create_karaoke_ass_subtitle(segments, clip['start'], clip['end'], clip['duration'], ass_path):
+    if gameplay_bruto_enabled():
+        ass_path = None                         # corte bruto: a legenda só entra na edição
+    elif not create_karaoke_ass_subtitle(segments, clip['start'], clip['end'], clip['duration'], ass_path):
         print("   ⚠️  Falha ao criar legendas karaokê, exportando sem...")
         ass_path = None
 
@@ -4874,6 +5026,10 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
             "nota": 75
         }
         hook_source = "padrao"
+
+    if gameplay_bruto_enabled():
+        return export_raw_gameplay(clip, segments, output_path, temp_segment_path if use_temp_segment else None,
+                                   hook_data, hook_source, clip_text, clip_words, clip_wps)
 
     success = process_clipflow_layout(
         input_path=input_video_path,
@@ -5184,8 +5340,8 @@ def main():
                              "ex.: 0.78,0.37,0.21,0.22. Tem prioridade sobre --webcam e a detecção por IA")
     parser.add_argument("--layout-salvo", metavar="NOME",
                         help="Modo gameplay: usa um layout criado no editor da interface (pasta layouts_salvos/)")
-    parser.add_argument("--esperar-layout", action="store_true",
-                        help="Modo gameplay (usado pela interface): depois de baixar o vídeo, pausa até o layout ser escolhido no editor")
+    parser.add_argument("--renderizar", metavar="CORTE.mp4",
+                        help="Renderiza de novo um corte bruto com as opções salvas em cortes_prontos/_edicoes/ (usado pelo menu Editar da interface)")
     parser.add_argument("--cortes", type=int, metavar="N",
                         help="Modo gameplay: quantidade de cortes (1-10), sem perguntar no terminal")
     parser.add_argument("--repetir", action="store_true",
@@ -5209,6 +5365,12 @@ def main():
             print(f"❌ Layout salvo não encontrado ou inválido: {args.layout_salvo!r} (procurei em {LAYOUTS_DIR}{os.sep}).")
             sys.exit(1)
         print(f"🎨 Layout personalizado: {CUSTOM_LAYOUT.get('nome') or CUSTOM_LAYOUT['slug']}")
+
+    if args.renderizar:
+        if not resolve_ffmpeg():
+            print(f"❌ ffmpeg não encontrado em {FFMPEG} nem no PATH")
+            sys.exit(1)
+        sys.exit(0 if render_edit(args.renderizar) else 1)
 
     if args.repair:
         print("=" * 60)
@@ -5345,10 +5507,10 @@ def main():
 
     global STREAMER_NOME
     STREAMER_NOME = None
-    if audio_mode == "gameplay" and summary_intro_enabled():
+    if audio_mode == "gameplay" and (summary_intro_enabled() or gameplay_bruto_enabled()):
         STREAMER_NOME = resolve_streamer_name(fetch_video_info(url_limpa), args.streamer)
         if STREAMER_NOME:
-            print(f"🎙️  Nome do streamer para o resumo: {STREAMER_NOME}")
+            print(f"🎙️  Nome do streamer (usado no resumo narrado da edição): {STREAMER_NOME}")
         else:
             print("🎙️  Nome do streamer não identificado (canal de cortes ou sem dados): o resumo dirá \"o streamer\". "
                   "Informe com --streamer \"NOME\" ou no campo da interface.")
@@ -5403,47 +5565,52 @@ def main():
 
         audio_mode = "original"
 
-        webcam_choice = args.webcam
-        camera_manual = None
-        if get_layout() == "custom":
-            print("\n🎮 Layout personalizado: a câmera e o gameplay vêm das caixas salvas no editor (pergunta da webcam dispensada).")
-            args.camera = None
-        if args.camera:
-            camera_manual = parse_camera_box(args.camera)
-            if camera_manual is None:
-                print(f"❌ --camera inválido: {args.camera!r}. Use X,Y,LARGURA,ALTURA entre 0 e 1 (ex.: 0.78,0.37,0.21,0.22).")
-                sys.exit(1)
-        if camera_manual is not None:
-            print(f"\n🎮 Câmera do streamer definida por --camera: x={camera_manual['x']:.3f}, y={camera_manual['y']:.3f}, "
-                  f"w={camera_manual['w']:.3f}, h={camera_manual['h']:.3f}")
-            webcam_pos = camera_manual
-        elif get_layout() == "custom":
+        if gameplay_bruto_enabled():
+            # Corte bruto: nada de câmera/layout agora (a câmera e o gameplay são escolhidos no menu Editar)
+            print("\n🎮 Modo bruto: o corte sai com a tela completa; o layout, a tarja e a legenda são escolhidos depois, em Cortes prontos > Editar.")
             webcam_pos = None
         else:
-            if webcam_choice is None and get_layout() == "cam":
-                # Layout cam: a câmera vai em cima. Sem --webcam, a IA procura a câmera num quadro do vídeo;
-                # sem chave da Groq, pergunta no terminal (ou, sem terminal, cai no layout fit).
-                if groq_api_key:
-                    webcam_choice = "6"
-                elif sys.stdin is not None and sys.stdin.isatty():
-                    webcam_choice = None
-                else:
-                    print("\n🎮 Layout cam: sem --webcam/--camera e sem GROQ_API_KEY para detectar a câmera; usando o layout fit.")
-                    webcam_choice = "7"
-            if webcam_choice is None and get_layout() == "fit":
-                # No layout fit o vídeo aparece inteiro (a webcam já está dentro dele): nada a recortar.
-                print("\n🎮 Layout fit: o vídeo aparece inteiro, a webcam não é recortada (pergunta dispensada).")
+            webcam_choice = args.webcam
+            camera_manual = None
+            if get_layout() == "custom":
+                print("\n🎮 Layout personalizado: a câmera e o gameplay vêm das caixas salvas no editor (pergunta da webcam dispensada).")
+                args.camera = None
+            if args.camera:
+                camera_manual = parse_camera_box(args.camera)
+                if camera_manual is None:
+                    print(f"❌ --camera inválido: {args.camera!r}. Use X,Y,LARGURA,ALTURA entre 0 e 1 (ex.: 0.78,0.37,0.21,0.22).")
+                    sys.exit(1)
+            if camera_manual is not None:
+                print(f"\n🎮 Câmera do streamer definida por --camera: x={camera_manual['x']:.3f}, y={camera_manual['y']:.3f}, "
+                      f"w={camera_manual['w']:.3f}, h={camera_manual['h']:.3f}")
+                webcam_pos = camera_manual
+            elif get_layout() == "custom":
                 webcam_pos = None
             else:
-                webcam_pos = ask_webcam_position(video_path, groq_api_key, choice=webcam_choice)
-                if webcam_pos is False:
-                    print("❌ Posição da webcam inválida ou cancelada. Cancelando.")
-                    sys.exit(1)
-        if get_layout() == "cam":
-            if webcam_pos:
-                save_camera_preview(video_path, webcam_pos, OUTPUT_DIR / CAMERA_PREVIEW_NAME)
-            else:
-                print("   ℹ️  Sem câmera definida: os cortes sairão no layout fit.")
+                if webcam_choice is None and get_layout() == "cam":
+                    # Layout cam: a câmera vai em cima. Sem --webcam, a IA procura a câmera num quadro do vídeo;
+                    # sem chave da Groq, pergunta no terminal (ou, sem terminal, cai no layout fit).
+                    if groq_api_key:
+                        webcam_choice = "6"
+                    elif sys.stdin is not None and sys.stdin.isatty():
+                        webcam_choice = None
+                    else:
+                        print("\n🎮 Layout cam: sem --webcam/--camera e sem GROQ_API_KEY para detectar a câmera; usando o layout fit.")
+                        webcam_choice = "7"
+                if webcam_choice is None and get_layout() == "fit":
+                    # No layout fit o vídeo aparece inteiro (a webcam já está dentro dele): nada a recortar.
+                    print("\n🎮 Layout fit: o vídeo aparece inteiro, a webcam não é recortada (pergunta dispensada).")
+                    webcam_pos = None
+                else:
+                    webcam_pos = ask_webcam_position(video_path, groq_api_key, choice=webcam_choice)
+                    if webcam_pos is False:
+                        print("❌ Posição da webcam inválida ou cancelada. Cancelando.")
+                        sys.exit(1)
+            if get_layout() == "cam":
+                if webcam_pos:
+                    save_camera_preview(video_path, webcam_pos, OUTPUT_DIR / CAMERA_PREVIEW_NAME)
+                else:
+                    print("   ℹ️  Sem câmera definida: os cortes sairão no layout fit.")
 
         if video_duration <= 90:
             print(f"\n⚡ Vídeo curto detectado ({video_duration:.1f}s <= 90s): usando vídeo inteiro como único corte")
@@ -5500,9 +5667,6 @@ def main():
             print(f"  {i}. {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s) | Score: {clip['score']:.1f}")
             print(f"     Motivo: {clip.get('reason', 'N/A')}")
             print(f"     Texto: {clip['text'][:120]}...")
-
-        if args.esperar_layout and not CUSTOM_LAYOUT:
-            wait_for_layout_choice(video_path, clips)
 
         print("\n" + "=" * 60)
         print("🎬 INICIANDO EXPORTAÇÃO DOS CORTES (GAMEPLAY - ClipFlow 3 Camadas)")
