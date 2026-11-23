@@ -24,3 +24,5 @@ temp_watch/
 
 # Logs das execucoes feitas pela interface (app/servidor.py)
 app/logs/
+layouts_salvos/
+app/quadros/

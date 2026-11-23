@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import webbrowser
 from datetime import datetime
 from http import HTTPStatus
@@ -40,6 +41,12 @@ PORTA_PADRAO = 8765
 MODOS = {"ia": "Narração por IA", "gameplay": "Gameplay / Streamer", "original": "Áudio original"}
 LAYOUTS = {"cam", "fit", "clipflow"}
 FUNDOS = {"blur", "black"}
+RE_SLUG = re.compile(r"^[a-z0-9_-]{1,40}$")
+RE_QUADRO = re.compile(r"^[0-9a-f]{16}\.(jpg|png|webp)$")
+MAX_IMAGEM = 8 * 1024 * 1024
+MAX_QUADROS = 12                       # quadros guardados em app/quadros (os mais antigos são apagados)
+CAM_ALTURA_MIN, CAM_ALTURA_MAX, CAM_ALTURA_PADRAO = 300, 1100, 600
+ORDENS = ("cam_primeiro", "game_primeiro")
 MAX_LINHAS_LOG = 20000
 MAX_CORPO = 64 * 1024
 RE_URL = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
@@ -60,6 +67,39 @@ def so_nome_de_arquivo(nome, extensoes=(".mp4",)):
     if "/" in nome or "\\" in nome or not nome.lower().endswith(extensoes):
         return None
     return nome
+
+
+def slug_do_nome(nome):
+    """Nome de arquivo seguro (minúsculas, sem acento, só a-z 0-9 _ -); igual ao do gerar_cortes.py."""
+    plano = unicodedata.normalize("NFKD", str(nome or "").lower())
+    plano = "".join(c for c in plano if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9_-]+", "-", plano).strip("-_")[:40]
+
+
+def caixa_valida(caixa):
+    """Caixa {x,y,w,h} em frações do vídeo (0 a 1), dentro do quadro. None se inválida."""
+    if not isinstance(caixa, dict):
+        return None
+    try:
+        x, y, w, h = (float(caixa[k]) for k in ("x", "y", "w", "h"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(v != v or v in (float("inf"), float("-inf")) for v in (x, y, w, h)):
+        return None
+    if not (0 <= x < 1 and 0 <= y < 1 and 0 < w <= 1 and 0 < h <= 1 and x + w <= 1.0001 and y + h <= 1.0001):
+        return None
+    return {"x": round(x, 5), "y": round(y, 5), "w": round(min(w, 1 - x), 5), "h": round(min(h, 1 - y), 5)}
+
+
+def tipo_de_imagem(dados):
+    """Extensão ('jpg', 'png' ou 'webp') pelos primeiros bytes; None se não for uma dessas imagens."""
+    if dados[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if dados[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if dados[:4] == b"RIFF" and dados[8:12] == b"WEBP":
+        return "webp"
+    return None
 
 
 def ler_json(caminho):
@@ -155,6 +195,8 @@ class Estado:
         self.descartados = self.saida / "_descartados"
         self.arquivo_status = self.saida / "_status.json"
         self.logs = APP_DIR / "logs"
+        self.layouts = self.raiz / "layouts_salvos"
+        self.quadros = APP_DIR / "quadros"
         self.python = python or sys.executable
         self.token = secrets.token_urlsafe(32)
         self.job = None
@@ -239,6 +281,143 @@ class Estado:
             self._gravar_status(status)
         return True, "ok"
 
+    # ---- layouts salvos (editor de layout)
+    def listar_layouts(self):
+        itens = []
+        if self.layouts.is_dir():
+            for arq in sorted(self.layouts.glob("*.json")):
+                if not RE_SLUG.match(arq.stem):
+                    continue
+                dados = ler_json(arq)
+                limpo = self._layout_limpo(dados)
+                if limpo:
+                    limpo["slug"] = arq.stem
+                    itens.append(limpo)
+        return itens
+
+    @staticmethod
+    def _layout_limpo(dados):
+        cam, game = caixa_valida(dados.get("cam")), caixa_valida(dados.get("game"))
+        if cam is None or game is None:
+            return None
+        try:
+            altura = int(dados.get("cam_altura", CAM_ALTURA_PADRAO))
+        except (TypeError, ValueError):
+            return None
+        ordem = dados.get("ordem", "cam_primeiro")
+        if not CAM_ALTURA_MIN <= altura <= CAM_ALTURA_MAX or ordem not in ORDENS:
+            return None
+        nome = re.sub(r"\s+", " ", str(dados.get("nome") or "")).strip()
+        return {"nome": nome[:60], "cam": cam, "game": game, "cam_altura": altura, "ordem": ordem}
+
+    def salvar_layout(self, dados):
+        """Valida e grava layouts_salvos/<slug>.json. Devolve o layout salvo (com o slug). Levanta ValueError."""
+        nome = re.sub(r"\s+", " ", str(dados.get("nome") or "")).strip()
+        if not nome or len(nome) > 60 or any(ord(c) < 32 for c in nome):
+            raise ValueError("Dê um nome ao layout (até 60 caracteres).")
+        slug = slug_do_nome(nome)
+        if not slug:
+            raise ValueError("O nome precisa ter pelo menos uma letra ou número.")
+        limpo = self._layout_limpo({**dados, "nome": nome})
+        if limpo is None:
+            raise ValueError("Layout inválido: confira as caixas da câmera e do gameplay e a altura.")
+        self.layouts.mkdir(parents=True, exist_ok=True)
+        tmp = self.layouts / f"{slug}.tmp"
+        tmp.write_text(json.dumps(limpo, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.layouts / f"{slug}.json")
+        limpo["slug"] = slug
+        return limpo
+
+    def apagar_layout(self, slug):
+        if not isinstance(slug, str) or not RE_SLUG.match(slug):
+            return False
+        caminho = self.layouts / f"{slug}.json"
+        if not caminho.is_file():
+            return False
+        caminho.unlink()
+        return True
+
+    def layout_existe(self, slug):
+        return isinstance(slug, str) and bool(RE_SLUG.match(slug)) and (self.layouts / f"{slug}.json").is_file()
+
+    # ---- quadros (imagem do vídeo usada no editor)
+    def _guardar_quadro(self, dados, ext):
+        self.quadros.mkdir(parents=True, exist_ok=True)
+        nome = f"{secrets.token_hex(8)}.{ext}"
+        (self.quadros / nome).write_bytes(dados)
+        antigos = sorted((a for a in self.quadros.iterdir() if RE_QUADRO.match(a.name)), key=lambda a: a.stat().st_mtime)
+        for velho in antigos[:-MAX_QUADROS]:
+            try:
+                velho.unlink()
+            except OSError:
+                pass
+        return nome
+
+    def salvar_imagem(self, dados):
+        """Guarda uma imagem enviada pelo usuário (print do vídeo). Devolve o nome do quadro. ValueError se inválida."""
+        if not dados or len(dados) > MAX_IMAGEM:
+            raise ValueError("Imagem vazia ou grande demais (máximo 8 MB).")
+        ext = tipo_de_imagem(dados)
+        if ext is None:
+            raise ValueError("Envie uma imagem JPG, PNG ou WEBP.")
+        return self._guardar_quadro(dados, ext)
+
+    def caminho_quadro(self, nome):
+        if not isinstance(nome, str) or not RE_QUADRO.match(nome):
+            return None
+        caminho = self.quadros / nome
+        return caminho if caminho.is_file() else None
+
+    def _ffmpeg(self):
+        local = self.raiz / "bin" / "ffmpeg.exe"
+        return str(local) if local.is_file() else shutil.which("ffmpeg")
+
+    def capturar_quadro(self, url, segundo):
+        """Baixa só ~6 s do vídeo (yt-dlp --download-sections) e tira um quadro com o ffmpeg. ValueError se falhar."""
+        url = str(url or "").strip()
+        if not RE_URL.match(url) or len(url) > 2000 or url.startswith("-"):
+            raise ValueError("Cole um link que comece com http:// ou https://")
+        try:
+            segundo = int(segundo)
+        except (TypeError, ValueError):
+            raise ValueError("Segundo inválido.")
+        if not 0 <= segundo <= 86400:
+            raise ValueError("Segundo inválido (0 a 86400).")
+        ffmpeg = self._ffmpeg()
+        if not ffmpeg:
+            raise ValueError("ffmpeg não encontrado (veja a seção 2 do README).")
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="quadro_") as tmp:
+            tmp = Path(tmp)
+            js = next((n for n in ("deno", "node", "bun") if shutil.which(n)), None)
+            cmd = [self.python, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+                   "--ffmpeg-location", str(Path(ffmpeg).parent),
+                   "-f", "bv*[height<=1080]/b[height<=1080]",
+                   "--download-sections", f"*{segundo}-{segundo + 6}",
+                   "-o", str(tmp / "video.%(ext)s")]
+            if js and js != "deno":
+                cmd += ["--js-runtimes", js]
+            cmd += ["--", url]
+            env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+            try:
+                r = subprocess.run(cmd, cwd=str(self.raiz), env=env, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=180)
+            except (OSError, subprocess.TimeoutExpired):
+                raise ValueError("Não foi possível baixar o trecho do vídeo (demorou demais ou o yt-dlp não abriu).")
+            baixados = [a for a in tmp.glob("video.*") if a.is_file()]
+            if r.returncode != 0 or not baixados:
+                raise ValueError("Não foi possível baixar o trecho do vídeo. Confira o link e o segundo (o vídeo precisa durar mais que isso).")
+            saida = tmp / "quadro.jpg"
+            try:
+                r = subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(baixados[0]),
+                                    "-vframes", "1", "-q:v", "2", str(saida)],
+                                   capture_output=True, text=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                raise ValueError("O ffmpeg não conseguiu tirar o quadro.")
+            if r.returncode != 0 or not saida.is_file():
+                raise ValueError("O ffmpeg não conseguiu tirar o quadro.")
+            return self._guardar_quadro(saida.read_bytes(), "jpg")
+
     # ---- pré-requisitos (só informativo)
     def prerequisitos(self):
         ffmpeg_local = self.raiz / "bin" / "ffmpeg.exe"
@@ -299,6 +478,14 @@ class Estado:
             if cta is False:
                 comando.append("--sem-cta")
                 params["cta"] = False
+            layout_salvo = dados.get("layout_salvo")
+            if layout_salvo is not None and not isinstance(layout_salvo, str):
+                raise ValueError("Layout salvo inválido.")
+            if layout_salvo:
+                if not self.layout_existe(layout_salvo):
+                    raise ValueError("Layout salvo não encontrado. Crie ou escolha outro na aba Layout.")
+                comando.append(f"--layout-salvo={layout_salvo}")
+                params["layout_salvo"] = layout_salvo
             camera = dados.get("camera")
             if camera is not None and not isinstance(camera, str):
                 raise ValueError("Câmera manual inválida.")
@@ -517,6 +704,10 @@ class Manipulador(BaseHTTPRequestHandler):
             return self._json(self._estado_publico())
         if caminho == "/api/cortes":
             return self._json({"cortes": self.estado.listar_cortes()})
+        if caminho == "/api/layouts":
+            return self._json({"layouts": self.estado.listar_layouts()})
+        if caminho == "/api/quadro":
+            return self._quadro((consulta.get("id") or [""])[0])
         if caminho == "/api/log":
             return self._log(consulta)
         if caminho == "/video":
@@ -529,9 +720,23 @@ class Manipulador(BaseHTTPRequestHandler):
             return self._erro(403, "Acesso negado.")
         if self.headers.get("X-Requested-With") != "fabrica":
             return self._erro(403, "Cabeçalho obrigatório ausente.")
+        if caminho == "/api/quadro/enviar":
+            return self._enviar_imagem()
         dados = self._corpo_json()
         if dados is None:
             return self._erro(400, "Pedido inválido.")
+        if caminho == "/api/layouts":
+            try:
+                return self._json({"layout": self.estado.salvar_layout(dados)}, 201)
+            except ValueError as e:
+                return self._erro(400, str(e))
+        if caminho == "/api/layouts/apagar":
+            return self._json({"ok": True}) if self.estado.apagar_layout(dados.get("slug")) else self._erro(404, "Layout não encontrado.")
+        if caminho == "/api/quadro":
+            try:
+                return self._json({"quadro": self.estado.capturar_quadro(dados.get("url"), dados.get("segundo", 60))}, 201)
+            except ValueError as e:
+                return self._erro(400, str(e))
         if caminho == "/api/executar":
             try:
                 job, erro = self.estado.iniciar(dados)
@@ -563,6 +768,28 @@ class Manipulador(BaseHTTPRequestHandler):
             return self._erro(500, "index.html não encontrado.")
         cookie = f"{COOKIE}={self.estado.token}; HttpOnly; SameSite=Strict; Path=/"
         self._enviar(200, corpo, "text/html; charset=utf-8", {"Set-Cookie": cookie})
+
+    def _enviar_imagem(self):
+        try:
+            tamanho = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._erro(400, "Pedido inválido.")
+        if tamanho <= 0 or tamanho > MAX_IMAGEM:
+            self.close_connection = True                 # o corpo não será lido: não reaproveita a conexão
+            return self._enviar(413, json.dumps({"erro": "Imagem vazia ou grande demais (máximo 8 MB)."}, ensure_ascii=False).encode("utf-8"),
+                                extras={"Connection": "close"})
+        dados = self.rfile.read(tamanho)
+        try:
+            return self._json({"quadro": self.estado.salvar_imagem(dados)}, 201)
+        except ValueError as e:
+            return self._erro(400, str(e))
+
+    def _quadro(self, nome):
+        caminho = self.estado.caminho_quadro(nome)
+        if caminho is None:
+            return self._erro(404, "Quadro não encontrado.")
+        tipo = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}[caminho.suffix[1:]]
+        self._enviar(200, caminho.read_bytes(), tipo)
 
     def _estatico(self, nome):
         if "/" in nome or "\\" in nome or nome.startswith("."):

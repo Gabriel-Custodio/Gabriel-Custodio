@@ -30,18 +30,17 @@ function formatarTempo(segundos) {
 }
 
 // ------------------------------------------------------------- abas
+const ABAS = ["gerar", "cortes", "layout"];
 function mostrarAba(nome) {
-  const gerar = nome === "gerar";
-  $("aba-gerar").setAttribute("aria-selected", String(gerar));
-  $("aba-cortes").setAttribute("aria-selected", String(!gerar));
-  $("aba-gerar").tabIndex = gerar ? 0 : -1;
-  $("aba-cortes").tabIndex = gerar ? -1 : 0;
-  $("painel-gerar").hidden = !gerar;
-  $("painel-cortes").hidden = gerar;
-  if (!gerar) carregarCortes();
+  for (const a of ABAS) {
+    const ativa = a === nome;
+    $(`aba-${a}`).setAttribute("aria-selected", String(ativa));
+    $(`aba-${a}`).tabIndex = ativa ? 0 : -1;
+    $(`painel-${a}`).hidden = !ativa;
+  }
+  if (nome === "cortes") carregarCortes();
 }
-$("aba-gerar").addEventListener("click", () => mostrarAba("gerar"));
-$("aba-cortes").addEventListener("click", () => mostrarAba("cortes"));
+for (const a of ABAS) $(`aba-${a}`).addEventListener("click", () => mostrarAba(a));
 $("ver-cortes").addEventListener("click", () => mostrarAba("cortes"));
 
 // ------------------------------------------------------------- pré-requisitos
@@ -142,13 +141,16 @@ $("form-gerar").addEventListener("submit", async (ev) => {
   mostrarErroForm("");
   const f = new FormData(ev.target);
   const modo = f.get("modo");
+  const layoutEscolhido = String(f.get("layout") || "");
+  const salvo = layoutEscolhido.startsWith("salvo:") ? layoutEscolhido.slice(6) : "";
   const corpo = { url: String(f.get("url") || "").trim(), modo,
-                  layout: f.get("layout") || "", fundo: f.get("fundo") || "",
+                  layout: salvo ? "" : layoutEscolhido, fundo: f.get("fundo") || "",
                   repetir: f.get("repetir") === "on", importar_existentes: f.get("importar") === "on" };
   if (modo === "gameplay") {
     corpo.cortes = Number(f.get("cortes") || 5);
     corpo.webcam = f.get("webcam") || "";
     corpo.camera = String(f.get("camera") || "").trim();
+    if (salvo) corpo.layout_salvo = salvo;        // layout criado no editor (só no modo gameplay)
     corpo.resumo = f.get("resumo") === "on";
     corpo.cta = f.get("cta") === "on";
     corpo.streamer = String(f.get("streamer") || "").trim();

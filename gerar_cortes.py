@@ -164,6 +164,12 @@ CAM_GAME_HEIGHT = VERTICAL_HEIGHT - CAM_TOP_HEIGHT - CAM_BAND_HEIGHT   # 1100
 CAM_CROP_MARGIN = 0.06          # folga em volta da caixa da câmera (fração do tamanho)
 CAM_MIN_CROP_FRAC = 0.18        # o recorte nunca é menor que isso da largura do vídeo (caixa só do rosto => amplia demais)
 CAM_WARN_UPSCALE = 2.2          # acima disso a câmera pode ficar borrada: avisa e anota no .json
+# Layout PERSONALIZADO ("custom"): o usuário escolhe, no editor da interface, a caixa da câmera, a caixa do
+# gameplay e a altura do bloco da câmera; vira um arquivo em layouts_salvos/ e é usado com --layout-salvo NOME.
+LAYOUTS_DIR = Path("layouts_salvos")
+CUSTOM_CAM_MIN_HEIGHT = 300
+CUSTOM_CAM_MAX_HEIGHT = 1100
+CUSTOM_ORDERS = ("cam_primeiro", "game_primeiro")
 CAM_SUBTITLE_CENTER_Y = 86      # centro da legenda (px, dentro da faixa)
 CAM_BAND_CTA_SIZE = 34          # fonte da linha fixa dentro da faixa
 CAM_BAND_CTA_Y = 160            # posição vertical (px dentro da faixa) da linha fixa
@@ -3569,12 +3575,14 @@ def repair_sync_only(input_path, output_path, clip_duration, hook_data, groq_api
 def get_layout():
     """Layout escolhido: 'cam' (padrão), 'fit' ou 'clipflow'. Troca pelo .env (CORTES_LAYOUT)."""
     value = (os.environ.get("CORTES_LAYOUT") or DEFAULT_LAYOUT).strip().lower()
+    if value == "custom":                     # só vale com um layout salvo carregado (--layout-salvo)
+        return "custom" if CUSTOM_LAYOUT else DEFAULT_LAYOUT
     return value if value in ("cam", "fit", "clipflow") else DEFAULT_LAYOUT
 
 
 def uses_fit_family():
-    """True para 'cam' e 'fit': os dois mantêm o vídeo inteiro e usam o fit como plano B (fallbacks)."""
-    return get_layout() in ("cam", "fit")
+    """True para 'cam', 'custom' e 'fit': mantêm o vídeo inteiro e usam o fit como plano B (fallbacks)."""
+    return get_layout() in ("cam", "custom", "fit")
 
 
 def fit_background_mode():
@@ -3827,7 +3835,103 @@ def cam_geometry(src_w, src_h, webcam_pos):
     return {
         "crop_x": x0, "crop_y": y0, "crop_w": crop_w, "crop_h": crop_h,
         "ampliacao": round(VERTICAL_WIDTH / crop_w, 2),
-        "y_band": CAM_TOP_HEIGHT, "y_game": CAM_TOP_HEIGHT + CAM_BAND_HEIGHT,
+        "cam_h": CAM_TOP_HEIGHT, "game_h": CAM_GAME_HEIGHT, "game_crop": None,   # None = recorte central
+        "y_cam": 0, "y_band": CAM_TOP_HEIGHT, "y_game": CAM_TOP_HEIGHT + CAM_BAND_HEIGHT,
+    }
+
+
+def layout_slug(name):
+    """Nome de arquivo seguro para um layout salvo (minúsculas, sem acento, só a-z 0-9 _ -)."""
+    slug = re.sub(r"[^a-z0-9_-]+", "-", _plain(name or "")).strip("-_")
+    return slug[:40]
+
+
+def _valid_box(box):
+    try:
+        x, y, w, h = (float(box[k]) for k in ("x", "y", "w", "h"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (0.0 <= x < 1.0 and 0.0 <= y < 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0
+            and x + w <= 1.0001 and y + h <= 1.0001):
+        return None
+    return {"x": x, "y": y, "w": min(w, 1.0 - x), "h": min(h, 1.0 - y)}
+
+
+def normalize_saved_layout(data):
+    """Valida o conteúdo de um layout salvo e devolve a versão limpa, ou None se algo estiver errado."""
+    if not isinstance(data, dict):
+        return None
+    cam, game = _valid_box(data.get("cam") or {}), _valid_box(data.get("game") or {})
+    if cam is None or game is None:
+        return None
+    try:
+        cam_altura = int(data.get("cam_altura", CAM_TOP_HEIGHT))
+    except (TypeError, ValueError):
+        return None
+    if not CUSTOM_CAM_MIN_HEIGHT <= cam_altura <= CUSTOM_CAM_MAX_HEIGHT:
+        return None
+    ordem = data.get("ordem", "cam_primeiro")
+    if ordem not in CUSTOM_ORDERS:
+        return None
+    return {"nome": str(data.get("nome") or "")[:60], "cam": cam, "game": game,
+            "cam_altura": cam_altura, "ordem": ordem}
+
+
+def load_saved_layout(name):
+    """Lê layouts_salvos/<slug>.json. None se não existir ou for inválido."""
+    slug = layout_slug(name)
+    if not slug:
+        return None
+    try:
+        data = json.loads((LAYOUTS_DIR / f"{slug}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    layout = normalize_saved_layout(data)
+    if layout is not None:
+        layout["slug"] = slug
+    return layout
+
+
+CUSTOM_LAYOUT = None     # layout salvo em uso nesta execução (preenchido por activate_saved_layout)
+
+
+def activate_saved_layout(name):
+    """Carrega o layout salvo e passa a usá-lo nos cortes do modo gameplay. False se não achar."""
+    global CUSTOM_LAYOUT
+    layout = load_saved_layout(name)
+    if layout is None:
+        return False
+    CUSTOM_LAYOUT = layout
+    os.environ["CORTES_LAYOUT"] = "custom"
+    return True
+
+
+def custom_geometry(src_w, src_h, layout):
+    """Medidas do layout personalizado (mesmo formato do cam_geometry), ou None se não der."""
+    if src_w <= 0 or src_h <= 0 or not layout:
+        return None
+
+    def crop(box):
+        x0, y0 = _even(box["x"] * src_w), _even(box["y"] * src_h)
+        w = _even(min(box["w"] * src_w, src_w - x0))
+        h = _even(min(box["h"] * src_h, src_h - y0))
+        return x0, y0, w, h
+
+    cx, cy, cw, ch = crop(layout["cam"])
+    gx, gy, gw, gh = crop(layout["game"])
+    if min(cw, ch, gw, gh) < 16:
+        return None
+    cam_h = int(layout["cam_altura"])
+    game_h = VERTICAL_HEIGHT - cam_h - CAM_BAND_HEIGHT
+    if layout.get("ordem") == "game_primeiro":
+        y_game, y_band, y_cam = 0, game_h, game_h + CAM_BAND_HEIGHT
+    else:
+        y_cam, y_band, y_game = 0, cam_h, cam_h + CAM_BAND_HEIGHT
+    return {
+        "crop_x": cx, "crop_y": cy, "crop_w": cw, "crop_h": ch,
+        "ampliacao": round(VERTICAL_WIDTH / cw, 2),
+        "cam_h": cam_h, "game_h": game_h, "game_crop": (gx, gy, gw, gh),
+        "y_cam": y_cam, "y_band": y_band, "y_game": y_game,
     }
 
 
@@ -3882,13 +3986,20 @@ def create_cam_band_image(cta_line, output_path):
 def build_cam_cmd(input_path, output_path, ass_path, band_path, geo, effective_duration):
     """Comando do ffmpeg do layout cam (câmera em cima, faixa vermelha com legenda, gameplay embaixo)."""
     w = VERTICAL_WIDTH
+    if geo.get("game_crop"):                  # layout personalizado: o usuário escolheu a caixa do gameplay
+        gx, gy, gw, gh = geo["game_crop"]
+        game_src = f"crop={gw}:{gh}:{gx}:{gy},"
+    else:                                     # layout cam: recorte central
+        game_src = ""
+    ordem = "[cam][1:v][game]" if geo["y_cam"] < geo["y_game"] else "[game][1:v][cam]"
     graph = (
         f"[0:v]setpts=PTS-STARTPTS,split=2[a][b];"
         f"[a]crop={geo['crop_w']}:{geo['crop_h']}:{geo['crop_x']}:{geo['crop_y']},"
-        f"scale={w}:{CAM_TOP_HEIGHT}:flags=lanczos,setsar=1[cam];"
-        f"[b]scale={w}:{CAM_GAME_HEIGHT}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={w}:{CAM_GAME_HEIGHT},setsar=1[game];"
-        f"[cam][1:v][game]vstack=inputs=3[canvas]"
+        f"scale={w}:{geo['cam_h']}:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={w}:{geo['cam_h']},setsar=1[cam];"
+        f"[b]{game_src}scale={w}:{geo['game_h']}:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={w}:{geo['game_h']},setsar=1[game];"
+        f"{ordem}vstack=inputs=3[canvas]"
     )
     label = "[canvas]"
 
@@ -3939,17 +4050,22 @@ def process_cam_layout(input_path, output_path, webcam_pos, ass_path, hook_data,
     CAM_AMPLIACAO = None
     if audio_mode != "original":
         return to_fit("só vale para o modo gameplay")
-    if not webcam_pos:
+    custom = CUSTOM_LAYOUT if get_layout() == "custom" else None
+    if not custom and not webcam_pos:
         return to_fit("câmera do streamer não indicada/encontrada")
     src_w, src_h = get_video_dimensions(input_path)
-    geo = cam_geometry(src_w, src_h, webcam_pos)
+    geo = custom_geometry(src_w, src_h, custom) if custom else cam_geometry(src_w, src_h, webcam_pos)
     if geo is None:
-        return to_fit("caixa da câmera inválida")
+        return to_fit("caixa da câmera/gameplay inválida")
     band_path = TEMP_DIR / "faixa_cam.png"
     if not create_cam_band_image(banner_cta_line(), band_path):
         return to_fit("não foi possível desenhar a faixa vermelha")
 
-    print(f"   🎨 Layout cam: câmera em cima (ampliada {geo['ampliacao']:.2f}x), faixa vermelha com legenda, gameplay embaixo...")
+    if custom:
+        print(f"   🎨 Layout personalizado '{custom.get('nome') or custom.get('slug')}': câmera ampliada {geo['ampliacao']:.2f}x, "
+              f"faixa vermelha com legenda, gameplay na caixa escolhida...")
+    else:
+        print(f"   🎨 Layout cam: câmera em cima (ampliada {geo['ampliacao']:.2f}x), faixa vermelha com legenda, gameplay embaixo...")
     if geo["ampliacao"] > CAM_WARN_UPSCALE:
         print(f"   ⚠️  A câmera é pequena no vídeo e foi ampliada {geo['ampliacao']:.1f}x: pode ficar borrada.")
     effective = final_duration if final_duration else clip_duration
@@ -3957,7 +4073,7 @@ def process_cam_layout(input_path, output_path, webcam_pos, ass_path, hook_data,
     if not ok:
         print(f"   ❌ Erro no FFmpeg (layout cam): {err[-800:]}")
         return False
-    LAYOUT_APLICADO = "cam"
+    LAYOUT_APLICADO = "custom" if custom else "cam"
     CAM_AMPLIACAO = geo["ampliacao"]
     print(f"   ✅ Corte salvo: {output_path}")
     return True
@@ -3995,7 +4111,7 @@ def process_clipflow_layout(input_path, output_path, webcam_pos, ass_path, hook_
     """Aplica o layout dos cortes (todos os modos). Padrão: fit (vídeo inteiro, sem zoom);
     CORTES_LAYOUT=clipflow usa o layout de 3 camadas (webcam recortada + gameplay com zoom)."""
     layout = get_layout()
-    if layout == "cam":
+    if layout in ("cam", "custom"):
         return process_cam_layout(input_path, output_path, webcam_pos, ass_path, hook_data, clip_duration,
                                   groq_api_key, clip_text, audio_mode=audio_mode,
                                   tts_audio_path=tts_audio_path, final_duration=final_duration,
@@ -4748,6 +4864,7 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
         "clip_duration": clip['duration'],
         "webcam_position": webcam_pos,
         "layout": LAYOUT_APLICADO,
+        "layout_salvo": CUSTOM_LAYOUT.get("nome") if (CUSTOM_LAYOUT and LAYOUT_APLICADO == "custom") else None,
         "camera_ampliacao": CAM_AMPLIACAO,
         "streamer": STREAMER_NOME,
         "resumo_intro": intro_info,
@@ -4999,6 +5116,8 @@ def main():
     parser.add_argument("--camera", metavar="X,Y,LARG,ALT",
                         help="Modo gameplay (layout cam): caixa da câmera do streamer em frações do vídeo (0 a 1), "
                              "ex.: 0.78,0.37,0.21,0.22. Tem prioridade sobre --webcam e a detecção por IA")
+    parser.add_argument("--layout-salvo", metavar="NOME",
+                        help="Modo gameplay: usa um layout criado no editor da interface (pasta layouts_salvos/)")
     parser.add_argument("--cortes", type=int, metavar="N",
                         help="Modo gameplay: quantidade de cortes (1-10), sem perguntar no terminal")
     parser.add_argument("--repetir", action="store_true",
@@ -5017,6 +5136,11 @@ def main():
         os.environ["CORTES_RESUMO"] = "0"
     if args.sem_cta:
         os.environ["CORTES_CTA"] = "0"
+    if args.layout_salvo:
+        if not activate_saved_layout(args.layout_salvo):
+            print(f"❌ Layout salvo não encontrado ou inválido: {args.layout_salvo!r} (procurei em {LAYOUTS_DIR}{os.sep}).")
+            sys.exit(1)
+        print(f"🎨 Layout personalizado: {CUSTOM_LAYOUT.get('nome') or CUSTOM_LAYOUT['slug']}")
 
     if args.repair:
         print("=" * 60)
@@ -5213,6 +5337,9 @@ def main():
 
         webcam_choice = args.webcam
         camera_manual = None
+        if get_layout() == "custom":
+            print("\n🎮 Layout personalizado: a câmera e o gameplay vêm das caixas salvas no editor (pergunta da webcam dispensada).")
+            args.camera = None
         if args.camera:
             camera_manual = parse_camera_box(args.camera)
             if camera_manual is None:
@@ -5222,6 +5349,8 @@ def main():
             print(f"\n🎮 Câmera do streamer definida por --camera: x={camera_manual['x']:.3f}, y={camera_manual['y']:.3f}, "
                   f"w={camera_manual['w']:.3f}, h={camera_manual['h']:.3f}")
             webcam_pos = camera_manual
+        elif get_layout() == "custom":
+            webcam_pos = None
         else:
             if webcam_choice is None and get_layout() == "cam":
                 # Layout cam: a câmera vai em cima. Sem --webcam, a IA procura a câmera num quadro do vídeo;

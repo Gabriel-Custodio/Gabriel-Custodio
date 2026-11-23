@@ -17,6 +17,7 @@
     <button type="button" role="tab" id="aba-cortes" aria-selected="false" aria-controls="painel-cortes" tabindex="-1">
       Cortes prontos <span id="contador" class="contador">0</span>
     </button>
+    <button type="button" role="tab" id="aba-layout" aria-selected="false" aria-controls="painel-layout" tabindex="-1">Layout</button>
   </nav>
 
   <main>
@@ -143,6 +144,68 @@
     </section>
   </main>
 
+  <!-- ======================= LAYOUT (editor) ======================= -->
+  <section id="painel-layout" role="tabpanel" aria-labelledby="aba-layout" hidden class="painel-layout">
+    <div class="cartao">
+      <h2>Editor de layout</h2>
+      <p class="ajuda">Escolha como a câmera e o gameplay aparecem no vídeo vertical: carregue um quadro do vídeo, arraste e redimensione as duas caixas e veja o resultado ao lado. Salve com um nome (por exemplo, o do streamer) e use nos cortes pela caixa “Layout” da aba “Gerar cortes”. Vale para o modo Gameplay / Streamer.</p>
+      <div class="grade-campos">
+        <div class="campo">
+          <label for="ed-url">Link do vídeo</label>
+          <input id="ed-url" type="text" inputmode="url" placeholder="https://www.youtube.com/watch?v=...">
+        </div>
+        <div class="campo">
+          <label for="ed-segundo">Segundo do vídeo para o quadro</label>
+          <input id="ed-segundo" type="number" min="0" max="86400" value="60">
+        </div>
+      </div>
+      <div class="acoes-form">
+        <button type="button" id="ed-carregar" class="btn primario">Carregar quadro do vídeo</button>
+        <label class="btn" for="ed-arquivo">Enviar uma imagem (print)</label>
+        <input id="ed-arquivo" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+        <span id="ed-estado" class="selo" role="status" hidden></span>
+      </div>
+      <p id="ed-erro" class="erro" role="alert" hidden></p>
+    </div>
+
+    <div id="ed-area" class="cartao" hidden>
+      <div class="ed-grade">
+        <div class="ed-col">
+          <h3>Versão em paisagem (vídeo original)</h3>
+          <div id="ed-paisagem" class="ed-paisagem">
+            <img id="ed-img" alt="Quadro do vídeo" draggable="false">
+            <div id="ed-cam" class="ed-caixa cam" title="Câmera: arraste para mover, use os cantos para redimensionar"><span class="ed-rotulo">Câmera</span></div>
+            <div id="ed-game" class="ed-caixa game" title="Gameplay: arraste para mover, use os cantos para redimensionar"><span class="ed-rotulo">Gameplay</span></div>
+          </div>
+          <p class="ajuda">As caixas mantêm a proporção do espaço delas no vídeo vertical, então nada é esticado.</p>
+        </div>
+        <div class="ed-col ed-retrato-col">
+          <h3>Versão em retrato</h3>
+          <canvas id="ed-retrato" width="270" height="480" aria-label="Prévia do vídeo vertical"></canvas>
+          <p class="ajuda">Arraste a linha branca para mudar a altura dos blocos.</p>
+          <fieldset class="campo">
+            <legend>Ordem</legend>
+            <label class="inline"><input type="radio" name="ed-ordem" value="cam_primeiro" checked> Câmera em cima</label>
+            <label class="inline"><input type="radio" name="ed-ordem" value="game_primeiro"> Gameplay em cima</label>
+          </fieldset>
+        </div>
+      </div>
+      <div class="acoes-form">
+        <div class="campo ed-nome">
+          <label for="ed-nome">Nome do layout</label>
+          <input id="ed-nome" type="text" maxlength="60" placeholder="Ex.: Alan Zoka">
+        </div>
+        <button type="button" id="ed-salvar" class="btn primario">Salvar layout</button>
+      </div>
+    </div>
+
+    <div class="cartao">
+      <h2>Meus layouts</h2>
+      <p id="ed-vazio" class="vazio" hidden>Nenhum layout salvo ainda.</p>
+      <ul id="ed-lista" class="ed-lista"></ul>
+    </div>
+  </section>
+
   <template id="tpl-corte">
     <article class="corte">
       <video controls preload="metadata" playsinline></video>
@@ -170,5 +233,6 @@
   </template>
 
   <script src="/static/app.js"></script>
+  <script src="/static/editor.js"></script>
 </body>
 </html>
