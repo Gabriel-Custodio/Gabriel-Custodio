@@ -45,9 +45,9 @@
             <input id="cortes" name="cortes" type="number" min="1" max="10" value="5">
           </div>
           <div class="campo">
-            <label for="webcam">Webcam (só no layout antigo)</label>
+            <label for="webcam">Posição da câmera do streamer</label>
             <select id="webcam" name="webcam">
-              <option value="">Não recortar (padrão)</option>
+              <option value="">Automático (IA procura a câmera)</option>
               <option value="1">Canto inferior esquerdo</option>
               <option value="2">Canto superior esquerdo</option>
               <option value="3">Canto inferior direito</option>
@@ -81,7 +81,8 @@
             <div class="campo">
               <label for="layout">Layout</label>
               <select id="layout" name="layout">
-                <option value="">Padrão: vídeo inteiro, sem zoom</option>
+                <option value="">Padrão: gameplay em cima, faixa vermelha, câmera embaixo</option>
+                <option value="cam">Gameplay, faixa vermelha e câmera ampliada (cam)</option>
                 <option value="fit">Vídeo inteiro, sem zoom (fit)</option>
                 <option value="clipflow">Antigo de 3 camadas (com zoom)</option>
               </select>

@@ -153,7 +153,19 @@ CLIPFLOW_KARAOKE_MARGIN_V = 220                # MarginV para área do gameplay 
 # Nada é recortado nem ampliado além do necessário para caber na largura; o espaço que sobra em
 # cima e embaixo recebe um fundo (cópia desfocada do próprio vídeo, ou preto). O layout antigo
 # de 3 camadas (webcam recortada + gameplay com zoom) fica disponível com CORTES_LAYOUT=clipflow.
-DEFAULT_LAYOUT = "fit"          # "fit" ou "clipflow"; troque no .env com CORTES_LAYOUT
+DEFAULT_LAYOUT = "cam"          # "cam", "fit" ou "clipflow"; troque no .env com CORTES_LAYOUT
+# Layout "cam" (PADRÃO no modo gameplay): de cima para baixo, o gameplay (vídeo inteiro, sem zoom), uma
+# faixa vermelha com a legenda e a linha fixa "curta, comente e compartilhe" e a câmera do streamer
+# recortada e AMPLIADA só até CAM_MAX_UPSCALE (acima disso fica borrada). O conjunto fica centralizado
+# na tela 9:16, sobre o fundo (desfocado ou preto). Sem câmera encontrada (ou nos modos IA/áudio
+# original), o corte sai no layout fit.
+CAM_BAND_HEIGHT = 280           # altura da faixa vermelha (legenda em cima, linha fixa embaixo)
+CAM_MAX_UPSCALE = 1.6           # ampliação máxima da câmera (acima disso perde definição)
+CAM_MIN_CROP_PX = 64            # câmera menor que isso (largura ou altura) é considerada recorte inválido
+CAM_MIN_ROOM_PX = 300           # altura mínima que sobra para a câmera, senão cai no layout fit
+CAM_SUBTITLE_TOP_PAD = 20       # distância (px) entre o topo da faixa e a legenda
+CAM_BAND_CTA_SIZE = 38          # fonte da linha fixa dentro da faixa
+CAM_BAND_CTA_Y = 214            # posição vertical (px dentro da faixa) da linha fixa
 FIT_BACKGROUND = "blur"         # "blur" (fundo desfocado) ou "black" (preto); .env: CORTES_FUNDO
 FIT_SHOW_HOOK = True            # faixa do gancho acima do vídeo, se sobrar espaço
 FIT_HOOK_GAP = 24               # distância (px) entre a faixa do gancho e o vídeo
@@ -980,7 +992,7 @@ def generate_climax_clips_from_visual(video_path, _frame_paths, climax_moments, 
 
         if not success:
             print(f"   ❌ Erro no FFmpeg layout ClipFlow")
-            success = _try_simple_cut_clipflow(video_path if get_layout() == "fit" else (input_video_path if use_temp_segment else video_path), clip_obj, ass_path, output_path, speed_ratio, final_duration, hook_data, api_key, tts_audio_path)
+            success = _try_simple_cut_clipflow(video_path if uses_fit_family() else (input_video_path if use_temp_segment else video_path), clip_obj, ass_path, output_path, speed_ratio, final_duration, hook_data, api_key, tts_audio_path)
             if not success:
                 continue
 
@@ -993,7 +1005,7 @@ def generate_climax_clips_from_visual(video_path, _frame_paths, climax_moments, 
 
 def _try_simple_cut_clipflow(video_path, clip, ass_path, output_path, speed_ratio, final_duration, hook_data, api_key, tts_audio_path=None):
     """Tenta corte simplificado usando layout ClipFlow 3 camadas (1080x1920)."""
-    if get_layout() == "fit":
+    if uses_fit_family():
         # video_path precisa ser o vídeo COMPLETO: o trecho é cortado aqui com -ss/-t
         return fit_fallback(video_path, clip['start'], clip['duration'], output_path, ass_path,
                             audio_mode="ia", tts_audio_path=tts_audio_path, tts_duration=final_duration)
@@ -2562,7 +2574,7 @@ def cut_and_export_vertical(video_path, clip, segments, output_path, clip_num, a
 
 def cut_simple_vertical(video_path, clip, segments, ass_path, output_path, clip_num, audio_mode="original", tts_audio_path=None, tts_duration=None):
     """Versão simplificada do fallback (fit: trecho certo do vídeo completo; clipflow: 3 camadas)."""
-    if get_layout() == "fit":
+    if uses_fit_family():
         print("🔄 Tentando versão simplificada (layout fit)...")
         return fit_fallback(video_path, clip['start'], clip['duration'], output_path, ass_path,
                             audio_mode=audio_mode, tts_audio_path=tts_audio_path, tts_duration=tts_duration)
@@ -3554,9 +3566,14 @@ def repair_sync_only(input_path, output_path, clip_duration, hook_data, groq_api
 
 
 def get_layout():
-    """Layout escolhido: 'fit' (padrão) ou 'clipflow'. Troca pelo .env (CORTES_LAYOUT)."""
+    """Layout escolhido: 'cam' (padrão), 'fit' ou 'clipflow'. Troca pelo .env (CORTES_LAYOUT)."""
     value = (os.environ.get("CORTES_LAYOUT") or DEFAULT_LAYOUT).strip().lower()
-    return value if value in ("fit", "clipflow") else DEFAULT_LAYOUT
+    return value if value in ("cam", "fit", "clipflow") else DEFAULT_LAYOUT
+
+
+def uses_fit_family():
+    """True para 'cam' e 'fit': os dois mantêm o vídeo inteiro e usam o fit como plano B (fallbacks)."""
+    return get_layout() in ("cam", "fit")
 
 
 def fit_background_mode():
@@ -3579,12 +3596,15 @@ def fit_geometry(src_w, src_h):
     return min(w, VERTICAL_WIDTH), min(h, VERTICAL_HEIGHT)
 
 
-def retarget_ass_for_fit(ass_path, out_path):
+def retarget_ass_for_fit(ass_path, out_path, alignment="2", margin_v=None):
     """Copia o .ass trocando alinhamento e altura da legenda para a área abaixo do vídeo.
 
     Cada modo gera o .ass para o seu próprio layout; no layout fit a legenda fica sempre
-    centralizada, FIT_SUBTITLE_MARGIN_V px acima da base. Se algo falhar, usa o original.
+    centralizada, FIT_SUBTITLE_MARGIN_V px acima da base. No layout cam usa alignment="8"
+    (topo) e margin_v = distância do topo da tela. Se algo falhar, usa o original.
     """
+    if margin_v is None:
+        margin_v = FIT_SUBTITLE_MARGIN_V
     try:
         text = Path(ass_path).read_text(encoding="utf-8-sig")
     except OSError:
@@ -3593,8 +3613,8 @@ def retarget_ass_for_fit(ass_path, out_path):
     def fix(match):
         fields = match.group(2).split(",")
         if len(fields) >= 23:
-            fields[18] = "2"                          # Alignment: baixo-centro
-            fields[21] = str(FIT_SUBTITLE_MARGIN_V)   # MarginV
+            fields[18] = str(alignment)               # Alignment (2 = baixo-centro, 8 = topo-centro)
+            fields[21] = str(int(margin_v))           # MarginV
         return match.group(1) + ",".join(fields)
 
     try:
@@ -3706,6 +3726,190 @@ def process_fit_layout(input_path, output_path, webcam_pos, ass_path, hook_data,
     if not ok:
         print(f"   ❌ Erro no FFmpeg (layout fit): {err[-800:]}")
         return False
+    global LAYOUT_APLICADO
+    LAYOUT_APLICADO = "fit"
+    print(f"   ✅ Corte salvo: {output_path}")
+    return True
+
+
+LAYOUT_APLICADO = None   # layout realmente usado no corte atual ("cam", "fit" ou "clipflow"); vai para o .json
+
+
+def _even(value):
+    return int(value) // 2 * 2
+
+
+def cam_geometry(src_w, src_h, webcam_pos):
+    """Medidas do layout cam, ou None se não der para montá-lo (sem câmera, recorte inválido, sem espaço).
+
+    O gameplay é o vídeo inteiro reduzido à largura da tela. A câmera é recortada da posição indicada e
+    ampliada no máximo CAM_MAX_UPSCALE vezes (nunca além da largura da tela nem do espaço que sobra).
+    O conjunto (gameplay + faixa + câmera) fica centralizado na vertical.
+    """
+    if src_w <= 0 or src_h <= 0 or not isinstance(webcam_pos, dict):
+        return None
+    try:
+        fx, fy, fw, fh = (float(webcam_pos[k]) for k in ("x", "y", "w", "h"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (0.0 <= fx < 1.0 and 0.0 <= fy < 1.0 and fw > 0 and fh > 0):
+        return None
+    cx, cy = _even(src_w * fx), _even(src_h * fy)
+    cw = _even(min(src_w * fw, src_w - cx))
+    ch = _even(min(src_h * fh, src_h - cy))
+    if cw < CAM_MIN_CROP_PX or ch < CAM_MIN_CROP_PX:
+        return None
+
+    game_w, game_h = fit_geometry(src_w, src_h)
+    room = VERTICAL_HEIGHT - game_h - CAM_BAND_HEIGHT
+    if game_w <= 0 or room < CAM_MIN_ROOM_PX:
+        return None
+    scale = min(CAM_MAX_UPSCALE, VERTICAL_WIDTH / cw, room / ch)
+    cam_w, cam_h = _even(cw * scale), _even(ch * scale)
+    if cam_w < CAM_MIN_CROP_PX or cam_h < CAM_MIN_CROP_PX:
+        return None
+
+    total = game_h + CAM_BAND_HEIGHT + cam_h
+    y_game = _even((VERTICAL_HEIGHT - total) / 2)
+    y_band = y_game + game_h
+    return {
+        "game_w": game_w, "game_h": game_h, "y_game": y_game,
+        "y_band": y_band, "band_h": CAM_BAND_HEIGHT,
+        "crop_x": cx, "crop_y": cy, "crop_w": cw, "crop_h": ch,
+        "cam_w": cam_w, "cam_h": cam_h, "cam_scale": round(cam_w / cw, 3),
+        "x_cam": _even((VERTICAL_WIDTH - cam_w) / 2), "y_cam": y_band + CAM_BAND_HEIGHT,
+    }
+
+
+def create_cam_band_image(cta_line, output_path):
+    """Faixa vermelha 1080 x CAM_BAND_HEIGHT do layout cam: a legenda é desenhada sobre ela pelo ffmpeg
+    (parte de cima) e a linha fixa (curta/comente/compartilhe) fica na parte de baixo. cta_line=None: só a faixa."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        print("   ❌ Pillow não instalado. Instale com: pip install pillow")
+        return False
+    width, height = VERTICAL_WIDTH, CAM_BAND_HEIGHT
+    img = Image.new("RGB", (width, height), (0xD9, 0x1E, 0x18))
+    draw = ImageDraw.Draw(img)
+    border = (0xB0, 0x18, 0x14)
+    draw.line([(0, 0), (width, 0)], fill=border, width=2)
+    draw.line([(0, height - 1), (width, height - 1)], fill=border, width=2)
+    if cta_line:
+        font_paths = ["C:/Windows/Fonts/arialbd.ttf", "C:/Windows/Fonts/impact.ttf", "C:/Windows/Fonts/ariblk.ttf",
+                      "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                      "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"]
+        font = None
+        size = CAM_BAND_CTA_SIZE
+        while font is None and size > 14:
+            for fp in font_paths:
+                try:
+                    candidate = ImageFont.truetype(fp, size)
+                except OSError:
+                    continue
+                box = draw.textbbox((0, 0), cta_line, font=candidate)
+                if box[2] - box[0] <= FIT_BANNER_MAX_TEXT_WIDTH:
+                    font = candidate
+                break
+            else:
+                break            # nenhuma fonte TrueType disponível
+            size -= 2
+        if font is not None:
+            box = draw.textbbox((0, 0), cta_line, font=font)
+            x = (width - (box[2] - box[0])) // 2
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                draw.text((x + dx, CAM_BAND_CTA_Y + dy), cta_line, font=font, fill=(0, 0, 0))
+            draw.text((x, CAM_BAND_CTA_Y), cta_line, font=font, fill=(0xFF, 0xFF, 0xFF))
+    try:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        img.save(output_path, "PNG")
+        return True
+    except Exception as e:
+        print(f"   ❌ Erro ao salvar a faixa PNG: {e}")
+        return False
+
+
+def build_cam_cmd(input_path, output_path, ass_path, band_path, geo, effective_duration):
+    """Comando do ffmpeg do layout cam (gameplay em cima, faixa vermelha, câmera ampliada embaixo)."""
+    w, h = VERTICAL_WIDTH, VERTICAL_HEIGHT
+    game = f"scale={geo['game_w']}:{geo['game_h']}:flags=lanczos"
+    cam = (f"crop={geo['crop_w']}:{geo['crop_h']}:{geo['crop_x']}:{geo['crop_y']},"
+           f"scale={geo['cam_w']}:{geo['cam_h']}:flags=lanczos")
+    if fit_background_mode() == "black":
+        graph = (f"[0:v]setpts=PTS-STARTPTS,split=2[b][c];"
+                 f"[b]{game},pad={w}:{h}:0:{geo['y_game']}:color=black[s1];"
+                 f"[c]{cam}[cam]")
+    else:
+        graph = (f"[0:v]setpts=PTS-STARTPTS,split=3[a][b][c];"
+                 f"[a]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},gblur=sigma=30[bg];"
+                 f"[b]{game}[game];[c]{cam}[cam];"
+                 f"[bg][game]overlay=0:{geo['y_game']}[s1]")
+    graph += (f";[s1][1:v]overlay=0:{geo['y_band']}[s2];"
+              f"[s2][cam]overlay={geo['x_cam']}:{geo['y_cam']}[canvas]")
+    label = "[canvas]"
+
+    if ass_path and Path(ass_path).exists():
+        cam_ass = retarget_ass_for_fit(ass_path, TEMP_DIR / f"{Path(ass_path).stem}_cam.ass",
+                                       alignment="8", margin_v=geo["y_band"] + CAM_SUBTITLE_TOP_PAD)
+        graph += f";{label}subtitles='{Path(cam_ass).as_posix().replace(':', chr(92) + ':')}'[withsubs]"
+        label = "[withsubs]"
+
+    watermark_path = Path(GAMEPLAY_WATERMARK_PATH)
+    if watermark_path.exists():
+        graph += (f";movie='{watermark_path.as_posix().replace(':', chr(92) + ':')}'[wm];"
+                  f"{label}[wm]overlay=20:20[wmarked]")
+        label = "[wmarked]"
+
+    fade_start = max(0, effective_duration - 1.5)
+    graph += f";{label}fade=t=out:st={fade_start:.2f}:d=1.5[vout]"
+    af = ("asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,"
+          "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=summary,"
+          f"afade=t=out:st={fade_start:.2f}:d=1.5")
+    return [
+        FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error", "-fflags", "+genpts",
+        "-i", str(input_path),
+        "-loop", "1", "-framerate", "30", "-t", str(effective_duration), "-i", str(band_path),
+        "-filter_complex", graph,
+        "-map", "[vout]", "-map", "0:a?",
+        "-af", af,
+        "-c:v", "libx264", "-preset", QUALITY_PRESET, "-crf", str(QUALITY_CRF),
+        "-profile:v", "high", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-fps_mode", "cfr",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+
+
+def process_cam_layout(input_path, output_path, webcam_pos, ass_path, hook_data, clip_duration, groq_api_key, clip_text,
+                       audio_mode="original", tts_audio_path=None, final_duration=None, speed_ratio=1.0):
+    """Layout cam no fluxo normal. Se não der para montá-lo (sem câmera, recorte inválido), usa o fit."""
+    def to_fit(motivo):
+        print(f"   ℹ️  Layout cam não aplicado ({motivo}); usando o layout fit.")
+        return process_fit_layout(input_path, output_path, None, ass_path, hook_data, clip_duration, groq_api_key,
+                                  clip_text, audio_mode=audio_mode, tts_audio_path=tts_audio_path,
+                                  final_duration=final_duration, speed_ratio=speed_ratio)
+
+    global LAYOUT_APLICADO
+    if audio_mode != "original":
+        return to_fit("só vale para o modo gameplay")
+    if not webcam_pos:
+        return to_fit("câmera do streamer não indicada/encontrada")
+    src_w, src_h = get_video_dimensions(input_path)
+    geo = cam_geometry(src_w, src_h, webcam_pos)
+    if geo is None:
+        return to_fit("recorte da câmera inválido ou sem espaço na tela")
+    band_path = TEMP_DIR / "faixa_cam.png"
+    if not create_cam_band_image(banner_cta_line(), band_path):
+        return to_fit("não foi possível desenhar a faixa vermelha")
+
+    print(f"   🎨 Layout cam: gameplay em cima, faixa vermelha com legenda, câmera ampliada {geo['cam_scale']:.2f}x embaixo...")
+    effective = final_duration if final_duration else clip_duration
+    ok, _, err = run_cmd(build_cam_cmd(input_path, output_path, ass_path, band_path, geo, effective), timeout=900)
+    if not ok:
+        print(f"   ❌ Erro no FFmpeg (layout cam): {err[-800:]}")
+        return False
+    LAYOUT_APLICADO = "cam"
     print(f"   ✅ Corte salvo: {output_path}")
     return True
 
@@ -3741,11 +3945,19 @@ def process_clipflow_layout(input_path, output_path, webcam_pos, ass_path, hook_
                             audio_mode="original", tts_audio_path=None, final_duration=None, speed_ratio=1.0):
     """Aplica o layout dos cortes (todos os modos). Padrão: fit (vídeo inteiro, sem zoom);
     CORTES_LAYOUT=clipflow usa o layout de 3 camadas (webcam recortada + gameplay com zoom)."""
-    if get_layout() == "fit":
+    layout = get_layout()
+    if layout == "cam":
+        return process_cam_layout(input_path, output_path, webcam_pos, ass_path, hook_data, clip_duration,
+                                  groq_api_key, clip_text, audio_mode=audio_mode,
+                                  tts_audio_path=tts_audio_path, final_duration=final_duration,
+                                  speed_ratio=speed_ratio)
+    if layout == "fit":
         return process_fit_layout(input_path, output_path, webcam_pos, ass_path, hook_data, clip_duration,
                                   groq_api_key, clip_text, audio_mode=audio_mode,
                                   tts_audio_path=tts_audio_path, final_duration=final_duration,
                                   speed_ratio=speed_ratio)
+    global LAYOUT_APLICADO
+    LAYOUT_APLICADO = "clipflow"
     print("   🎨 Aplicando layout ClipFlow 3 camadas (1080x1920)...")
 
     ffmpeg_cmd = FFMPEG.as_posix()
@@ -4377,7 +4589,9 @@ STREAMER_NOME = None   # nome do streamer do vídeo atual (preenchido no main; u
 
 
 def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, webcam_pos, groq_api_key=None):
-    """Corta vídeo no modo Gameplay/Streamer com layout ClipFlow 3 camadas (1080x1920)."""
+    """Corta vídeo no modo Gameplay/Streamer (layout cam por padrão; fit e clipflow disponíveis), 1080x1920."""
+    global LAYOUT_APLICADO
+    LAYOUT_APLICADO = None
     webcam_name = "Sem webcam (gameplay only)" if webcam_pos is None else webcam_pos.get('name', 'Posição personalizada')
     print(f"\n🎬 Processando corte GAMEPLAY {clip_num}: {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s)")
     print(f"   Webcam: {webcam_name}")
@@ -4484,6 +4698,7 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
         "clip_end": clip['end'],
         "clip_duration": clip['duration'],
         "webcam_position": webcam_pos,
+        "layout": LAYOUT_APLICADO,
         "streamer": STREAMER_NOME,
         "resumo_intro": intro_info,
         "cta_final": cta_info,
@@ -4504,7 +4719,7 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
 
 def cut_simple_gameplay(video_path, clip, ass_path, output_path, clip_num, webcam_pos):
     """Versão simplificada do modo gameplay - fallback que SEMPRE gera vertical 1080x1920."""
-    if get_layout() == "fit":
+    if uses_fit_family():
         print("🔄 Tentando versão simplificada (layout fit)...")
         return fit_fallback(video_path, clip['start'], clip['duration'], output_path, ass_path)
     print(f"🔄 Tentando versão simplificada (gameplay - fallback vertical 1080x1920)...")
@@ -4943,12 +5158,23 @@ def main():
 
         audio_mode = "original"
 
-        if args.webcam is None and get_layout() == "fit":
+        webcam_choice = args.webcam
+        if webcam_choice is None and get_layout() == "cam":
+            # Layout cam: a câmera vai embaixo, ampliada. Sem --webcam, a IA procura a câmera num quadro
+            # do vídeo; sem chave da Groq, pergunta no terminal (ou, sem terminal, cai no layout fit).
+            if groq_api_key:
+                webcam_choice = "6"
+            elif sys.stdin is not None and sys.stdin.isatty():
+                webcam_choice = None
+            else:
+                print("\n🎮 Layout cam: sem --webcam e sem GROQ_API_KEY para detectar a câmera; usando o layout fit.")
+                webcam_choice = "7"
+        if webcam_choice is None and get_layout() == "fit":
             # No layout fit o vídeo aparece inteiro (a webcam já está dentro dele): nada a recortar.
             print("\n🎮 Layout fit: o vídeo aparece inteiro, a webcam não é recortada (pergunta dispensada).")
             webcam_pos = None
         else:
-            webcam_pos = ask_webcam_position(video_path, groq_api_key, choice=args.webcam)
+            webcam_pos = ask_webcam_position(video_path, groq_api_key, choice=webcam_choice)
             if webcam_pos is False:
                 print("❌ Posição da webcam inválida ou cancelada. Cancelando.")
                 sys.exit(1)

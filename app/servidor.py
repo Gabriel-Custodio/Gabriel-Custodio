@@ -38,7 +38,7 @@ STATIC_DIR = APP_DIR / "static"
 PORTA_PADRAO = 8765
 
 MODOS = {"ia": "Narração por IA", "gameplay": "Gameplay / Streamer", "original": "Áudio original"}
-LAYOUTS = {"fit", "clipflow"}
+LAYOUTS = {"cam", "fit", "clipflow"}
 FUNDOS = {"blur", "black"}
 MAX_LINHAS_LOG = 20000
 MAX_CORPO = 64 * 1024

@@ -153,7 +153,7 @@ Para mudar, edite o arquivo `.env` (veja o `.env.example`):
 
 | Variável | Valores | Efeito |
 |---|---|---|
-| `CORTES_LAYOUT` | `fit` (padrão) ou `clipflow` | `clipflow` volta ao layout antigo de 3 camadas, com zoom |
+| `CORTES_LAYOUT` | `cam` (padrão), `fit` ou `clipflow` | `cam`: gameplay em cima, faixa vermelha com a legenda e câmera do streamer ampliada embaixo; `fit`: só o vídeo inteiro; `clipflow`: layout antigo de 3 camadas, com zoom |
 | `CORTES_FUNDO` | `blur` (padrão) ou `preto` | fundo desfocado ou preto atrás do vídeo |
 
 ### Não repetir trechos (histórico)
@@ -192,6 +192,8 @@ No **fim** de cada corte, depois do fade, o último quadro fica parado (um pouco
 - **Para desligar:** `--sem-cta`, `CORTES_CTA=0` no `.env` ou a caixa "Chamada final" na interface.
 
 ### Tarja vermelha: título + "CURTA · COMENTE · COMPARTILHE"
+
+**Layout `cam` (padrão no modo gameplay):** de cima para baixo, o gameplay (vídeo inteiro, sem zoom), uma faixa vermelha com a **legenda** na parte de cima e a linha fixa `CURTA · COMENTE · COMPARTILHE` na de baixo, e a **câmera do streamer** recortada e ampliada no máximo 1,6x (acima disso ela perderia definição). O conjunto fica centralizado, com o fundo desfocado (ou preto, com `CORTES_FUNDO=black`) nas sobras. A câmera vem de `--webcam` (1 a 5) ou, sem a opção, a IA procura a câmera em um quadro do vídeo (precisa da `GROQ_API_KEY`). Se a câmera não for encontrada, o recorte for inválido ou o modo não for gameplay, o corte sai no layout `fit`. O título do gancho não aparece nesse layout (continua no `.json`) e o `.json` ganha o campo `layout` com o que foi usado. A câmera também continua aparecendo dentro do gameplay, se o streamer a deixa na tela.
 
 No layout `fit`, a tarja vermelha acima do vídeo mostra o **título do gancho** (maior que antes, encolhe se for comprido) e, embaixo dele, uma **linha fixa** em branco: `CURTA · COMENTE · COMPARTILHE`. Fica na tela o corte inteiro. O layout antigo (`clipflow`) não ganha a linha, porque a legenda karaokê usa o meio da faixa. Se o vídeo ocupar quase toda a altura (sobrar pouco espaço acima), a tarja inteira não aparece, como já era.
 
@@ -242,7 +244,8 @@ Anote para cada item: **passou ou falhou**, a **URL** usada, a **opção** do me
    - rode de novo com `--sem-resumo`: o corte deve sair **sem** intro e com `resumo_intro: null`.
 14. **Chamada final (gameplay):** o corte termina com o fade, aparece o último quadro parado e a voz pede like, compartilhamento e inscrição, com a legenda da frase. Confira que não há estalo na emenda, que o áudio do corte não é cortado antes do fade, que o `.json` tem `cta_final` (e `duracao_final_s` somando resumo + corte + chamada) e que `--sem-cta` tira só a chamada (o resumo do início continua).
 15. **Tarja e relatório (gameplay, layout fit):** a tarja vermelha mostra o título em amarelo e, embaixo, `CURTA · COMENTE · COMPARTILHE` em branco, legível no celular e sem cortar nas bordas (teste também um título comprido). No fim do terminal aparece o bloco "Resumo no início e chamada final" com a contagem e o motivo de cada corte que ficou sem. Com `CORTES_BANNER_CTA=0` a linha some.
-16. **Opção 5 (monitor de lives):** só teste com uma live **sua** ou com autorização de quem a faz.
+16. **Layout cam (gameplay):** confira de cima para baixo gameplay, faixa vermelha com a legenda e `CURTA · COMENTE · COMPARTILHE`, câmera embaixo. Veja se a IA achou a câmera certa (se errou, use `--webcam` 1 a 5 ou escolha a posição na interface), se a câmera está nítida (não borrada), se a legenda cabe na faixa (teste uma frase longa) e se o `.json` mostra `"layout": "cam"`. Sem câmera encontrada, o corte deve sair em `fit` com um aviso no terminal. Compare com `CORTES_LAYOUT=fit`.
+17. **Opção 5 (monitor de lives):** só teste com uma live **sua** ou com autorização de quem a faz.
 
 ### O que mandar quando algo falhar
 
