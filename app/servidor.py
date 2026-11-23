@@ -41,6 +41,7 @@ PORTA_PADRAO = 8765
 MODOS = {"ia": "Narração por IA", "gameplay": "Gameplay / Streamer", "original": "Áudio original"}
 LAYOUTS = {"cam", "fit", "clipflow"}
 FUNDOS = {"blur", "black"}
+RECURSOS = ["edicao"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
 RE_SLUG = re.compile(r"^[a-z0-9_-]{1,40}$")
 CAM_ALTURA_MIN, CAM_ALTURA_MAX, CAM_ALTURA_PADRAO = 300, 1100, 600
 ORDENS = ("cam_primeiro", "game_primeiro")
@@ -757,6 +758,7 @@ class Manipulador(BaseHTTPRequestHandler):
             "saida": str(self.estado.saida),
             "modos": MODOS,
             "prerequisitos": self.estado.prerequisitos(),
+            "recursos": RECURSOS,
             "job": job.publico() if job else None,
         }
 

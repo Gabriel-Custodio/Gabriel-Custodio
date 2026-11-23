@@ -214,8 +214,18 @@ function montarCorte(c) {
   no.querySelector(".texto-resumo").textContent = c.resumo || "";
 
   const editar = no.querySelector(".editar");
-  editar.hidden = !c.editavel;                      // só cortes gerados no modo bruto guardam a versão original
-  editar.addEventListener("click", () => edAbrir(c));
+  if (!c.editavel) selos.append(selo("sem versão bruta", "cancelado"));
+  editar.addEventListener("click", () => {
+    if (c.editavel) { edAbrir(c); return; }
+    // O botão aparece em todos os cortes; sem o bruto guardado não há de onde editar, e a tela diz o porquê.
+    if (c.editavel === undefined) {
+      alert("O servidor da interface está desatualizado. Feche a janela preta do interface.bat e abra o interface.bat de novo.");
+    } else if (c.modo && c.modo !== "gameplay") {
+      alert("Só os cortes do modo Gameplay / Streamer podem ser editados.");
+    } else {
+      alert("Este corte não tem a versão bruta guardada (foi gerado antes do menu Editar, ou com CORTES_GAMEPLAY_BRUTO=0).\n\nGere o corte de novo, no modo Gameplay / Streamer, para poder editá-lo.");
+    }
+  });
 
   const aprovar = no.querySelector(".aprovar");
   aprovar.textContent = c.estado === "aprovado" ? "Desfazer aprovação" : "Aprovar";
@@ -285,6 +295,7 @@ $("btn-pasta").addEventListener("click", async () => {
   try {
     const estado = await api("/api/estado");
     mostrarPrerequisitos(estado.prerequisitos);
+    $("aviso-versao").hidden = Array.isArray(estado.recursos) && estado.recursos.includes("edicao");
     atualizarEstadoJob(estado.job);
     if (estado.job && estado.job.estado === "rodando") iniciarConsulta();
     else if (estado.job) consultarLog();

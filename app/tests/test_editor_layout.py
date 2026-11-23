@@ -256,6 +256,10 @@ class TestEdicaoNoServidor(BaseEditor):
         self.assertEqual((c["editavel"], c["bruto"], c["edicao"]), (True, True, {"estado": "bruto"}))
         self.assertFalse(por_nome["corte_gameplay_2_SEM.mp4"]["editavel"])
 
+    def test_estado_informa_os_recursos_do_servidor(self):
+        _, estado = self.json("GET", "/api/estado")
+        self.assertIn("edicao", estado["recursos"])                       # a página usa isto para avisar de servidor antigo
+
     def test_video_bruto_e_video_atual_sao_arquivos_diferentes(self):
         self.criar_bruto()
         atual = self.req("GET", f"/video?nome={self.NOME}")

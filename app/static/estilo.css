@@ -153,6 +153,7 @@ input[type="text"], input[type="number"], select {
 .ed-quadros { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .ed-quadros .btn.ativo { background: var(--foco); border-color: var(--foco); color: #fff; }
 .aviso-layout { border: 1px solid var(--primaria); border-radius: 8px; padding: 10px 12px; margin: 0 0 12px; }
+.aviso-versao { margin: 0; padding: 10px 20px; background: color-mix(in srgb, var(--erro) 14%, transparent); border-bottom: 1px solid var(--erro); color: var(--texto); }
 .selo.aviso { color: var(--aviso); border-color: var(--aviso); }
 .dlg { width: min(1100px, 96vw); max-height: 94vh; overflow: auto; padding: 18px 20px; border: 1px solid var(--borda); border-radius: 12px; background: var(--cartao); color: var(--texto); }
 .dlg::backdrop { background: rgba(0, 0, 0, .55); }
