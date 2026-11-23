@@ -1392,16 +1392,70 @@ def clean_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "_", name)[:100]
 
 
+# Clientes do YouTube que o yt-dlp pode usar, do melhor palpite ao pior. None = o padrão do próprio yt-dlp (que
+# escolhe os clientes certos para a versão instalada). Forçar "android,web" fazia o vídeo vir em 360p: o cliente
+# android sem token só entrega o formato 360p. Por isso cada cliente é TESTADO (sem baixar nada) e vence o que oferece mais.
+YT_CLIENT_LADDER = [None, "tv,web_safari", "web_safari", "mweb", "web", "android,web"]
+YT_TARGET_HEIGHT = 1080
+YT_PROBE_TIMEOUT = 150
+
+
+def yt_client_args(client):
+    """Argumentos do yt-dlp para um cliente da lista (None = nenhum, deixa o padrão)."""
+    return ["--extractor-args", f"youtube:player_client={client}"] if client else []
+
+
+def probe_youtube_height(url, client):
+    """Maior altura (até YT_TARGET_HEIGHT) que o YouTube oferece para esse cliente, sem baixar. 0 se falhar."""
+    cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--skip-download", "--no-warnings", "-J",
+           *ytdlp_js_args(), *yt_client_args(client), url]
+    try:
+        ok, out, _ = run_cmd(cmd, timeout=YT_PROBE_TIMEOUT)
+        start = out.find("{") if out else -1
+        info = json.loads(out[start:]) if ok and start >= 0 else {}
+    except Exception:
+        return 0
+    best = 0
+    for f in (info.get("formats") or []) if isinstance(info, dict) else []:
+        if not isinstance(f, dict) or f.get("vcodec") in (None, "none"):
+            continue
+        height = f.get("height")
+        if isinstance(height, (int, float)) and best < height <= YT_TARGET_HEIGHT:
+            best = int(height)
+    return best
+
+
+def choose_youtube_client(url, ladder=None, target=None):
+    """Testa os clientes em ordem e devolve (cliente, altura). Para no primeiro que chega à altura desejada;
+    senão, fica com o que ofereceu mais. Se nenhum responder, devolve o padrão (None, 0)."""
+    ladder = YT_CLIENT_LADDER if ladder is None else ladder
+    target = YT_TARGET_HEIGHT if target is None else target
+    best_client, best_height = None, 0
+    print("🔎 Procurando a melhor qualidade que o YouTube oferece para este vídeo...")
+    for client in ladder:
+        label = client or "padrão do yt-dlp"
+        height = probe_youtube_height(url, client)
+        print(f"   · cliente {label}: {'até ' + str(height) + 'p' if height else 'sem formatos de vídeo'}")
+        if height > best_height:
+            best_client, best_height = client, height
+        if height >= target:
+            break
+    if best_height:
+        print(f"✅ Vai baixar com o cliente {best_client or 'padrão do yt-dlp'} (até {best_height}p).")
+    else:
+        print("⚠️  Não consegui listar os formatos do vídeo; vou baixar do jeito padrão.")
+    return best_client, best_height
+
+
 FONTE_RESOLUCAO = None        # "LARGURAxALTURA" do vídeo baixado (vai para o .json do corte)
 LOW_RES_HEIGHT = 1000         # abaixo disso (e com menos de 1800 px de largura) o vídeo de origem é considerado baixo
 
 
-def ensure_download_quality(video_path, url, is_yt, ffmpeg_loc):
+def ensure_download_quality(video_path, url, is_yt, ffmpeg_loc=None):
     """Confere a resolução do vídeo baixado e avisa se for baixa (câmera e gameplay perdem nitidez).
 
-    No YouTube, sem runtime JavaScript (Node/Deno) o yt-dlp costuma ficar só com formatos de 360p/720p. Se houver
-    runtime e o vídeo veio baixo, tenta de novo com o cliente web (traz 1080p); só troca se a nova versão for maior.
-    Nunca levanta erro nem apaga o vídeo que já foi baixado.
+    A escolha do melhor cliente do YouTube acontece ANTES do download (choose_youtube_client); aqui só se registra
+    o resultado (FONTE_RESOLUCAO, que vai para o .json) e se orienta quem ficou com vídeo pequeno.
     """
     global FONTE_RESOLUCAO
     try:
@@ -1418,29 +1472,10 @@ def ensure_download_quality(video_path, url, is_yt, ffmpeg_loc):
         print("⚠️  O vídeo veio em baixa resolução. Sem Node.js/Deno o YouTube só entrega 360p/720p: instale o Node.js "
               "(https://nodejs.org), feche e abra o interface.bat de novo e gere os cortes outra vez.")
     elif is_yt:
-        print("⚠️  O vídeo veio em baixa resolução; tentando de novo com o cliente web (mais qualidade)...")
-        hd_path = Path(video_path).with_name(Path(video_path).stem + "_hd.mp4")
-        try:
-            ok, _, _ = run_cmd([sys.executable, "-m", "yt_dlp", *ffmpeg_loc, "--no-playlist", "--merge-output-format", "mp4",
-                                "-f", "bv*[height<=1080]+ba/b[height<=1080]", *ytdlp_js_args(), "--rm-cache-dir",
-                                "--extractor-args", "youtube:player_client=web", "-o", str(hd_path), url])
-            if ok and hd_path.exists():
-                w2, h2 = get_video_dimensions(hd_path)
-                if h2 > h:
-                    os.replace(str(hd_path), str(video_path))
-                    FONTE_RESOLUCAO = f"{w2}x{h2}"
-                    w, h = w2, h2
-                    print(f"✅ Vídeo em melhor qualidade: {w}x{h}")
-        except Exception as e:
-            print(f"   ⚠️  Não foi possível melhorar a qualidade ({e}).")
-        finally:
-            try:
-                if hd_path.exists():
-                    hd_path.unlink()
-            except OSError:
-                pass
-    if h < LOW_RES_HEIGHT and w < 1800:
-        print(f"⚠️  O vídeo de origem tem só {w}x{h}: a câmera, que ocupa uma área pequena dele, vai ficar menos nítida quando ampliada.")
+        print("⚠️  O vídeo veio em baixa resolução mesmo testando os clientes do YouTube (veja as linhas \"cliente ...\" acima). "
+              "Atualize o yt-dlp (pip install -U \"yt-dlp[default]\") e confira com: python -m yt_dlp -F LINK_DO_VIDEO. "
+              "Se o -F também só lista até 360p, o vídeo original no YouTube é pequeno.")
+    print(f"⚠️  O vídeo de origem tem só {w}x{h}: a câmera, que ocupa uma área pequena dele, vai ficar menos nítida quando ampliada.")
 
 
 def download_video(url, output_prefix):
@@ -1459,7 +1494,8 @@ def download_video(url, output_prefix):
 
     if is_yt:
         video_format = "bv*[height<=1080]+ba/b[height<=1080]"
-        extractor_args = ["--extractor-args", "youtube:player_client=android,web"]
+        chosen_client, _ = choose_youtube_client(url)
+        extractor_args = yt_client_args(chosen_client)
         js_args = ytdlp_js_args()
     else:
         video_format = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
@@ -1495,6 +1531,12 @@ def download_video(url, output_prefix):
                 url
             ]
             ok, _, err = run_cmd(cmd_fallback)
+            if not ok or not video_path.exists():
+                print("⚠️  Tentando o modo antigo (player_client=android,web)...")
+                ok, _, err = run_cmd([
+                    sys.executable, "-m", "yt_dlp", *ffmpeg_loc, "--no-playlist", "--merge-output-format", "mp4",
+                    "-f", video_format, *js_args, "--rm-cache-dir",
+                    *yt_client_args("android,web"), "-o", str(video_path), url])
         if not ok or not video_path.exists():
             print(f"❌ Falha ao baixar vídeo: {err}")
             return None, None

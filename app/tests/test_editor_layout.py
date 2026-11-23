@@ -657,75 +657,42 @@ class TestQualidadeDoDownload(BaseScript):
         self.addCleanup(setattr, g, "FONTE_RESOLUCAO", None)
         self.video = self.temp / "abc_video.mp4"
         self.video.write_bytes(b"ORIGINAL")
-        self.chamadas = []
 
-    def rodar(self, dims, yt=True, runtime=None, hd_ok=True, hd_dims=(1920, 1080), hd_erro=False):
-        """dims: tamanho do vídeo baixado. O vídeo 'hd' (nova tentativa) tem hd_dims."""
-        def dimensoes(path):
-            return hd_dims if str(path).endswith("_hd.mp4") else dims
-
-        def run(cmd, *a, **k):
-            self.chamadas.append(cmd)
-            if hd_erro:
-                raise RuntimeError("falhou")
-            if hd_ok:
-                Path(cmd[cmd.index("-o") + 1]).write_bytes(b"HD")
-            return hd_ok, "", ""
+    def rodar(self, dims, yt=True, runtime=None):
         import contextlib
         import io
         saida = io.StringIO()
-        with mock.patch.object(g, "get_video_dimensions", dimensoes), mock.patch.object(g, "run_cmd", run), \
-                mock.patch.object(g, "find_js_runtime", lambda: runtime), contextlib.redirect_stdout(saida):
-            g.ensure_download_quality(self.video, "https://www.youtube.com/watch?v=abc", yt, ["--ffmpeg-location", "x"])
+        with mock.patch.object(g, "get_video_dimensions", lambda p: dims), mock.patch.object(g, "find_js_runtime", lambda: runtime), \
+                contextlib.redirect_stdout(saida):
+            g.ensure_download_quality(self.video, "https://www.youtube.com/watch?v=abc", yt)
         return saida.getvalue()
 
-    def test_1080p_nao_avisa_nem_tenta_de_novo(self):
+    def test_1080p_nao_avisa(self):
         texto = self.rodar((1920, 1080), runtime="node")
         self.assertEqual(g.FONTE_RESOLUCAO, "1920x1080")
         self.assertNotIn("⚠️", texto)
-        self.assertEqual(self.chamadas, [])
 
     def test_baixa_resolucao_sem_node_orienta_a_instalar(self):
-        texto = self.rodar((1280, 720), runtime=None)
-        self.assertEqual(g.FONTE_RESOLUCAO, "1280x720")
+        texto = self.rodar((640, 360), runtime=None)
+        self.assertEqual(g.FONTE_RESOLUCAO, "640x360")
         self.assertIn("Node.js", texto)
-        self.assertIn("só 1280x720", texto)
-        self.assertEqual(self.chamadas, [])                               # sem runtime, tentar de novo não adianta
+        self.assertIn("só 640x360", texto)
 
-    def test_baixa_resolucao_com_node_tenta_o_cliente_web_e_troca_se_melhorar(self):
-        texto = self.rodar((1280, 720), runtime="node")
-        self.assertEqual(len(self.chamadas), 1)
-        self.assertIn("youtube:player_client=web", self.chamadas[0])
-        self.assertEqual(self.video.read_bytes(), b"HD")
-        self.assertEqual(g.FONTE_RESOLUCAO, "1920x1080")
-        self.assertIn("melhor qualidade: 1920x1080", texto)
-        self.assertFalse(self.video.with_name("abc_video_hd.mp4").exists())
+    def test_baixa_resolucao_com_node_orienta_a_conferir_o_yt_dlp(self):
+        texto = self.rodar((640, 360), runtime="node")
+        self.assertIn("yt_dlp -F", texto)
+        self.assertIn("pip install -U", texto)
+        self.assertNotIn("instale o Node.js", texto)
+        self.assertEqual(self.video.read_bytes(), b"ORIGINAL")           # nunca mexe no vídeo baixado
 
-    def test_nao_troca_se_a_nova_versao_nao_for_maior(self):
-        self.rodar((1280, 720), runtime="node", hd_dims=(1280, 720))
-        self.assertEqual(self.video.read_bytes(), b"ORIGINAL")
-        self.assertEqual(g.FONTE_RESOLUCAO, "1280x720")
-        self.assertFalse(self.video.with_name("abc_video_hd.mp4").exists())
-
-    def test_falha_na_nova_tentativa_mantem_o_original(self):
-        self.rodar((1280, 720), runtime="node", hd_ok=False)
-        self.assertEqual(self.video.read_bytes(), b"ORIGINAL")
-        self.rodar((1280, 720), runtime="node", hd_erro=True)
-        self.assertEqual(self.video.read_bytes(), b"ORIGINAL")
-
-    def test_outra_plataforma_so_avisa(self):
-        texto = self.rodar((1280, 720), yt=False, runtime="node")
-        self.assertEqual(self.chamadas, [])
-        self.assertIn("só 1280x720", texto)
+    def test_outra_plataforma_so_avisa_da_resolucao(self):
+        texto = self.rodar((640, 360), yt=False, runtime="node")
+        self.assertIn("só 640x360", texto)
+        self.assertNotIn("yt_dlp -F", texto)
 
     def test_sem_dimensoes_nao_faz_nada(self):
         self.rodar((0, 0), runtime="node")
         self.assertIsNone(g.FONTE_RESOLUCAO)
-        self.assertEqual(self.chamadas, [])
-
-    def test_o_download_chama_a_checagem(self):
-        fonte = (RAIZ / "gerar_cortes.py").read_text(encoding="utf-8")
-        self.assertIn("ensure_download_quality(video_path, url, is_yt, ffmpeg_loc)", fonte)
 
     def test_resolucao_vai_para_o_json_do_corte(self):
         g.FONTE_RESOLUCAO = "1280x720"
@@ -734,6 +701,110 @@ class TestQualidadeDoDownload(BaseScript):
         saida = self.out / "corte_gameplay_1_R.mp4"
         g.export_raw_gameplay({"start": 0.0, "end": 5.0, "duration": 5.0}, [], saida, seg, {"titulo_gancho": "T"}, "p", "t", 1, 0.2)
         self.assertEqual(json.loads(saida.with_suffix(".json").read_text(encoding="utf-8"))["fonte_resolucao"], "1280x720")
+
+
+def formatos(*alturas, audio=False):
+    lista = [{"vcodec": "avc1", "height": h, "format_id": str(h)} for h in alturas]
+    if audio:
+        lista.append({"vcodec": "none", "height": None, "acodec": "mp4a"})
+    return json.dumps({"formats": lista})
+
+
+class TestEscolhaDoClienteDoYoutube(BaseScript):
+    URL = "https://www.youtube.com/watch?v=abc"
+
+    def test_padrao_nao_forca_o_android(self):
+        self.assertIsNone(g.YT_CLIENT_LADDER[0])                          # primeiro tenta o padrão do yt-dlp
+        self.assertEqual(g.yt_client_args(None), [])
+        self.assertEqual(g.yt_client_args("tv,web_safari"), ["--extractor-args", "youtube:player_client=tv,web_safari"])
+
+    def test_probe_pega_a_maior_altura_ate_1080(self):
+        chamadas = []
+
+        def run(cmd, *a, **k):
+            chamadas.append(cmd)
+            return True, "aviso qualquer\n" + formatos(144, 360, 720, 1080, 1440, 2160, audio=True), ""
+        with mock.patch.object(g, "run_cmd", run), mock.patch.object(g, "ytdlp_js_args", lambda: ["--js-runtimes", "node"]):
+            self.assertEqual(g.probe_youtube_height(self.URL, "tv"), 1080)           # ignora 1440/2160 e o áudio
+        cmd = chamadas[0]
+        self.assertIn("--skip-download", cmd)
+        self.assertIn("youtube:player_client=tv", cmd)
+        self.assertIn("node", cmd)
+        self.assertEqual(cmd[-1], self.URL)
+
+    def test_probe_falha_devolve_zero(self):
+        for retorno in ((False, "", "erro"), (True, "isto nao e json", ""), (True, "{}", ""), (True, "[1,2]", ""),
+                        (True, json.dumps({"formats": [{"vcodec": "none", "height": 720}, {"vcodec": "avc1"}]}), "")):
+            with mock.patch.object(g, "run_cmd", lambda *a, **k: retorno):
+                self.assertEqual(g.probe_youtube_height(self.URL, None), 0, retorno)
+
+        def explode(*a, **k):
+            raise RuntimeError("x")
+        with mock.patch.object(g, "run_cmd", explode):
+            self.assertEqual(g.probe_youtube_height(self.URL, None), 0)
+
+    def escolher(self, por_cliente):
+        testados = []
+
+        def probe(url, cliente):
+            testados.append(cliente)
+            return por_cliente.get(cliente, 0)
+        import contextlib
+        import io
+        with mock.patch.object(g, "probe_youtube_height", probe), contextlib.redirect_stdout(io.StringIO()) as saida:
+            resultado = g.choose_youtube_client(self.URL)
+        return resultado, testados, saida.getvalue()
+
+    def test_para_no_primeiro_que_chega_a_1080(self):
+        (cliente, altura), testados, texto = self.escolher({None: 1080})
+        self.assertEqual((cliente, altura, testados), (None, 1080, [None]))
+        self.assertIn("até 1080p", texto)
+
+    def test_o_padrao_vem_em_360_e_outro_cliente_vence(self):
+        (cliente, altura), testados, texto = self.escolher({None: 360, "tv,web_safari": 1080, "web": 720})
+        self.assertEqual((cliente, altura), ("tv,web_safari", 1080))
+        self.assertEqual(testados, [None, "tv,web_safari"])               # parou ao achar 1080p
+        self.assertIn("cliente padrão do yt-dlp: até 360p", texto)
+
+    def test_nenhum_chega_a_1080_fica_com_o_melhor(self):
+        (cliente, altura), testados, _ = self.escolher({None: 360, "mweb": 720, "web": 480})
+        self.assertEqual((cliente, altura), ("mweb", 720))
+        self.assertEqual(testados, g.YT_CLIENT_LADDER)                    # testou todos
+
+    def test_nenhum_responde_cai_no_padrao(self):
+        (cliente, altura), _, texto = self.escolher({})
+        self.assertEqual((cliente, altura), (None, 0))
+        self.assertIn("do jeito padrão", texto)
+
+    def run_download(self, cliente_escolhido, falhas=0):
+        cmds = []
+
+        def run(cmd, *a, **k):
+            cmds.append(cmd)
+            if "-o" in cmd and str(cmd[cmd.index("-o") + 1]).endswith("_video.mp4") and len([c for c in cmds if "-f" in c and "bv*" in " ".join(map(str, c))]) > falhas:
+                Path(cmd[cmd.index("-o") + 1]).write_bytes(b"V")
+            return True, "", ""
+        import contextlib
+        import io
+        with mock.patch.object(g, "run_cmd", run), mock.patch.object(g, "choose_youtube_client", lambda url: (cliente_escolhido, 1080)), \
+                mock.patch.object(g, "get_video_dimensions", lambda p: (1920, 1080)), mock.patch.object(g, "pick_subtitle_file", lambda *a, **k: None), \
+                mock.patch.object(g, "ytdlp_js_args", lambda: []), contextlib.redirect_stdout(io.StringIO()):
+            resultado = g.download_video("https://www.youtube.com/watch?v=abcdefghijk", "abc")
+        return resultado, [c for c in cmds if "bv*[height<=1080]+ba/b[height<=1080]" in c]
+
+    def test_download_usa_o_cliente_escolhido(self):
+        (video, _), tentativas = self.run_download("tv,web_safari")
+        self.assertIsNotNone(video)
+        self.assertIn("youtube:player_client=tv,web_safari", tentativas[0])
+
+    def test_download_com_o_padrao_nao_passa_extractor_args(self):
+        _, tentativas = self.run_download(None)
+        self.assertNotIn("--extractor-args", tentativas[0])               # nada de android,web forçado
+
+    def test_falhas_caem_para_web_e_depois_para_o_modo_antigo(self):
+        _, tentativas = self.run_download(None, falhas=2)
+        clientes = [t[t.index("--extractor-args") + 1] if "--extractor-args" in t else None for t in tentativas]
+        self.assertEqual(clientes, [None, "youtube:player_client=web", "youtube:player_client=android,web"])
 
 
 class TestRealceDaCamera(BaseScript):
