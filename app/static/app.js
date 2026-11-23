@@ -71,6 +71,7 @@ function alternarOpcoes() {
   const modo = document.querySelector('input[name="modo"]:checked').value;
   $("opcoes-gameplay").hidden = modo !== "gameplay";
   $("campo-streamer").hidden = modo !== "gameplay";
+  $("campo-camera").hidden = modo !== "gameplay";
   $("linha-cta").hidden = modo !== "gameplay";
   $("linha-resumo").hidden = modo !== "gameplay";   // o resumo no início só existe no modo gameplay
 }
@@ -147,6 +148,7 @@ $("form-gerar").addEventListener("submit", async (ev) => {
   if (modo === "gameplay") {
     corpo.cortes = Number(f.get("cortes") || 5);
     corpo.webcam = f.get("webcam") || "";
+    corpo.camera = String(f.get("camera") || "").trim();
     corpo.resumo = f.get("resumo") === "on";
     corpo.cta = f.get("cta") === "on";
     corpo.streamer = String(f.get("streamer") || "").trim();

@@ -15,6 +15,7 @@ sys.path.insert(0, str(RAIZ))
 import gerar_cortes as g  # noqa: E402
 
 CAM_CANTO = {"x": 0.0, "y": 0.72, "w": 0.26, "h": 0.28, "name": "Canto inferior esquerdo"}
+CAM_DIREITA = {"x": 0.78, "y": 0.37, "w": 0.21, "h": 0.22, "name": "Meio-direita"}
 STYLE = ("Style: Default,Arial,62,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,40,40,320,1")
 
 
@@ -42,52 +43,82 @@ class TestEscolhaDeLayout(unittest.TestCase):
 
 
 class TestGeometria(unittest.TestCase):
-    def test_camera_de_1080p_amplia_ate_o_limite(self):
-        geo = g.cam_geometry(1920, 1080, CAM_CANTO)
-        self.assertEqual((geo["crop_w"], geo["crop_h"]), (498, 302))
-        self.assertLessEqual(geo["cam_scale"], g.CAM_MAX_UPSCALE + 0.01)
-        self.assertGreater(geo["cam_scale"], 1.5)           # maior que o original
-        self.assertEqual((geo["game_w"], geo["game_h"]), (1080, 608))
+    def test_blocos_somam_a_tela_toda(self):
+        self.assertEqual(g.CAM_TOP_HEIGHT + g.CAM_BAND_HEIGHT + g.CAM_GAME_HEIGHT, g.VERTICAL_HEIGHT)
 
-    def test_pecas_empilhadas_cabem_e_ficam_centralizadas(self):
-        geo = g.cam_geometry(1920, 1080, CAM_CANTO)
-        self.assertEqual(geo["y_band"], geo["y_game"] + geo["game_h"])
-        self.assertEqual(geo["y_cam"], geo["y_band"] + g.CAM_BAND_HEIGHT)
-        base = geo["y_cam"] + geo["cam_h"]
-        self.assertLessEqual(base, g.VERTICAL_HEIGHT)
-        self.assertLessEqual(abs(geo["y_game"] - (g.VERTICAL_HEIGHT - base)), 2)   # folga igual em cima e embaixo
-        self.assertLessEqual(geo["x_cam"] + geo["cam_w"], g.VERTICAL_WIDTH)
-        for chave in ("cam_w", "cam_h", "crop_w", "crop_h", "y_game", "y_cam", "x_cam"):
-            self.assertEqual(geo[chave] % 2, 0, chave)       # medidas pares (exigência do libx264)
+    def test_recorte_tem_a_proporcao_do_bloco_e_contem_a_caixa(self):
+        geo = g.cam_geometry(1920, 1080, CAM_DIREITA)
+        aspecto = g.VERTICAL_WIDTH / g.CAM_TOP_HEIGHT
+        self.assertAlmostEqual(geo["crop_w"] / geo["crop_h"], aspecto, delta=0.03)
+        x0, y0 = CAM_DIREITA["x"] * 1920, CAM_DIREITA["y"] * 1080
+        x1, y1 = x0 + CAM_DIREITA["w"] * 1920, y0 + CAM_DIREITA["h"] * 1080
+        self.assertLessEqual(geo["crop_x"], x0)
+        self.assertLessEqual(geo["crop_y"], y0)
+        self.assertGreaterEqual(geo["crop_x"] + geo["crop_w"], x1)
+        self.assertGreaterEqual(geo["crop_y"] + geo["crop_h"], y1)
 
-    def test_camera_grande_nunca_passa_da_largura_da_tela(self):
-        geo = g.cam_geometry(1920, 1080, {"x": 0.0, "y": 0.0, "w": 0.6, "h": 0.4})
-        self.assertLessEqual(geo["cam_w"], g.VERTICAL_WIDTH)
-        self.assertLessEqual(geo["cam_scale"], 1.0 + 0.01)
+    def test_recorte_fica_dentro_do_video_e_com_medidas_pares(self):
+        for pos in (CAM_DIREITA, CAM_CANTO, {"x": 0.9, "y": 0.9, "w": 0.5, "h": 0.5},
+                    {"x": 0.0, "y": 0.0, "w": 0.05, "h": 0.05}):
+            geo = g.cam_geometry(1920, 1080, pos)
+            self.assertGreaterEqual(geo["crop_x"], 0, pos)
+            self.assertGreaterEqual(geo["crop_y"], 0, pos)
+            self.assertLessEqual(geo["crop_x"] + geo["crop_w"], 1920, pos)
+            self.assertLessEqual(geo["crop_y"] + geo["crop_h"], 1080, pos)
+            for chave in ("crop_x", "crop_y", "crop_w", "crop_h"):
+                self.assertEqual(geo[chave] % 2, 0, (pos, chave))
 
-    def test_recorte_e_limitado_ao_video(self):
-        geo = g.cam_geometry(1920, 1080, {"x": 0.9, "y": 0.9, "w": 0.5, "h": 0.5})
-        self.assertLessEqual(geo["crop_x"] + geo["crop_w"], 1920)
-        self.assertLessEqual(geo["crop_y"] + geo["crop_h"], 1080)
+    def test_caixa_so_do_rosto_cresce_ate_o_minimo(self):
+        geo = g.cam_geometry(1920, 1080, {"x": 0.85, "y": 0.4, "w": 0.04, "h": 0.07})
+        self.assertGreaterEqual(geo["crop_w"], int(g.CAM_MIN_CROP_FRAC * 1920) - 2)
+        self.assertLessEqual(geo["ampliacao"], g.VERTICAL_WIDTH / (g.CAM_MIN_CROP_FRAC * 1920) + 0.05)
+
+    def test_ampliacao_e_calculada(self):
+        geo = g.cam_geometry(1920, 1080, CAM_DIREITA)
+        self.assertAlmostEqual(geo["ampliacao"], g.VERTICAL_WIDTH / geo["crop_w"], delta=0.01)
+
+    def test_posicoes_dos_blocos(self):
+        geo = g.cam_geometry(1920, 1080, CAM_DIREITA)
+        self.assertEqual(geo["y_band"], g.CAM_TOP_HEIGHT)
+        self.assertEqual(geo["y_game"], g.CAM_TOP_HEIGHT + g.CAM_BAND_HEIGHT)
 
     def test_casos_invalidos_devolvem_none(self):
         for pos in (None, {}, {"x": 0, "y": 0, "w": 0, "h": 0.2}, {"x": 1.2, "y": 0, "w": 0.2, "h": 0.2},
-                    {"x": "a", "y": 0, "w": 0.2, "h": 0.2}, {"x": 0, "y": 0, "w": 0.01, "h": 0.01}):
+                    {"x": "a", "y": 0, "w": 0.2, "h": 0.2}):
             self.assertIsNone(g.cam_geometry(1920, 1080, pos), pos)
         self.assertIsNone(g.cam_geometry(0, 0, CAM_CANTO))
 
-    def test_video_vertical_nao_tem_espaco_para_a_camera(self):
-        self.assertIsNone(g.cam_geometry(1080, 1920, CAM_CANTO))
+
+class TestCameraManual(unittest.TestCase):
+    def test_valida(self):
+        box = g.parse_camera_box("0.78, 0.37, 0.21, 0.22")
+        self.assertEqual((box["x"], box["y"], box["w"], box["h"]), (0.78, 0.37, 0.21, 0.22))
+        self.assertIsNotNone(g.parse_camera_box("0.1;0.1;0.3;0.3"))
+
+    def test_invalida(self):
+        for texto in ("", "a,b,c,d", "0.1,0.1,0.3", "0.9,0.1,0.3,0.3", "0.1,0.1,0,0.3", "-0.1,0,0.2,0.2", "1.5,0,0.2,0.2", None):
+            self.assertIsNone(g.parse_camera_box(texto), texto)
 
 
 class TestAss(unittest.TestCase):
-    def test_legenda_vai_para_o_topo_da_faixa(self):
+    def test_pos_fixo_do_karaoke_vai_para_dentro_da_faixa(self):
+        # a legenda karaokê usa \\pos(540,835) em cada fala: sem trocá-lo, alinhamento e margem não valem
         with tempfile.TemporaryDirectory() as d:
             origem, saida = Path(d) / "a.ass", Path(d) / "b.ass"
-            origem.write_text("[V4+ Styles]\n" + STYLE + "\n", encoding="utf-8")
-            g.retarget_ass_for_fit(origem, saida, alignment="8", margin_v=700)
-            campos = [l for l in saida.read_text(encoding="utf-8").splitlines() if l.startswith("Style:")][0].split(",")
-            self.assertEqual((campos[18], campos[21]), ("8", "700"))
+            origem.write_text(STYLE + "\nDialogue: 0,0:00:01.00,0:00:02.00,Karaoke,,0,0,0,karaoke,{\\pos(540,835)}OI\n",
+                              encoding="utf-8")
+            g.retarget_ass_for_fit(origem, saida, alignment="5", margin_v=0, pos_y=686)
+            texto = saida.read_text(encoding="utf-8")
+            self.assertIn("{\\pos(540,686)}", texto)
+            self.assertNotIn("835", texto)
+
+    def test_sem_pos_y_o_pos_continua_como_estava(self):
+        with tempfile.TemporaryDirectory() as d:
+            origem, saida = Path(d) / "a.ass", Path(d) / "b.ass"
+            origem.write_text(STYLE + "\nDialogue: 0,0:00:01.00,0:00:02.00,Karaoke,,0,0,0,karaoke,{\\pos(540,835)}OI\n",
+                              encoding="utf-8")
+            g.retarget_ass_for_fit(origem, saida)
+            self.assertIn("{\\pos(540,835)}", saida.read_text(encoding="utf-8"))
 
     def test_fit_continua_igual(self):
         with tempfile.TemporaryDirectory() as d:
@@ -103,9 +134,7 @@ class TestComando(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(self.tmp.name)
-        self.geo = g.cam_geometry(1920, 1080, CAM_CANTO)
-        for nome in ("CORTES_FUNDO",):
-            self.addCleanup(os.environ.pop, nome, None)
+        self.geo = g.cam_geometry(1920, 1080, CAM_DIREITA)
         p = mock.patch.object(g, "TEMP_DIR", self.dir)
         p.start()
         self.addCleanup(p.stop)
@@ -116,37 +145,36 @@ class TestComando(unittest.TestCase):
     def grafo(self, cmd):
         return cmd[cmd.index("-filter_complex") + 1]
 
-    def test_grafo_com_fundo_desfocado(self):
-        os.environ["CORTES_FUNDO"] = "blur"
+    def test_grafo_camera_faixa_gameplay(self):
         ass = self.dir / "s.ass"
-        ass.write_text(STYLE + "\n", encoding="utf-8")
+        ass.write_text(STYLE + "\nDialogue: 0,0:00:01.00,0:00:02.00,Karaoke,,0,0,0,karaoke,{\\pos(540,835)}OI\n",
+                       encoding="utf-8")
         cmd = g.build_cam_cmd(self.dir / "in.mp4", self.dir / "out.mp4", ass, self.dir / "faixa.png", self.geo, 30.0)
         grafo = self.grafo(cmd)
-        self.assertIn("gblur", grafo)
-        self.assertIn(f"scale={self.geo['game_w']}:{self.geo['game_h']}", grafo)
         self.assertIn(f"crop={self.geo['crop_w']}:{self.geo['crop_h']}:{self.geo['crop_x']}:{self.geo['crop_y']}", grafo)
-        self.assertIn(f"overlay=0:{self.geo['y_band']}", grafo)
-        self.assertIn(f"overlay={self.geo['x_cam']}:{self.geo['y_cam']}", grafo)
+        self.assertIn(f"scale=1080:{g.CAM_TOP_HEIGHT}", grafo)                       # câmera: largura toda
+        self.assertIn(f"scale=1080:{g.CAM_GAME_HEIGHT}:force_original_aspect_ratio=increase", grafo)
+        self.assertIn(f"crop=1080:{g.CAM_GAME_HEIGHT}", grafo)                       # gameplay preenche o bloco
+        self.assertIn("[cam][1:v][game]vstack=inputs=3", grafo)                      # câmera, faixa, gameplay
         self.assertIn("subtitles=", grafo)
         self.assertIn("fade=t=out", grafo)
         self.assertEqual(cmd[cmd.index("-map") + 1], "[vout]")
         self.assertIn("0:a?", cmd)
 
-    def test_grafo_com_fundo_preto(self):
-        os.environ["CORTES_FUNDO"] = "black"
-        cmd = g.build_cam_cmd(self.dir / "in.mp4", self.dir / "out.mp4", None, self.dir / "faixa.png", self.geo, 30.0)
-        grafo = self.grafo(cmd)
-        self.assertNotIn("gblur", grafo)
-        self.assertIn("pad=1080:1920", grafo)
-        self.assertNotIn("subtitles=", grafo)
-
-    def test_legenda_usa_o_topo_da_faixa(self):
+    def test_legenda_cai_no_meio_da_faixa(self):
         ass = self.dir / "s.ass"
-        ass.write_text(STYLE + "\n", encoding="utf-8")
+        ass.write_text(STYLE + "\nDialogue: 0,0:00:01.00,0:00:02.00,Karaoke,,0,0,0,karaoke,{\\pos(540,835)}OI\n",
+                       encoding="utf-8")
         g.build_cam_cmd(self.dir / "in.mp4", self.dir / "out.mp4", ass, self.dir / "faixa.png", self.geo, 30.0)
-        gerado = (self.dir / "s_cam.ass").read_text(encoding="utf-8").strip().split(",")
-        self.assertEqual(gerado[18], "8")
-        self.assertEqual(int(gerado[21]), self.geo["y_band"] + g.CAM_SUBTITLE_TOP_PAD)
+        texto = (self.dir / "s_cam.ass").read_text(encoding="utf-8")
+        y = g.CAM_TOP_HEIGHT + g.CAM_SUBTITLE_CENTER_Y
+        self.assertIn(f"{{\\pos(540,{y})}}", texto)
+        self.assertTrue(g.CAM_TOP_HEIGHT < y < g.CAM_TOP_HEIGHT + g.CAM_BAND_HEIGHT)   # dentro da faixa
+        self.assertLess(y + 60, g.CAM_TOP_HEIGHT + g.CAM_BAND_CTA_Y)                  # sem bater na linha fixa
+
+    def test_sem_legenda(self):
+        cmd = g.build_cam_cmd(self.dir / "in.mp4", self.dir / "out.mp4", None, self.dir / "faixa.png", self.geo, 30.0)
+        self.assertNotIn("subtitles=", self.grafo(cmd))
 
 
 class TestFaixa(unittest.TestCase):
@@ -161,7 +189,7 @@ class TestFaixa(unittest.TestCase):
             self.assertEqual(a.getpixel((5, 100)), (0xD9, 0x1E, 0x18))
             self.assertNotEqual(a.tobytes(), b.tobytes())       # a linha fixa foi desenhada
             # a parte de cima (onde vai a legenda) fica limpa nas duas
-            self.assertEqual(a.crop((0, 8, 1080, 190)).tobytes(), b.crop((0, 8, 1080, 190)).tobytes())
+            self.assertEqual(a.crop((0, 8, 1080, 140)).tobytes(), b.crop((0, 8, 1080, 140)).tobytes())
 
 
 class TestFluxo(unittest.TestCase):
@@ -193,8 +221,9 @@ class TestFluxo(unittest.TestCase):
             audio_mode=audio_mode)
 
     def test_com_camera_usa_o_cam(self):
-        self.assertTrue(self.processa(CAM_CANTO))
+        self.assertTrue(self.processa(CAM_DIREITA))
         self.assertEqual(g.LAYOUT_APLICADO, "cam")
+        self.assertGreater(g.CAM_AMPLIACAO, 1.0)
         self.assertEqual(len(self.chamadas), 1)
         self.assertIn("-loop", self.chamadas[0])         # a faixa entra como segunda entrada
         self.assertTrue((self.dir / "faixa_cam.png").exists())
@@ -207,8 +236,8 @@ class TestFluxo(unittest.TestCase):
         self.assertTrue(self.processa(CAM_CANTO, audio_mode="ia"))
         self.assertEqual(g.LAYOUT_APLICADO, "fit")
 
-    def test_recorte_invalido_cai_no_fit(self):
-        self.assertTrue(self.processa({"x": 0, "y": 0, "w": 0.01, "h": 0.01}))
+    def test_caixa_invalida_cai_no_fit(self):
+        self.assertTrue(self.processa({"x": 2, "y": 0, "w": 0.2, "h": 0.2}))
         self.assertEqual(g.LAYOUT_APLICADO, "fit")
 
     def test_falha_do_ffmpeg_devolve_false_para_acionar_o_fallback(self):
@@ -224,6 +253,7 @@ class TestFluxo(unittest.TestCase):
     def test_json_traz_o_layout(self):
         fonte = (RAIZ / "gerar_cortes.py").read_text(encoding="utf-8")
         self.assertIn('"layout": LAYOUT_APLICADO', fonte)
+        self.assertIn('"camera_ampliacao": CAM_AMPLIACAO', fonte)
 
 
 if __name__ == "__main__":

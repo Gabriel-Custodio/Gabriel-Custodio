@@ -299,6 +299,22 @@ class Estado:
             if cta is False:
                 comando.append("--sem-cta")
                 params["cta"] = False
+            camera = dados.get("camera")
+            if camera is not None and not isinstance(camera, str):
+                raise ValueError("Câmera manual inválida.")
+            camera = re.sub(r"\s+", "", (camera or ""))
+            if camera:
+                partes = camera.replace(";", ",").split(",")
+                try:
+                    x, y, larg, alt = (float(p) for p in partes)
+                    valida = (len(partes) == 4 and 0 <= x < 1 and 0 <= y < 1 and 0 < larg <= 1 and 0 < alt <= 1
+                              and x + larg <= 1.0001 and y + alt <= 1.0001)
+                except ValueError:
+                    valida = False
+                if not valida:
+                    raise ValueError("Câmera manual inválida: use X,Y,LARGURA,ALTURA entre 0 e 1 (ex.: 0.78,0.37,0.21,0.22).")
+                comando.append(f"--camera={','.join(partes)}")
+                params["camera"] = ",".join(partes)
             streamer = dados.get("streamer")
             if streamer is not None and not isinstance(streamer, str):
                 raise ValueError("Nome do streamer inválido.")

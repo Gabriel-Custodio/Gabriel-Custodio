@@ -154,18 +154,19 @@ CLIPFLOW_KARAOKE_MARGIN_V = 220                # MarginV para área do gameplay 
 # cima e embaixo recebe um fundo (cópia desfocada do próprio vídeo, ou preto). O layout antigo
 # de 3 camadas (webcam recortada + gameplay com zoom) fica disponível com CORTES_LAYOUT=clipflow.
 DEFAULT_LAYOUT = "cam"          # "cam", "fit" ou "clipflow"; troque no .env com CORTES_LAYOUT
-# Layout "cam" (PADRÃO no modo gameplay): de cima para baixo, o gameplay (vídeo inteiro, sem zoom), uma
-# faixa vermelha com a legenda e a linha fixa "curta, comente e compartilhe" e a câmera do streamer
-# recortada e AMPLIADA só até CAM_MAX_UPSCALE (acima disso fica borrada). O conjunto fica centralizado
-# na tela 9:16, sobre o fundo (desfocado ou preto). Sem câmera encontrada (ou nos modos IA/áudio
-# original), o corte sai no layout fit.
-CAM_BAND_HEIGHT = 280           # altura da faixa vermelha (legenda em cima, linha fixa embaixo)
-CAM_MAX_UPSCALE = 1.6           # ampliação máxima da câmera (acima disso perde definição)
-CAM_MIN_CROP_PX = 64            # câmera menor que isso (largura ou altura) é considerada recorte inválido
-CAM_MIN_ROOM_PX = 300           # altura mínima que sobra para a câmera, senão cai no layout fit
-CAM_SUBTITLE_TOP_PAD = 20       # distância (px) entre o topo da faixa e a legenda
-CAM_BAND_CTA_SIZE = 38          # fonte da linha fixa dentro da faixa
-CAM_BAND_CTA_Y = 214            # posição vertical (px dentro da faixa) da linha fixa
+# Layout "cam" (PADRÃO no modo gameplay): de cima para baixo, a CÂMERA do streamer (largura toda), uma faixa
+# vermelha com a legenda e a linha fixa "curta, comente e compartilhe" e o GAMEPLAY preenchendo o resto
+# (recorte central, sem barras). A câmera é recortada na proporção do bloco, com uma folga em volta da caixa
+# indicada (IA, --webcam ou --camera). Sem câmera encontrada (ou nos modos IA/áudio original), sai no layout fit.
+CAM_TOP_HEIGHT = 600            # altura do bloco da câmera
+CAM_BAND_HEIGHT = 220           # altura da faixa vermelha (legenda em cima, linha fixa embaixo)
+CAM_GAME_HEIGHT = VERTICAL_HEIGHT - CAM_TOP_HEIGHT - CAM_BAND_HEIGHT   # 1100
+CAM_CROP_MARGIN = 0.06          # folga em volta da caixa da câmera (fração do tamanho)
+CAM_MIN_CROP_FRAC = 0.18        # o recorte nunca é menor que isso da largura do vídeo (caixa só do rosto => amplia demais)
+CAM_WARN_UPSCALE = 2.2          # acima disso a câmera pode ficar borrada: avisa e anota no .json
+CAM_SUBTITLE_CENTER_Y = 86      # centro da legenda (px, dentro da faixa)
+CAM_BAND_CTA_SIZE = 34          # fonte da linha fixa dentro da faixa
+CAM_BAND_CTA_Y = 160            # posição vertical (px dentro da faixa) da linha fixa
 FIT_BACKGROUND = "blur"         # "blur" (fundo desfocado) ou "black" (preto); .env: CORTES_FUNDO
 FIT_SHOW_HOOK = True            # faixa do gancho acima do vídeo, se sobrar espaço
 FIT_HOOK_GAP = 24               # distância (px) entre a faixa do gancho e o vídeo
@@ -3596,12 +3597,13 @@ def fit_geometry(src_w, src_h):
     return min(w, VERTICAL_WIDTH), min(h, VERTICAL_HEIGHT)
 
 
-def retarget_ass_for_fit(ass_path, out_path, alignment="2", margin_v=None):
+def retarget_ass_for_fit(ass_path, out_path, alignment="2", margin_v=None, pos_y=None):
     """Copia o .ass trocando alinhamento e altura da legenda para a área abaixo do vídeo.
 
     Cada modo gera o .ass para o seu próprio layout; no layout fit a legenda fica sempre
-    centralizada, FIT_SUBTITLE_MARGIN_V px acima da base. No layout cam usa alignment="8"
-    (topo) e margin_v = distância do topo da tela. Se algo falhar, usa o original.
+    centralizada, FIT_SUBTITLE_MARGIN_V px acima da base. A legenda karaokê (gameplay) fixa a posição com
+    \\pos(x,y) em cada fala, o que anula alinhamento e margem: com pos_y (layout cam) o y desse \\pos é trocado.
+    Se algo falhar, usa o original.
     """
     if margin_v is None:
         margin_v = FIT_SUBTITLE_MARGIN_V
@@ -3618,7 +3620,10 @@ def retarget_ass_for_fit(ass_path, out_path, alignment="2", margin_v=None):
         return match.group(1) + ",".join(fields)
 
     try:
-        Path(out_path).write_text(re.sub(r"^(Style:\s*)(.*)$", fix, text, flags=re.M), encoding="utf-8")
+        text = re.sub(r"^(Style:\s*)(.*)$", fix, text, flags=re.M)
+        if pos_y is not None:
+            text = re.sub(r"\\pos\((-?\d+(?:\.\d+)?),\s*-?\d+(?:\.\d+)?\)", lambda m: f"\\pos({m.group(1)},{int(pos_y)})", text)
+        Path(out_path).write_text(text, encoding="utf-8")
     except OSError:
         return Path(ass_path)
     return Path(out_path)
@@ -3733,18 +3738,66 @@ def process_fit_layout(input_path, output_path, webcam_pos, ass_path, hook_data,
 
 
 LAYOUT_APLICADO = None   # layout realmente usado no corte atual ("cam", "fit" ou "clipflow"); vai para o .json
+CAM_AMPLIACAO = None     # quantas vezes a câmera foi ampliada no corte atual (layout cam); vai para o .json
 
 
 def _even(value):
     return int(value) // 2 * 2
 
 
-def cam_geometry(src_w, src_h, webcam_pos):
-    """Medidas do layout cam, ou None se não der para montá-lo (sem câmera, recorte inválido, sem espaço).
+def parse_camera_box(text):
+    """'x,y,largura,altura' (frações de 0 a 1 do vídeo) -> dict como o da webcam, ou None se inválido."""
+    try:
+        x, y, w, h = (float(p) for p in str(text).replace(";", ",").split(","))
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 <= x < 1.0 and 0.0 <= y < 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0 and x + w <= 1.0001 and y + h <= 1.0001):
+        return None
+    return {"x": x, "y": y, "w": w, "h": h, "name": "Câmera manual (--camera)"}
 
-    O gameplay é o vídeo inteiro reduzido à largura da tela. A câmera é recortada da posição indicada e
-    ampliada no máximo CAM_MAX_UPSCALE vezes (nunca além da largura da tela nem do espaço que sobra).
-    O conjunto (gameplay + faixa + câmera) fica centralizado na vertical.
+
+CAMERA_PREVIEW_NAME = "_previa_camera.jpg"
+
+
+def save_camera_preview(video_path, webcam_pos, out_path):
+    """Salva um quadro do vídeo com a caixa da câmera (amarelo) e o que vai aparecer em cima (verde),
+    para conferir a detecção. Falhar aqui nunca atrapalha os cortes."""
+    try:
+        from PIL import Image, ImageDraw
+        duration = get_video_duration(video_path)
+        frame = TEMP_DIR / "previa_camera_frame.jpg"
+        TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        ok, _, _ = run_cmd([FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error",
+                            "-ss", str(max(0.0, duration * 0.1)), "-i", str(video_path),
+                            "-vframes", "1", "-q:v", "3", str(frame)])
+        if not ok or not frame.exists():
+            return None
+        img = Image.open(frame).convert("RGB")
+        w, h = img.size
+        geo = cam_geometry(w, h, webcam_pos)
+        d = ImageDraw.Draw(img)
+        d.rectangle([webcam_pos["x"] * w, webcam_pos["y"] * h,
+                     (webcam_pos["x"] + webcam_pos["w"]) * w, (webcam_pos["y"] + webcam_pos["h"]) * h],
+                    outline=(255, 215, 0), width=max(3, w // 300))
+        if geo:
+            d.rectangle([geo["crop_x"], geo["crop_y"], geo["crop_x"] + geo["crop_w"], geo["crop_y"] + geo["crop_h"]],
+                        outline=(0, 230, 90), width=max(3, w // 300))
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        img.save(out_path, quality=88)
+        print(f"   🖼️  Prévia da câmera (amarelo = detectada, verde = o que aparece em cima): {out_path}")
+        print("      Se errou, rode de novo com --camera X,Y,LARG,ALT (frações do vídeo) ou escolha a posição em --webcam.")
+        return Path(out_path)
+    except Exception as e:
+        print(f"   ⚠️  Não foi possível salvar a prévia da câmera: {e}")
+        return None
+
+
+def cam_geometry(src_w, src_h, webcam_pos):
+    """Medidas do layout cam, ou None se não der para montá-lo (sem câmera ou caixa inválida).
+
+    O recorte da câmera tem a proporção do bloco (1080 x CAM_TOP_HEIGHT) e contém a caixa indicada, com uma
+    folga (CAM_CROP_MARGIN); caixas pequenas demais (só o rosto) crescem até CAM_MIN_CROP_FRAC da largura do
+    vídeo. O recorte sempre fica dentro do vídeo. 'ampliacao' = quantas vezes a câmera é esticada.
     """
     if src_w <= 0 or src_h <= 0 or not isinstance(webcam_pos, dict):
         return None
@@ -3754,30 +3807,27 @@ def cam_geometry(src_w, src_h, webcam_pos):
         return None
     if not (0.0 <= fx < 1.0 and 0.0 <= fy < 1.0 and fw > 0 and fh > 0):
         return None
-    cx, cy = _even(src_w * fx), _even(src_h * fy)
-    cw = _even(min(src_w * fw, src_w - cx))
-    ch = _even(min(src_h * fh, src_h - cy))
-    if cw < CAM_MIN_CROP_PX or ch < CAM_MIN_CROP_PX:
+    aspect = VERTICAL_WIDTH / CAM_TOP_HEIGHT
+    bw, bh = min(fw, 1.0 - fx) * src_w, min(fh, 1.0 - fy) * src_h
+    if bw < 8 or bh < 8:
         return None
-
-    game_w, game_h = fit_geometry(src_w, src_h)
-    room = VERTICAL_HEIGHT - game_h - CAM_BAND_HEIGHT
-    if game_w <= 0 or room < CAM_MIN_ROOM_PX:
+    bw, bh = bw * (1 + 2 * CAM_CROP_MARGIN), bh * (1 + 2 * CAM_CROP_MARGIN)
+    crop_w = max(bw, bh * aspect, CAM_MIN_CROP_FRAC * src_w)
+    crop_h = crop_w / aspect
+    if crop_w > src_w or crop_h > src_h:                      # não cabe: encolhe mantendo a proporção
+        k = min(src_w / crop_w, src_h / crop_h)
+        crop_w, crop_h = crop_w * k, crop_h * k
+    cx = (fx + fw / 2) * src_w
+    cy = (fy + fh / 2) * src_h
+    x0 = min(max(cx - crop_w / 2, 0), src_w - crop_w)
+    y0 = min(max(cy - crop_h / 2, 0), src_h - crop_h)
+    crop_w, crop_h, x0, y0 = _even(crop_w), _even(crop_h), _even(x0), _even(y0)
+    if crop_w < 16 or crop_h < 16:
         return None
-    scale = min(CAM_MAX_UPSCALE, VERTICAL_WIDTH / cw, room / ch)
-    cam_w, cam_h = _even(cw * scale), _even(ch * scale)
-    if cam_w < CAM_MIN_CROP_PX or cam_h < CAM_MIN_CROP_PX:
-        return None
-
-    total = game_h + CAM_BAND_HEIGHT + cam_h
-    y_game = _even((VERTICAL_HEIGHT - total) / 2)
-    y_band = y_game + game_h
     return {
-        "game_w": game_w, "game_h": game_h, "y_game": y_game,
-        "y_band": y_band, "band_h": CAM_BAND_HEIGHT,
-        "crop_x": cx, "crop_y": cy, "crop_w": cw, "crop_h": ch,
-        "cam_w": cam_w, "cam_h": cam_h, "cam_scale": round(cam_w / cw, 3),
-        "x_cam": _even((VERTICAL_WIDTH - cam_w) / 2), "y_cam": y_band + CAM_BAND_HEIGHT,
+        "crop_x": x0, "crop_y": y0, "crop_w": crop_w, "crop_h": crop_h,
+        "ampliacao": round(VERTICAL_WIDTH / crop_w, 2),
+        "y_band": CAM_TOP_HEIGHT, "y_game": CAM_TOP_HEIGHT + CAM_BAND_HEIGHT,
     }
 
 
@@ -3830,27 +3880,22 @@ def create_cam_band_image(cta_line, output_path):
 
 
 def build_cam_cmd(input_path, output_path, ass_path, band_path, geo, effective_duration):
-    """Comando do ffmpeg do layout cam (gameplay em cima, faixa vermelha, câmera ampliada embaixo)."""
-    w, h = VERTICAL_WIDTH, VERTICAL_HEIGHT
-    game = f"scale={geo['game_w']}:{geo['game_h']}:flags=lanczos"
-    cam = (f"crop={geo['crop_w']}:{geo['crop_h']}:{geo['crop_x']}:{geo['crop_y']},"
-           f"scale={geo['cam_w']}:{geo['cam_h']}:flags=lanczos")
-    if fit_background_mode() == "black":
-        graph = (f"[0:v]setpts=PTS-STARTPTS,split=2[b][c];"
-                 f"[b]{game},pad={w}:{h}:0:{geo['y_game']}:color=black[s1];"
-                 f"[c]{cam}[cam]")
-    else:
-        graph = (f"[0:v]setpts=PTS-STARTPTS,split=3[a][b][c];"
-                 f"[a]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},gblur=sigma=30[bg];"
-                 f"[b]{game}[game];[c]{cam}[cam];"
-                 f"[bg][game]overlay=0:{geo['y_game']}[s1]")
-    graph += (f";[s1][1:v]overlay=0:{geo['y_band']}[s2];"
-              f"[s2][cam]overlay={geo['x_cam']}:{geo['y_cam']}[canvas]")
+    """Comando do ffmpeg do layout cam (câmera em cima, faixa vermelha com legenda, gameplay embaixo)."""
+    w = VERTICAL_WIDTH
+    graph = (
+        f"[0:v]setpts=PTS-STARTPTS,split=2[a][b];"
+        f"[a]crop={geo['crop_w']}:{geo['crop_h']}:{geo['crop_x']}:{geo['crop_y']},"
+        f"scale={w}:{CAM_TOP_HEIGHT}:flags=lanczos,setsar=1[cam];"
+        f"[b]scale={w}:{CAM_GAME_HEIGHT}:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={w}:{CAM_GAME_HEIGHT},setsar=1[game];"
+        f"[cam][1:v][game]vstack=inputs=3[canvas]"
+    )
     label = "[canvas]"
 
     if ass_path and Path(ass_path).exists():
+        # a legenda karaokê usa \pos fixo: é ele que precisa ir para dentro da faixa
         cam_ass = retarget_ass_for_fit(ass_path, TEMP_DIR / f"{Path(ass_path).stem}_cam.ass",
-                                       alignment="8", margin_v=geo["y_band"] + CAM_SUBTITLE_TOP_PAD)
+                                       alignment="5", margin_v=0, pos_y=geo["y_band"] + CAM_SUBTITLE_CENTER_Y)
         graph += f";{label}subtitles='{Path(cam_ass).as_posix().replace(':', chr(92) + ':')}'[withsubs]"
         label = "[withsubs]"
 
@@ -3883,14 +3928,15 @@ def build_cam_cmd(input_path, output_path, ass_path, band_path, geo, effective_d
 
 def process_cam_layout(input_path, output_path, webcam_pos, ass_path, hook_data, clip_duration, groq_api_key, clip_text,
                        audio_mode="original", tts_audio_path=None, final_duration=None, speed_ratio=1.0):
-    """Layout cam no fluxo normal. Se não der para montá-lo (sem câmera, recorte inválido), usa o fit."""
+    """Layout cam no fluxo normal. Se não der para montá-lo (sem câmera, caixa inválida), usa o fit."""
     def to_fit(motivo):
         print(f"   ℹ️  Layout cam não aplicado ({motivo}); usando o layout fit.")
         return process_fit_layout(input_path, output_path, None, ass_path, hook_data, clip_duration, groq_api_key,
                                   clip_text, audio_mode=audio_mode, tts_audio_path=tts_audio_path,
                                   final_duration=final_duration, speed_ratio=speed_ratio)
 
-    global LAYOUT_APLICADO
+    global LAYOUT_APLICADO, CAM_AMPLIACAO
+    CAM_AMPLIACAO = None
     if audio_mode != "original":
         return to_fit("só vale para o modo gameplay")
     if not webcam_pos:
@@ -3898,18 +3944,21 @@ def process_cam_layout(input_path, output_path, webcam_pos, ass_path, hook_data,
     src_w, src_h = get_video_dimensions(input_path)
     geo = cam_geometry(src_w, src_h, webcam_pos)
     if geo is None:
-        return to_fit("recorte da câmera inválido ou sem espaço na tela")
+        return to_fit("caixa da câmera inválida")
     band_path = TEMP_DIR / "faixa_cam.png"
     if not create_cam_band_image(banner_cta_line(), band_path):
         return to_fit("não foi possível desenhar a faixa vermelha")
 
-    print(f"   🎨 Layout cam: gameplay em cima, faixa vermelha com legenda, câmera ampliada {geo['cam_scale']:.2f}x embaixo...")
+    print(f"   🎨 Layout cam: câmera em cima (ampliada {geo['ampliacao']:.2f}x), faixa vermelha com legenda, gameplay embaixo...")
+    if geo["ampliacao"] > CAM_WARN_UPSCALE:
+        print(f"   ⚠️  A câmera é pequena no vídeo e foi ampliada {geo['ampliacao']:.1f}x: pode ficar borrada.")
     effective = final_duration if final_duration else clip_duration
     ok, _, err = run_cmd(build_cam_cmd(input_path, output_path, ass_path, band_path, geo, effective), timeout=900)
     if not ok:
         print(f"   ❌ Erro no FFmpeg (layout cam): {err[-800:]}")
         return False
     LAYOUT_APLICADO = "cam"
+    CAM_AMPLIACAO = geo["ampliacao"]
     print(f"   ✅ Corte salvo: {output_path}")
     return True
 
@@ -4699,6 +4748,7 @@ def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, w
         "clip_duration": clip['duration'],
         "webcam_position": webcam_pos,
         "layout": LAYOUT_APLICADO,
+        "camera_ampliacao": CAM_AMPLIACAO,
         "streamer": STREAMER_NOME,
         "resumo_intro": intro_info,
         "cta_final": cta_info,
@@ -4946,6 +4996,9 @@ def main():
                         help="Modo de áudio: original (padrão), ia (narração com edge-tts) ou gameplay (tela dividida streamer)")
     parser.add_argument("--webcam", choices=["1", "2", "3", "4", "5", "6", "7"],
                         help="Modo gameplay: posição da webcam (1-7), sem perguntar no terminal")
+    parser.add_argument("--camera", metavar="X,Y,LARG,ALT",
+                        help="Modo gameplay (layout cam): caixa da câmera do streamer em frações do vídeo (0 a 1), "
+                             "ex.: 0.78,0.37,0.21,0.22. Tem prioridade sobre --webcam e a detecção por IA")
     parser.add_argument("--cortes", type=int, metavar="N",
                         help="Modo gameplay: quantidade de cortes (1-10), sem perguntar no terminal")
     parser.add_argument("--repetir", action="store_true",
@@ -5159,25 +5212,41 @@ def main():
         audio_mode = "original"
 
         webcam_choice = args.webcam
-        if webcam_choice is None and get_layout() == "cam":
-            # Layout cam: a câmera vai embaixo, ampliada. Sem --webcam, a IA procura a câmera num quadro
-            # do vídeo; sem chave da Groq, pergunta no terminal (ou, sem terminal, cai no layout fit).
-            if groq_api_key:
-                webcam_choice = "6"
-            elif sys.stdin is not None and sys.stdin.isatty():
-                webcam_choice = None
-            else:
-                print("\n🎮 Layout cam: sem --webcam e sem GROQ_API_KEY para detectar a câmera; usando o layout fit.")
-                webcam_choice = "7"
-        if webcam_choice is None and get_layout() == "fit":
-            # No layout fit o vídeo aparece inteiro (a webcam já está dentro dele): nada a recortar.
-            print("\n🎮 Layout fit: o vídeo aparece inteiro, a webcam não é recortada (pergunta dispensada).")
-            webcam_pos = None
-        else:
-            webcam_pos = ask_webcam_position(video_path, groq_api_key, choice=webcam_choice)
-            if webcam_pos is False:
-                print("❌ Posição da webcam inválida ou cancelada. Cancelando.")
+        camera_manual = None
+        if args.camera:
+            camera_manual = parse_camera_box(args.camera)
+            if camera_manual is None:
+                print(f"❌ --camera inválido: {args.camera!r}. Use X,Y,LARGURA,ALTURA entre 0 e 1 (ex.: 0.78,0.37,0.21,0.22).")
                 sys.exit(1)
+        if camera_manual is not None:
+            print(f"\n🎮 Câmera do streamer definida por --camera: x={camera_manual['x']:.3f}, y={camera_manual['y']:.3f}, "
+                  f"w={camera_manual['w']:.3f}, h={camera_manual['h']:.3f}")
+            webcam_pos = camera_manual
+        else:
+            if webcam_choice is None and get_layout() == "cam":
+                # Layout cam: a câmera vai em cima. Sem --webcam, a IA procura a câmera num quadro do vídeo;
+                # sem chave da Groq, pergunta no terminal (ou, sem terminal, cai no layout fit).
+                if groq_api_key:
+                    webcam_choice = "6"
+                elif sys.stdin is not None and sys.stdin.isatty():
+                    webcam_choice = None
+                else:
+                    print("\n🎮 Layout cam: sem --webcam/--camera e sem GROQ_API_KEY para detectar a câmera; usando o layout fit.")
+                    webcam_choice = "7"
+            if webcam_choice is None and get_layout() == "fit":
+                # No layout fit o vídeo aparece inteiro (a webcam já está dentro dele): nada a recortar.
+                print("\n🎮 Layout fit: o vídeo aparece inteiro, a webcam não é recortada (pergunta dispensada).")
+                webcam_pos = None
+            else:
+                webcam_pos = ask_webcam_position(video_path, groq_api_key, choice=webcam_choice)
+                if webcam_pos is False:
+                    print("❌ Posição da webcam inválida ou cancelada. Cancelando.")
+                    sys.exit(1)
+        if get_layout() == "cam":
+            if webcam_pos:
+                save_camera_preview(video_path, webcam_pos, OUTPUT_DIR / CAMERA_PREVIEW_NAME)
+            else:
+                print("   ℹ️  Sem câmera definida: os cortes sairão no layout fit.")
 
         if video_duration <= 90:
             print(f"\n⚡ Vídeo curto detectado ({video_duration:.1f}s <= 90s): usando vídeo inteiro como único corte")

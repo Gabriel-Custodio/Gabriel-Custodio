@@ -351,6 +351,15 @@ class TestExecucao(Base):
             status, _ = self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "streamer": ruim})
             self.assertEqual(status, 400, repr(ruim))
 
+    def test_camera_manual_vira_flag_com_igual(self):
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1, "camera": " 0.78, 0.37,0.21 ,0.22 "})
+        self.assertIn("'--camera=0.78,0.37,0.21,0.22'", "\n".join(self.esperar_fim()["linhas"]))
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1, "camera": ""})
+        self.assertNotIn("--camera", "\n".join(self.esperar_fim()["linhas"]).split("ARGS:")[-1])
+        for ruim in (5, ["x"], "a,b,c,d", "0.1,0.1,0.3", "0.9,0.1,0.3,0.3", "0.1,0.1,0,0.3", "--audio=ia", "1.5,0,0.2,0.2"):
+            status, _ = self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "camera": ruim})
+            self.assertEqual(status, 400, repr(ruim))
+
     def test_codigo_de_erro(self):
         self.json("POST", "/api/executar", {"url": "https://x.com/falha", "modo": "ia"})
         fim = self.esperar_fim()
