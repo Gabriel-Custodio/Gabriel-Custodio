@@ -109,12 +109,43 @@ function edDesenharRetrato() {
   edCtx.fillRect(edCanvas.width / 2 - 16, y - 3, 32, 6);
 }
 
+/* Quantas vezes a câmera é esticada até a largura da tela (1080 px). Acima de ~2,2x ela perde definição. */
+function edAmpliacao() {
+  if (!edImgOk() || ED.cam.w <= 0) return 0;
+  return ED_LARGURA / (ED.cam.w * edImg.naturalWidth);
+}
+
+function edNitidez() {
+  const a = edAmpliacao(), W = edImg.naturalWidth, H = edImg.naturalHeight;
+  let nivel = "ok", texto = `Câmera ampliada ${a.toFixed(1)}x: nítida.`;
+  if (a > 3.2) {
+    nivel = "erro";
+    texto = `Câmera ampliada ${a.toFixed(1)}x: vai ficar borrada. Puxe os cantos da caixa da câmera para pegar uma área maior.`;
+  } else if (a > 2.2) {
+    nivel = "aviso";
+    texto = `Câmera ampliada ${a.toFixed(1)}x: pode ficar um pouco macia. Uma caixa maior fica mais nítida.`;
+  } else if (a > 1.6) {
+    texto = `Câmera ampliada ${a.toFixed(1)}x: boa.`;
+  }
+  if (W < 1800 && H < 1000) {
+    texto += ` O vídeo de origem tem só ${W}x${H}; com 1080p a câmera ficaria bem mais nítida (instale o Node.js e gere o corte de novo).`;
+    if (nivel === "ok") nivel = "aviso";
+  } else {
+    texto += ` (origem ${W}x${H})`;
+  }
+  return { nivel, texto };
+}
+
 function edAtualizar() {
   if (!edImgOk()) return;
   edAjustar("cam");
   edAjustar("game");
   edPosicionarCaixas();
   edDesenharRetrato();
+  const n = edNitidez();
+  const el = $("ed-nitidez");
+  el.className = `ed-nitidez ${n.nivel}`;
+  el.textContent = n.texto;
 }
 
 // ---------------------------------------------------------------- mover e redimensionar caixas

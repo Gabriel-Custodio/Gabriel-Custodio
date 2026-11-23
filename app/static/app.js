@@ -61,7 +61,7 @@ function mostrarPrerequisitos(p) {
     pilula(p.chave_groq ? "Chave Groq" : "Sem chave Groq", p.chave_groq ? "ok" : "aviso",
       p.chave_groq ? "" : "Sem GROQ_API_KEY no .env não há IA (roteiro, título, vídeo sem legenda)."),
     pilula(p.js_runtime ? "Node/Deno" : "Sem Node/Deno", p.js_runtime ? "ok" : "aviso",
-      p.js_runtime ? "" : "O YouTube pode falhar com erro 403 sem um runtime JavaScript."),
+      p.js_runtime ? "" : "Sem Node.js/Deno o YouTube entrega só vídeo de baixa qualidade (360p/720p) e pode falhar com erro 403. Instale o Node.js (nodejs.org) e reabra o interface.bat."),
   );
 }
 

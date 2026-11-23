@@ -164,6 +164,8 @@ CAM_GAME_HEIGHT = VERTICAL_HEIGHT - CAM_TOP_HEIGHT - CAM_BAND_HEIGHT   # 1100
 CAM_CROP_MARGIN = 0.06          # folga em volta da caixa da câmera (fração do tamanho)
 CAM_MIN_CROP_FRAC = 0.18        # o recorte nunca é menor que isso da largura do vídeo (caixa só do rosto => amplia demais)
 CAM_WARN_UPSCALE = 2.2          # acima disso a câmera pode ficar borrada: avisa e anota no .json
+CAM_SHARPEN_ABOVE = 1.3         # ampliando mais que isso, a câmera leva um realce leve de nitidez (unsharp)
+CAM_SHARPEN = "unsharp=5:5:0.8:5:5:0.0"
 # Layout PERSONALIZADO ("custom"): o usuário escolhe, no editor da interface, a caixa da câmera, a caixa do
 # gameplay e a altura do bloco da câmera; vira um arquivo em layouts_salvos/ e é usado com --layout-salvo NOME.
 LAYOUTS_DIR = Path("layouts_salvos")
@@ -1390,6 +1392,57 @@ def clean_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "_", name)[:100]
 
 
+FONTE_RESOLUCAO = None        # "LARGURAxALTURA" do vídeo baixado (vai para o .json do corte)
+LOW_RES_HEIGHT = 1000         # abaixo disso (e com menos de 1800 px de largura) o vídeo de origem é considerado baixo
+
+
+def ensure_download_quality(video_path, url, is_yt, ffmpeg_loc):
+    """Confere a resolução do vídeo baixado e avisa se for baixa (câmera e gameplay perdem nitidez).
+
+    No YouTube, sem runtime JavaScript (Node/Deno) o yt-dlp costuma ficar só com formatos de 360p/720p. Se houver
+    runtime e o vídeo veio baixo, tenta de novo com o cliente web (traz 1080p); só troca se a nova versão for maior.
+    Nunca levanta erro nem apaga o vídeo que já foi baixado.
+    """
+    global FONTE_RESOLUCAO
+    try:
+        w, h = get_video_dimensions(video_path)
+    except Exception:
+        return
+    if not h:
+        return
+    FONTE_RESOLUCAO = f"{w}x{h}"
+    print(f"📐 Resolução do vídeo baixado: {w}x{h}")
+    if h >= LOW_RES_HEIGHT or w >= 1800:
+        return
+    if is_yt and not find_js_runtime():
+        print("⚠️  O vídeo veio em baixa resolução. Sem Node.js/Deno o YouTube só entrega 360p/720p: instale o Node.js "
+              "(https://nodejs.org), feche e abra o interface.bat de novo e gere os cortes outra vez.")
+    elif is_yt:
+        print("⚠️  O vídeo veio em baixa resolução; tentando de novo com o cliente web (mais qualidade)...")
+        hd_path = Path(video_path).with_name(Path(video_path).stem + "_hd.mp4")
+        try:
+            ok, _, _ = run_cmd([sys.executable, "-m", "yt_dlp", *ffmpeg_loc, "--no-playlist", "--merge-output-format", "mp4",
+                                "-f", "bv*[height<=1080]+ba/b[height<=1080]", *ytdlp_js_args(), "--rm-cache-dir",
+                                "--extractor-args", "youtube:player_client=web", "-o", str(hd_path), url])
+            if ok and hd_path.exists():
+                w2, h2 = get_video_dimensions(hd_path)
+                if h2 > h:
+                    os.replace(str(hd_path), str(video_path))
+                    FONTE_RESOLUCAO = f"{w2}x{h2}"
+                    w, h = w2, h2
+                    print(f"✅ Vídeo em melhor qualidade: {w}x{h}")
+        except Exception as e:
+            print(f"   ⚠️  Não foi possível melhorar a qualidade ({e}).")
+        finally:
+            try:
+                if hd_path.exists():
+                    hd_path.unlink()
+            except OSError:
+                pass
+    if h < LOW_RES_HEIGHT and w < 1800:
+        print(f"⚠️  O vídeo de origem tem só {w}x{h}: a câmera, que ocupa uma área pequena dele, vai ficar menos nítida quando ampliada.")
+
+
 def download_video(url, output_prefix):
     """Baixa vídeo e áudio usando yt-dlp."""
     clean_url = clean_youtube_url(url)
@@ -1445,6 +1498,7 @@ def download_video(url, output_prefix):
         if not ok or not video_path.exists():
             print(f"❌ Falha ao baixar vídeo: {err}")
             return None, None
+    ensure_download_quality(video_path, url, is_yt, ffmpeg_loc)
 
     audio_path = TEMP_DIR / f"{output_prefix}_audio.m4a"
     audio_format = "bestaudio[ext=m4a]/bestaudio"
@@ -4011,7 +4065,7 @@ def build_cam_cmd(input_path, output_path, ass_path, band_path, geo, effective_d
         f"[0:v]setpts=PTS-STARTPTS,split=2[a][b];"
         f"[a]crop={geo['crop_w']}:{geo['crop_h']}:{geo['crop_x']}:{geo['crop_y']},"
         f"scale={w}:{geo['cam_h']}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={w}:{geo['cam_h']},setsar=1[cam];"
+        f"crop={w}:{geo['cam_h']}{',' + CAM_SHARPEN if geo.get('ampliacao', 1) > CAM_SHARPEN_ABOVE else ''},setsar=1[cam];"
         f"[b]{game_src}scale={w}:{geo['game_h']}:force_original_aspect_ratio=increase:flags=lanczos,"
         f"crop={w}:{geo['game_h']},setsar=1[game];"
         f"{ordem}vstack=inputs={3 if band_h > 0 else 2}[canvas]"
@@ -4840,6 +4894,7 @@ def export_raw_gameplay(clip, segments, output_path, segment_path, hook_data, ho
         "clip_end": clip['end'],
         "clip_duration": clip['duration'],
         "streamer": STREAMER_NOME,
+        "fonte_resolucao": FONTE_RESOLUCAO,
         "bruto": True,
         "edicao": {"estado": "bruto"},
         "legenda_segmentos": relative_segments(segments, clip['start'], clip['end']),

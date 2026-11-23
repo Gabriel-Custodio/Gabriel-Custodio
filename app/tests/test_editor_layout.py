@@ -648,5 +648,118 @@ class TestLayoutSemTarja(BaseScript):
         self.assertIn("[cam][1:v][game]vstack=inputs=3", cmd[cmd.index("-filter_complex") + 1])
         self.assertIn("-loop", cmd)
 
+
+# ------------------------------------------------------------------ qualidade do vídeo de origem e nitidez da câmera
+class TestQualidadeDoDownload(BaseScript):
+    def setUp(self):
+        super().setUp()
+        g.FONTE_RESOLUCAO = None
+        self.addCleanup(setattr, g, "FONTE_RESOLUCAO", None)
+        self.video = self.temp / "abc_video.mp4"
+        self.video.write_bytes(b"ORIGINAL")
+        self.chamadas = []
+
+    def rodar(self, dims, yt=True, runtime=None, hd_ok=True, hd_dims=(1920, 1080), hd_erro=False):
+        """dims: tamanho do vídeo baixado. O vídeo 'hd' (nova tentativa) tem hd_dims."""
+        def dimensoes(path):
+            return hd_dims if str(path).endswith("_hd.mp4") else dims
+
+        def run(cmd, *a, **k):
+            self.chamadas.append(cmd)
+            if hd_erro:
+                raise RuntimeError("falhou")
+            if hd_ok:
+                Path(cmd[cmd.index("-o") + 1]).write_bytes(b"HD")
+            return hd_ok, "", ""
+        import contextlib
+        import io
+        saida = io.StringIO()
+        with mock.patch.object(g, "get_video_dimensions", dimensoes), mock.patch.object(g, "run_cmd", run), \
+                mock.patch.object(g, "find_js_runtime", lambda: runtime), contextlib.redirect_stdout(saida):
+            g.ensure_download_quality(self.video, "https://www.youtube.com/watch?v=abc", yt, ["--ffmpeg-location", "x"])
+        return saida.getvalue()
+
+    def test_1080p_nao_avisa_nem_tenta_de_novo(self):
+        texto = self.rodar((1920, 1080), runtime="node")
+        self.assertEqual(g.FONTE_RESOLUCAO, "1920x1080")
+        self.assertNotIn("⚠️", texto)
+        self.assertEqual(self.chamadas, [])
+
+    def test_baixa_resolucao_sem_node_orienta_a_instalar(self):
+        texto = self.rodar((1280, 720), runtime=None)
+        self.assertEqual(g.FONTE_RESOLUCAO, "1280x720")
+        self.assertIn("Node.js", texto)
+        self.assertIn("só 1280x720", texto)
+        self.assertEqual(self.chamadas, [])                               # sem runtime, tentar de novo não adianta
+
+    def test_baixa_resolucao_com_node_tenta_o_cliente_web_e_troca_se_melhorar(self):
+        texto = self.rodar((1280, 720), runtime="node")
+        self.assertEqual(len(self.chamadas), 1)
+        self.assertIn("youtube:player_client=web", self.chamadas[0])
+        self.assertEqual(self.video.read_bytes(), b"HD")
+        self.assertEqual(g.FONTE_RESOLUCAO, "1920x1080")
+        self.assertIn("melhor qualidade: 1920x1080", texto)
+        self.assertFalse(self.video.with_name("abc_video_hd.mp4").exists())
+
+    def test_nao_troca_se_a_nova_versao_nao_for_maior(self):
+        self.rodar((1280, 720), runtime="node", hd_dims=(1280, 720))
+        self.assertEqual(self.video.read_bytes(), b"ORIGINAL")
+        self.assertEqual(g.FONTE_RESOLUCAO, "1280x720")
+        self.assertFalse(self.video.with_name("abc_video_hd.mp4").exists())
+
+    def test_falha_na_nova_tentativa_mantem_o_original(self):
+        self.rodar((1280, 720), runtime="node", hd_ok=False)
+        self.assertEqual(self.video.read_bytes(), b"ORIGINAL")
+        self.rodar((1280, 720), runtime="node", hd_erro=True)
+        self.assertEqual(self.video.read_bytes(), b"ORIGINAL")
+
+    def test_outra_plataforma_so_avisa(self):
+        texto = self.rodar((1280, 720), yt=False, runtime="node")
+        self.assertEqual(self.chamadas, [])
+        self.assertIn("só 1280x720", texto)
+
+    def test_sem_dimensoes_nao_faz_nada(self):
+        self.rodar((0, 0), runtime="node")
+        self.assertIsNone(g.FONTE_RESOLUCAO)
+        self.assertEqual(self.chamadas, [])
+
+    def test_o_download_chama_a_checagem(self):
+        fonte = (RAIZ / "gerar_cortes.py").read_text(encoding="utf-8")
+        self.assertIn("ensure_download_quality(video_path, url, is_yt, ffmpeg_loc)", fonte)
+
+    def test_resolucao_vai_para_o_json_do_corte(self):
+        g.FONTE_RESOLUCAO = "1280x720"
+        seg = self.temp / "seg.mp4"
+        seg.write_bytes(b"x" * 100)
+        saida = self.out / "corte_gameplay_1_R.mp4"
+        g.export_raw_gameplay({"start": 0.0, "end": 5.0, "duration": 5.0}, [], saida, seg, {"titulo_gancho": "T"}, "p", "t", 1, 0.2)
+        self.assertEqual(json.loads(saida.with_suffix(".json").read_text(encoding="utf-8"))["fonte_resolucao"], "1280x720")
+
+
+class TestRealceDaCamera(BaseScript):
+    def comando(self, ampliacao):
+        geo = g.custom_geometry(1920, 1080, g.normalize_saved_layout(SALVO))
+        geo["ampliacao"] = ampliacao
+        cmd = g.build_cam_cmd(self.dir / "in.mp4", self.dir / "out.mp4", None, self.dir / "faixa.png", geo, 30.0)
+        return cmd[cmd.index("-filter_complex") + 1]
+
+    def test_camera_muito_ampliada_leva_realce(self):
+        grafo = self.comando(2.0)
+        self.assertIn(g.CAM_SHARPEN, grafo)
+        cam = grafo.split(";[a]")[1].split("[cam]")[0]
+        self.assertIn(g.CAM_SHARPEN, cam)                                  # só na câmera
+        game = grafo.split(";[b]")[1].split("[game]")[0]
+        self.assertNotIn(g.CAM_SHARPEN, game)
+
+    def test_pouca_ampliacao_nao_leva(self):
+        self.assertNotIn(g.CAM_SHARPEN, self.comando(1.0))
+        self.assertNotIn(g.CAM_SHARPEN, self.comando(g.CAM_SHARPEN_ABOVE))
+
+    def test_saida_continua_em_1080x1920(self):
+        grafo = self.comando(2.0)
+        self.assertIn("crop=1080:640", grafo)                              # bloco da câmera: 1080 de largura
+        geo = g.custom_geometry(1920, 1080, g.normalize_saved_layout(SALVO))
+        self.assertEqual(geo["cam_h"] + geo["band_h"] + geo["game_h"], 1920)
+
 if __name__ == "__main__":
     unittest.main()
