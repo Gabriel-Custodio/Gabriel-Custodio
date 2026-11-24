@@ -35,6 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import canais as modulo_canais
 from canais import PLATAFORMAS, RegistroCanais
 
 APP_DIR = Path(__file__).resolve().parent
@@ -721,7 +722,7 @@ class Manipulador(BaseHTTPRequestHandler):
         if caminho == "/api/layouts":
             return self._json({"layouts": self.estado.listar_layouts()})
         if caminho == "/api/canais":
-            return self._json({"canais": self.estado.canais.listar(), "plataformas": list(PLATAFORMAS),
+            return self._json({"canais": self.estado.canais.listar(), "plataformas": list(PLATAFORMAS), "maximo": modulo_canais.MAX_CANAIS,
                                "layouts": [{"slug": l["slug"], "nome": l["nome"]} for l in self.estado.listar_layouts()]})
         if caminho == "/api/log":
             return self._log(consulta)

@@ -2,7 +2,8 @@
 /* Aba "Monitor de lives": a lista de canais (Twitch e YouTube) que o monitor pode assistir, adicionados pelo link do canal.
    Usa $, api, post, selo de app.js. Todo texto vindo do servidor entra na página com textContent. */
 
-const CN = { canais: [], layouts: [], editando: null };
+const CN = { canais: [], layouts: [], editando: null, maximo: 2 };
+const cnCheia = () => CN.canais.length >= CN.maximo;
 
 function cnErro(msg) { $("cn-erro").textContent = msg || ""; $("cn-erro").hidden = !msg; }
 function cnEstado(msg) { $("cn-estado").textContent = msg || ""; $("cn-estado").hidden = !msg; }
@@ -10,12 +11,27 @@ function cnEstado(msg) { $("cn-estado").textContent = msg || ""; $("cn-estado").
 function cnLimpar() {
   CN.editando = null;
   $("cn-titulo-form").textContent = "Monitor de lives";
-  $("cn-salvar").textContent = "Adicionar canal";
-  $("cn-canal").value = ""; $("cn-canal").disabled = false;
+  $("cn-salvar").textContent = "Adicionar";
+  $("cn-canal").value = "";
   $("cn-nome").value = ""; $("cn-obs").value = "";
-  $("cn-cortar").checked = false; $("cn-postar").checked = false;
   $("cn-layout").value = "";
   cnErro(""); cnEstado("");
+  cnAtualizarCheio();
+}
+
+/* Lista cheia (máximo de canais): só dá para editar, apagar ou suspender; para adicionar, apague um canal. */
+function cnAtualizarCheio() {
+  const cheia = cnCheia() && !CN.editando;
+  $("cn-canal").disabled = cheia || !!CN.editando;
+  $("cn-salvar").disabled = cheia;
+  $("cn-contagem").textContent = `${CN.canais.length} de ${CN.maximo}`;
+  if (cheia) cnEstado(`Lista cheia (máximo ${CN.maximo} canais): apague um canal para adicionar outro`);
+  else if ($("cn-estado").textContent.startsWith("Lista cheia")) cnEstado("");
+}
+
+/* Separa vários links colados no mesmo campo (espaço, vírgula, ponto e vírgula ou linha nova) */
+function cnLinks(texto) {
+  return String(texto || "").split(/[\s,;]+/).map((t) => t.trim()).filter(Boolean);
 }
 
 function cnPreencherLayouts() {
@@ -29,9 +45,8 @@ function cnEditar(c) {
   CN.editando = c.id;
   $("cn-titulo-form").textContent = `Editar canal: ${c.nome}`;
   $("cn-salvar").textContent = "Salvar alterações";
-  $("cn-canal").value = c.url_live || c.canal; $("cn-canal").disabled = true;
+  $("cn-canal").value = c.url_live ? c.url_live.replace(/\/live$/, "") : c.canal; $("cn-canal").disabled = true;
   $("cn-nome").value = c.nome || "";
-  $("cn-cortar").checked = c.pode_cortar === true; $("cn-postar").checked = c.pode_postar === true;
   $("cn-obs").value = c.observacoes || "";
   cnPreencherLayouts();
   $("cn-layout").value = c.layout || "";
@@ -78,7 +93,7 @@ function cnLinha(c) {
 async function carregarCanais() {
   try {
     const d = await api("/api/canais");
-    CN.canais = d.canais || []; CN.layouts = d.layouts || [];
+    CN.canais = d.canais || []; CN.layouts = d.layouts || []; CN.maximo = d.maximo || CN.maximo;
   } catch (e) {
     cnErro(e.message);
     return;
@@ -87,6 +102,7 @@ async function carregarCanais() {
   const lista = $("cn-lista");
   lista.replaceChildren(...CN.canais.map(cnLinha));
   $("cn-vazio").hidden = CN.canais.length > 0;
+  cnAtualizarCheio();
 }
 
 async function cnAtivo(c, ativo) {
@@ -110,25 +126,45 @@ async function cnApagar(c) {
 $("cn-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   cnErro(""); cnEstado("");
-  const corpo = {
-    canal: $("cn-canal").value, nome: $("cn-nome").value,
-    pode_cortar: $("cn-cortar").checked, pode_postar: $("cn-postar").checked,
-    layout: $("cn-layout").value, observacoes: $("cn-obs").value,
-  };
   if (CN.editando) {                                  // editar mantém o canal e o estado ativo/suspenso
     const atual = CN.canais.find((c) => c.id === CN.editando);
-    if (atual) { corpo.ativo = atual.ativo !== false; corpo.plataforma = atual.plataforma; corpo.canal = atual.canal; }
+    if (!atual) { cnLimpar(); return; }
+    $("cn-salvar").disabled = true;
+    try {
+      const r = await post("/api/canais", { plataforma: atual.plataforma, canal: atual.canal, ativo: atual.ativo !== false,
+                                            nome: $("cn-nome").value, layout: $("cn-layout").value, observacoes: $("cn-obs").value });
+      CN.editando = null;
+      await carregarCanais();
+      cnLimpar();
+      cnEstado(`Canal “${r.canal.nome}” salvo`);
+    } catch (e) { cnErro(e.message); }
+    finally { $("cn-salvar").disabled = false; }
+    return;
   }
+  const links = cnLinks($("cn-canal").value);
+  if (!links.length) { cnErro("Cole o link do canal."); return; }
+  const novos = new Set(links);
+  if (CN.canais.length + novos.size > CN.maximo) {
+    cnErro(`A lista aceita no máximo ${CN.maximo} canais (já tem ${CN.canais.length}). Apague um canal para adicionar outro.`);
+    return;
+  }
+  const um = links.length === 1;                      // nome, layout e observações valem quando se adiciona um canal por vez
   $("cn-salvar").disabled = true;
+  const salvos = [];
   try {
-    const r = await post("/api/canais", corpo);
-    cnLimpar();
-    cnEstado(`Canal “${r.canal.nome}” salvo`);
+    for (const link of links) {
+      const r = await post("/api/canais", { canal: link, nome: um ? $("cn-nome").value : "",
+                                            layout: um ? $("cn-layout").value : "", observacoes: um ? $("cn-obs").value : "" });
+      salvos.push(r.canal.nome);
+    }
     await carregarCanais();
+    cnLimpar();
+    cnEstado(`Salvo: ${salvos.join(", ")}`);
   } catch (e) {
-    cnErro(e.message);
+    await carregarCanais();
+    cnErro(salvos.length ? `${e.message} (já salvos: ${salvos.join(", ")})` : e.message);
   } finally {
-    $("cn-salvar").disabled = false;
+    cnAtualizarCheio();
   }
 });
 $("cn-limpar").addEventListener("click", cnLimpar);

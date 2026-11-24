@@ -62,6 +62,8 @@ class TestRegistro(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.arq = Path(self.tmp.name) / "canais_permitidos.json"
+        antigo, canais.MAX_CANAIS = canais.MAX_CANAIS, 10              # o limite real (2) tem teste próprio
+        self.addCleanup(setattr, canais, "MAX_CANAIS", antigo)
         self.reg = canais.RegistroCanais(self.arq)
 
     def test_cadastra_e_lista(self):
@@ -84,13 +86,12 @@ class TestRegistro(unittest.TestCase):
         c = self.reg.salvar({"canal": f"https://www.youtube.com/channel/{uc}", "pode_cortar": True, "pode_postar": True})
         self.assertEqual(c["url_live"], f"https://www.youtube.com/channel/{uc}/live")
 
-    def test_exige_as_duas_permissoes(self):
-        for extra in ({"pode_cortar": False}, {"pode_postar": False}, {"pode_cortar": None}, {"pode_postar": "sim"},
-                      {"pode_cortar": 1}):
-            with self.assertRaises(ValueError, msg=str(extra)) as cx:
-                self.reg.salvar(pedido(**extra))
-            self.assertIn("cortar a live E postar", str(cx.exception))
-        self.assertFalse(self.arq.exists())
+    def test_nao_pede_confirmacao_de_permissao(self):
+        c = self.reg.salvar({"canal": "https://www.twitch.tv/alanzoka"})              # sem campos de permissão
+        self.assertTrue(c["pode_cortar"] and c["pode_postar"])                           # estar na lista É a permissão
+        self.assertTrue(self.reg.verificar("twitch.tv/alanzoka")["permitido"])
+        self.reg.salvar(pedido(pode_postar=False))                                       # o que a tela mandar a mais é ignorado
+        self.assertTrue(self.reg.listar()[0]["pode_postar"])
 
     def test_validacoes(self):
         ruins = [pedido(plataforma="kick"), pedido(canal=""), pedido(canal="a b c"), pedido(canal=None),
@@ -168,12 +169,12 @@ class TestRegistro(unittest.TestCase):
         self.assertNotIn("revisar_ate", r["canal_info"])
 
     def test_limite_de_canais(self):
-        antigo, canais.MAX_CANAIS = canais.MAX_CANAIS, 2
-        self.addCleanup(setattr, canais, "MAX_CANAIS", antigo)
+        canais.MAX_CANAIS = 2
         self.reg.salvar(pedido(canal="canal_um"))
         self.reg.salvar(pedido(canal="canal_dois"))
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as cx:
             self.reg.salvar(pedido(canal="canal_tres"))
+        self.assertIn("no máximo 2 canais", str(cx.exception))
         self.reg.salvar(pedido(canal="canal_um", nome="editado"))           # atualizar um existente continua valendo
 
     def test_ordem_da_lista(self):
@@ -181,6 +182,21 @@ class TestRegistro(unittest.TestCase):
         self.reg.salvar(pedido(canal="alfa_canal"))
         self.reg.definir_ativo("twitch:alfa_canal", False)
         self.assertEqual([c["canal"] for c in self.reg.listar()], ["zeta_canal", "alfa_canal"])    # ativos primeiro
+
+
+class TestLimiteDeDoisCanais(unittest.TestCase):
+    def test_o_limite_padrao_e_2(self):
+        self.assertEqual(canais.MAX_CANAIS, 2)
+        with tempfile.TemporaryDirectory() as d:
+            reg = canais.RegistroCanais(Path(d) / "c.json")
+            reg.salvar({"canal": "https://www.twitch.tv/um_canal"})
+            reg.salvar({"canal": "https://www.youtube.com/@outro"})
+            with self.assertRaises(ValueError):
+                reg.salvar({"canal": "https://www.twitch.tv/terceiro"})
+            reg.apagar("twitch:um_canal")                                                  # apagando um, cabe de novo
+            reg.salvar({"canal": "https://www.twitch.tv/terceiro"})
+            reg.salvar({"canal": "https://www.twitch.tv/terceiro", "nome": "Editado"})     # editar não conta como novo
+            self.assertEqual(len(reg.listar()), 2)
 
 
 class TestRotasDeCanais(Base):
@@ -207,12 +223,21 @@ class TestRotasDeCanais(Base):
         self.assertEqual(self.json("POST", "/api/canais/ativo", {"id": "twitch:nao", "ativo": True})[0], 404)
 
     def test_pedidos_invalidos(self):
-        for ruim in (self.corpo(pode_postar=False), self.corpo(plataforma="kick"), self.corpo(canal=""),
+        for ruim in (self.corpo(plataforma="kick"), self.corpo(canal=""),
                      self.corpo(layout="nao_existe")):
             self.assertEqual(self.json("POST", "/api/canais", ruim)[0], 400, repr(ruim)[:70])
         self.assertEqual(self.json("POST", "/api/canais/ativo", {"id": "twitch:x", "ativo": "sim"})[0], 400)
         self.assertEqual(self.json("POST", "/api/canais/verificar", {})[1]["permitido"], False)
         self.assertFalse((self.raiz / "canais_permitidos.json").exists())
+
+    def test_terceiro_canal_e_recusado(self):
+        self.assertEqual(self.json("GET", "/api/canais")[1]["maximo"], 2)
+        self.assertEqual(self.json("POST", "/api/canais", {"canal": "https://www.twitch.tv/um_canal"})[0], 201)
+        self.assertEqual(self.json("POST", "/api/canais", {"canal": "https://www.youtube.com/@outro"})[0], 201)
+        status, r = self.json("POST", "/api/canais", {"canal": "https://www.twitch.tv/terceiro"})
+        self.assertEqual(status, 400)
+        self.assertIn("no máximo 2 canais", r["erro"])
+        self.assertEqual(self.json("POST", "/api/canais", {"canal": "https://www.twitch.tv/um_canal", "nome": "Novo nome"})[0], 201)
 
     def test_layout_existente_e_aceito(self):
         layout = {"nome": "Alan Zoka", "cam": {"x": 0.76, "y": 0.35, "w": 0.22, "h": 0.2},

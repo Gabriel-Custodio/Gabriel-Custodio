@@ -1,7 +1,8 @@
 """Registro de canais permitidos do monitor de lives (só biblioteca padrão).
 
-Regra do projeto: o monitor só assiste a lives de streamers que permitem DUAS coisas: cortar a live e postar os cortes
-em outra plataforma. A permissão é vitalícia: o canal fica na lista até alguém suspender ou apagar. O monitor só pode
+Regra do projeto: o monitor só assiste a lives de streamers que permitem cortar a live e postar os cortes em outra
+plataforma; quem coloca o canal na lista responde por isso (não há campo de confirmação). A permissão é vitalícia: o
+canal fica na lista até alguém suspender ou apagar. A lista tem no máximo MAX_CANAIS canais. O monitor só pode
 entrar numa live cujo canal esteja ativo. Qualquer dúvida (arquivo ilegível, link que não dá para identificar) conta
 como NÃO permitido.
 
@@ -16,7 +17,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 PLATAFORMAS = ("twitch", "youtube")
 NOMES_PLATAFORMA = {"twitch": "Twitch", "youtube": "YouTube"}
-MAX_CANAIS = 200
+MAX_CANAIS = 2                 # a lista aceita no máximo 2 canais (o mesmo limite de lives simultâneas)
 RE_TWITCH = re.compile(r"^[a-z0-9_]{3,25}$")
 RE_YT_HANDLE = re.compile(r"^@[\w.\-]{3,30}$")
 RE_YT_ID = re.compile(r"^UC[\w\-]{22}$")
@@ -172,9 +173,6 @@ class RegistroCanais:
         if plataforma and plat != plataforma:
             raise ValueError("O link é de outra plataforma. Confira a plataforma escolhida.")
         plataforma = plat
-        if dados.get("pode_cortar") is not True or dados.get("pode_postar") is not True:
-            raise ValueError("O canal só entra na lista se o streamer permite cortar a live E postar os cortes em outra "
-                             "plataforma. Marque as duas permissões (só se for verdade).")
         nome = re.sub(r"\s+", " ", _sem_controle(dados.get("nome") or "")).strip()[:60] or canal.lstrip("@")
         observacoes = re.sub(r"\s+", " ", _sem_controle(dados.get("observacoes") or "")).strip()[:300]
         layout = str(dados.get("layout") or "").strip()
@@ -190,7 +188,7 @@ class RegistroCanais:
             canais, corrompido = self._ler()
             antigo = next((c for c in canais if c["id"] == identificador), None)
             if antigo is None and len(canais) >= MAX_CANAIS:
-                raise ValueError(f"Limite de {MAX_CANAIS} canais cadastrados.")
+                raise ValueError(f"A lista aceita no máximo {MAX_CANAIS} canais. Apague um canal para adicionar outro.")
             entrada = {
                 "id": identificador, "plataforma": plataforma, "canal": canal, "nome": nome,
                 "pode_cortar": True, "pode_postar": True, "ativo": ativo, "layout": layout, "observacoes": observacoes,
