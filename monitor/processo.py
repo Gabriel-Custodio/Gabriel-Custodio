@@ -242,6 +242,8 @@ class MonitorCanal:
                         self.contagem[chave] += 1
                     self.ultimo_corte = {**resultado, "em": datetime.now().isoformat(timespec="seconds")}
                 registro["corte"] = resultado
+            if caminho is not None and not caminho.exists():                # o corte foi para Cortes prontos (ou foi descartado)
+                registro["arquivo"] = None
         try:
             self.pasta_estado.mkdir(parents=True, exist_ok=True)
             with open(self.pasta_estado / "momentos.jsonl", "a", encoding="utf-8") as f:
@@ -272,8 +274,8 @@ class MonitorCanal:
             produtor = ProdutorCortes(self.raiz, canal, self.ffmpeg, executar=self.executar, pasta_temp=self.pasta_anel, registrar=log)
         self.ao_momento = produtor
         self.ia_ligada = bool(getattr(produtor, "chave", None))
-        log("IA " + ("ligada: cada momento é transcrito e julgado antes de virar corte" if self.ia_ligada
-                     else "desligada (sem GROQ_API_KEY no .env): vale só a nota dos sinais"))
+        log("IA " + ("ligada: transcreve e escreve o título de cada corte (quem decide se entra é a nota do momento)" if self.ia_ligada
+                     else "desligada (sem GROQ_API_KEY no .env): os cortes entram sem legenda e com o título padrão"))
 
     def iniciar(self):
         self._preparar_produtor()

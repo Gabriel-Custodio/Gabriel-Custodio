@@ -150,8 +150,8 @@ function lvPintar(box, v) {
                     (v.reinicios ? ` · ${v.reinicios} reconexão(ões)` : "");
     if (v.enviar_cortes) {
       n.textContent += ` · ${v.cortes_enviados || 0} corte(s) enviado(s) para Cortes prontos` +
-                       (v.cortes_descartados ? ` (${v.cortes_descartados} descartado(s) pela IA)` : "") +
-                       (v.cortes_erro ? ` · ${v.cortes_erro} com erro` : "") + (v.ia ? " · IA ligada" : " · IA desligada: sem GROQ_API_KEY no .env");
+                       (v.cortes_descartados ? ` (${v.cortes_descartados} descartado(s) por nota baixa)` : "") +
+                       (v.cortes_erro ? ` · ${v.cortes_erro} com erro` : "") + (v.ia ? " · IA ligada (escreve o título)" : " · IA desligada: sem GROQ_API_KEY no .env");
     }
     n.hidden = false;
   } else if (!v.rodando && v.segundos != null) {
@@ -175,7 +175,7 @@ function lvPintar(box, v) {
     let fim = "";
     if (m.corte) {
       const r = m.corte;
-      fim = r.resultado === "enviado" ? ` → enviado para Cortes prontos (${r.arquivo})`
+      fim = r.resultado === "enviado" ? ` → enviado para Cortes prontos${r.potencial ? ` (Potencial ${r.potencial === "alto" ? "Alto" : "Médio"})` : ""}: ${r.arquivo}`
           : r.resultado === "descartado" ? ` → descartado: ${r.motivo || "sem motivo"}`
           : ` → não virou corte: ${r.motivo || r.resultado}`;
     }

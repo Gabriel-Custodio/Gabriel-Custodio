@@ -49,7 +49,7 @@ class BaseCorte(unittest.TestCase):
     def produtor(self, chave="chave-falsa", transcrever=None, julgar=None, **kw):
         def julgar_padrao(texto, resumo, dur):
             self.julgamentos.append((texto, resumo, dur))
-            return {"aprovar": True, "score": 8.5, "reason": "reação forte", "titulo_gancho": "NÃO ACREDITO NISSO", "pergunta_cta": "VOCÊ VIRIA?"}
+            return {"score": 8.5, "reason": "reação forte", "titulo_gancho": "NÃO ACREDITO NISSO", "pergunta_cta": "VOCÊ VIRIA?"}
         return corte.ProdutorCortes(self.raiz, CANAL, "ffmpeg-falso", chave=chave, executar=self.executar,
                                     transcrever=transcrever or (lambda audio: FALA), julgar=julgar or julgar_padrao,
                                     agora=lambda: datetime(2026, 11, 24, 21, 30, 5), registrar=lambda m, n="INFO": self.logs.append((n, m)), **kw)
@@ -59,20 +59,21 @@ class BaseCorte(unittest.TestCase):
 
 
 class TestProdutorCortes(BaseCorte):
-    def test_aprovado_gera_bruto_copia_visivel_e_json_completo(self):
-        r = self.produtor()(momento(), self.candidato)
-        self.assertEqual((r["resultado"], r["fonte"], r["score"]), ("enviado", "ia", 8.5))
+    def test_corte_alto_gera_bruto_copia_visivel_e_json_completo(self):
+        r = self.produtor()(momento(8.0), self.candidato)
+        self.assertEqual((r["resultado"], r["potencial"], r["nota"]), ("enviado", "alto", 8.0))
         nome = r["arquivo"]
-        self.assertEqual(nome, "live_alanzoka_20261124_213005.mp4")
+        self.assertEqual(nome, "CorteLive_20261124_213005_nota8.0.mp4")
         saida = self.raiz / "cortes_prontos"
-        self.assertEqual((saida / nome).read_bytes(), self.candidato.read_bytes())
-        self.assertEqual((saida / "_brutos" / nome).read_bytes(), self.candidato.read_bytes())
-        self.assertTrue(self.candidato.exists())                                     # o candidato continua na pasta da live
+        self.assertEqual((saida / nome).read_bytes(), b"corte" * 500)
+        self.assertEqual((saida / "_brutos" / nome).read_bytes(), b"corte" * 500)
+        self.assertFalse(self.candidato.exists())                                    # o candidato virou o corte: não sobra cópia na pasta da live
         m = self.meta(nome)
-        self.assertEqual((m["titulo_gancho"], m["pergunta_cta"], m["nota"]), ("NÃO ACREDITO NISSO", "VOCÊ VIRIA?", 85))
+        self.assertEqual((m["titulo_gancho"], m["pergunta_cta"], m["nota"]), ("NÃO ACREDITO NISSO", "VOCÊ VIRIA?", 80))
+        self.assertEqual((m["potencial"], m["score_selecao"], m["score_ia"], m["motivo_ia"]), ("alto", 8.0, 8.5, "reação forte"))
         self.assertTrue(m["bruto"])
         self.assertEqual(m["edicao"], {"estado": "bruto"})
-        self.assertEqual((m["modo"], m["fonte_titulo"], m["fonte_selecao"]), ("gameplay", "ia_texto_real", "ia"))
+        self.assertEqual((m["modo"], m["fonte_titulo"], m["fonte_selecao"]), ("gameplay", "ia_texto_real", "sinais"))
         self.assertEqual((m["clip_start"], m["clip_end"], m["clip_duration"]), (0.0, 44.5, 44.5))
         self.assertEqual(m["streamer"], "Alan")
         self.assertEqual(m["transcricao"], "meu deus eu não acredito nisso olha o que acabou de acontecer aqui gente")
@@ -84,6 +85,34 @@ class TestProdutorCortes(BaseCorte):
         self.assertFalse(list(saida.glob("*.tmp")) or list((saida / "_brutos").glob("*.tmp")))
         self.assertFalse(list((self.raiz / "temp_downloads" / "lives").glob("*.mp3")))       # áudio temporário apagado
 
+    def test_faixas_de_nota(self):
+        c = corte.ProdutorCortes.classificar
+        for nota, esperado in ((0, "descartado"), (5.4, "descartado"), (6.4, "descartado"), (6.44, "descartado"),
+                               (6.5, "medio"), (6.6, "medio"), (7.0, "medio"), (7.5, "medio"), (7.54, "medio"), (7.56, "alto"),
+                               (7.6, "alto"), (9.9, "alto"), (10, "alto"), (None, "descartado")):
+            self.assertEqual(c(nota)[1], esperado, nota)
+        self.assertEqual(c(7.66), (7.7, "alto"))                                      # a nota arredondada é a do nome e do painel
+
+    def test_o_nome_e_a_marcacao_seguem_a_nota(self):
+        p = self.produtor()
+        medio = p(momento(7.0), self.candidato)
+        self.assertEqual((medio["potencial"], medio["arquivo"]), ("medio", "CorteLive_20261124_213005_nota7.0.mp4"))
+        self.assertEqual(self.meta(medio["arquivo"])["potencial"], "medio")
+        self.candidato.write_bytes(b"corte" * 500)
+        self.assertEqual(p(momento(6.5), self.candidato)["potencial"], "medio")
+        self.candidato.write_bytes(b"corte" * 500)
+        self.assertEqual(p(momento(7.6), self.candidato)["arquivo"], "CorteLive_20261124_213005_nota7.6.mp4")
+
+    def test_abaixo_de_6_5_e_descartado_sem_gastar_transcricao_nem_ia(self):
+        chamadas = []
+        p = self.produtor(transcrever=lambda a: chamadas.append("whisper") or FALA, julgar=lambda t, s, d: chamadas.append("ia"))
+        r = p(momento(6.4), self.candidato)
+        self.assertEqual((r["resultado"], r["nota"]), ("descartado", 6.4))
+        self.assertIn("6.5", r["motivo"])
+        self.assertEqual(chamadas, [])
+        self.assertFalse((self.raiz / "cortes_prontos").exists())
+        self.assertFalse(self.candidato.exists())                                    # descartado de vez
+
     def test_a_ia_recebe_a_transcricao_e_os_sinais(self):
         self.produtor()(momento(), self.candidato)
         texto, resumo, dur = self.julgamentos[0]
@@ -94,56 +123,50 @@ class TestProdutorCortes(BaseCorte):
         self.assertIn("meu deus", prompt)
         self.assertIn("NÃO são fatos", prompt)
         self.assertIn("Alan", prompt)
+        self.assertNotIn("aprovar", prompt)                                           # a IA não aprova nem reprova
 
-    def test_ia_reprova_descarta_e_nao_escreve_nada(self):
-        r = self.produtor(julgar=lambda t, s, d: {"aprovar": False, "score": 3.0, "reason": "só enrolação",
-                                                  "titulo_gancho": "", "pergunta_cta": ""})(momento(), self.candidato)
-        self.assertEqual((r["resultado"], r["motivo"]), ("descartado", "só enrolação"))
-        self.assertFalse((self.raiz / "cortes_prontos").exists())
-
-    def test_nota_da_ia_abaixo_do_minimo_descarta_mesmo_com_aprovar_true(self):
-        r = self.produtor(julgar=lambda t, s, d: {"aprovar": True, "score": 5.0, "reason": "meh",
-                                                  "titulo_gancho": "X", "pergunta_cta": "Y?"})(momento(), self.candidato)
-        self.assertEqual(r["resultado"], "descartado")
+    def test_a_ia_com_nota_baixa_nao_barra_o_corte(self):
+        r = self.produtor(julgar=lambda t, s, d: {"score": 2.0, "reason": "só enrolação", "titulo_gancho": "", "pergunta_cta": ""})(momento(9.0), self.candidato)
+        self.assertEqual((r["resultado"], r["potencial"]), ("enviado", "alto"))
+        m = self.meta(r["arquivo"])
+        self.assertEqual((m["score_ia"], m["motivo_ia"], m["nota"]), (2.0, "só enrolação", 90))
 
     def test_sem_titulo_da_ia_usa_o_gancho_padrao(self):
-        r = self.produtor(julgar=lambda t, s, d: {"aprovar": True, "score": 7.0, "reason": "ok",
-                                                  "titulo_gancho": "", "pergunta_cta": ""})(momento(), self.candidato)
+        r = self.produtor(julgar=lambda t, s, d: {"score": 7.0, "reason": "ok", "titulo_gancho": "", "pergunta_cta": ""})(momento(), self.candidato)
         m = self.meta(r["arquivo"])
         self.assertEqual((m["titulo_gancho"], m["fonte_titulo"]), ("MOMENTO INCRÍVEL NA LIVE", "padrao"))
 
-    def test_ia_fora_do_ar_cai_na_nota_dos_sinais(self):
-        alto = self.produtor(julgar=lambda t, s, d: None)(momento(8.0), self.candidato)
-        self.assertEqual((alto["resultado"], alto["fonte"]), ("enviado", "sinais"))
-        baixo = self.produtor(julgar=lambda t, s, d: None)(momento(5.0), self.candidato)
-        self.assertEqual((baixo["resultado"], baixo["fonte"]), ("descartado", "sinais"))
+    def test_ia_fora_do_ar_ou_quebrada_o_corte_entra_igual(self):
+        r = self.produtor(julgar=lambda t, s, d: None)(momento(8.0), self.candidato)
+        self.assertEqual((r["resultado"], r["potencial"]), ("enviado", "alto"))
+        self.assertIsNone(self.meta(r["arquivo"])["score_ia"])
+        self.candidato.write_bytes(b"corte" * 500)
+
         def quebra(t, s, d):
             raise RuntimeError("rede")
-        self.assertEqual(self.produtor(julgar=quebra)(momento(5.0), self.candidato)["resultado"], "descartado")
+        self.assertEqual(self.produtor(julgar=quebra)(momento(7.0), self.candidato)["resultado"], "enviado")
         self.assertTrue(any(n == "WARN" and "IA falhou" in m for n, m in self.logs))
 
     def test_sem_chave_nao_transcreve_nem_chama_a_ia(self):
         chamadas = []
         p = self.produtor(chave=None, transcrever=lambda a: chamadas.append(a) or FALA, julgar=lambda t, s, d: chamadas.append("ia"))
         r = p(momento(8.0), self.candidato)
-        self.assertEqual((r["resultado"], r["fonte"]), ("enviado", "sinais"))
+        self.assertEqual((r["resultado"], r["potencial"]), ("enviado", "alto"))
         self.assertEqual(chamadas, [])
         m = self.meta(r["arquivo"])
         self.assertEqual((m["transcricao"], m["legenda_segmentos"], m["fonte_titulo"]), ("", [], "padrao"))
-        self.assertIn("sem chave", r["motivo"])
-        self.assertEqual(self.produtor(chave=None)(momento(6.5), self.candidato)["resultado"], "descartado")
 
-    def test_quase_sem_fala_usa_so_os_sinais(self):
+    def test_quase_sem_fala_nao_chama_a_ia(self):
         chamadas = []
         p = self.produtor(transcrever=lambda a: [{"start": 1, "end": 2, "text": "ah"}], julgar=lambda t, s, d: chamadas.append(1))
-        self.assertEqual(p(momento(8.0), self.candidato)["fonte"], "sinais")
+        self.assertEqual(p(momento(8.0), self.candidato)["resultado"], "enviado")
         self.assertEqual(chamadas, [])
 
     def test_falha_na_transcricao_nao_derruba(self):
         def quebra(audio):
             raise RuntimeError("whisper fora")
         r = self.produtor(transcrever=quebra)(momento(8.0), self.candidato)
-        self.assertEqual((r["resultado"], r["fonte"]), ("enviado", "sinais"))
+        self.assertEqual(r["resultado"], "enviado")
 
     def test_sem_arquivo_candidato(self):
         self.assertEqual(self.produtor()(momento(), None)["resultado"], "sem_corte")
@@ -151,14 +174,18 @@ class TestProdutorCortes(BaseCorte):
 
     def test_nomes_nao_se_sobrepoem(self):
         p = self.produtor()
-        a, b = p(momento(), self.candidato)["arquivo"], p(momento(), self.candidato)["arquivo"]
+        a = p(momento(), self.candidato)["arquivo"]
+        self.candidato.write_bytes(b"corte" * 500)
+        b = p(momento(), self.candidato)["arquivo"]
         self.assertNotEqual(a, b)
         self.assertTrue(b.endswith("_2.mp4"))
 
-    def test_nome_de_canal_youtube(self):
-        p = corte.ProdutorCortes(self.raiz, {**CANAL, "plataforma": "youtube", "canal": "@Fulano.Tal"}, "ffmpeg-falso", chave=None,
-                                 executar=self.executar, agora=lambda: datetime(2026, 1, 2, 3, 4, 5))
-        self.assertEqual(p(momento(9.0), self.candidato)["arquivo"], "live_fulano-tal_20260102_030405.mp4")
+    def test_o_corte_nao_leva_o_nome_do_canal_mas_o_json_leva(self):
+        p = corte.ProdutorCortes(self.raiz, {**CANAL, "plataforma": "youtube", "canal": "@Fulano.Tal", "nome": "Fulano"}, "ffmpeg-falso",
+                                 chave=None, executar=self.executar, agora=lambda: datetime(2026, 1, 2, 3, 4, 5))
+        nome = p(momento(9.0), self.candidato)["arquivo"]
+        self.assertEqual(nome, "CorteLive_20260102_030405_nota9.0.mp4")
+        self.assertEqual(self.meta(nome)["live"]["canal"], "@Fulano.Tal")
 
     def test_segmentos_do_corte_descarta_lixo(self):
         s = corte.segmentos_do_corte([{"start": "1", "end": 2, "text": " oi ", "words": [{"word": "oi", "start": 1, "end": 2}, {"x": 1}]},
@@ -189,7 +216,8 @@ class TestLigacaoComOGerarCortes(BaseCorte):
         resposta = '```json\n{"aprovar": true, "score": 8.2, "reason": "reação forte", "titulo_gancho": "\\"Meu deus!\\" que isso aqui foi", "pergunta_cta": "você viu isso agora mesmo?"}\n```'
         with mock.patch.object(g, "groq_chat_with_fallback", return_value=resposta) as chat:
             r = corte.julgar_groq(RAIZ, "k", "meu deus que isso", {"sinais": {"audio": 1}, "detalhes": ["+9 dB"]}, 44.0, "Alan")
-        self.assertEqual((r["aprovar"], r["score"], r["reason"]), (True, 8.2, "reação forte"))
+        self.assertEqual((r["score"], r["reason"]), (8.2, "reação forte"))
+        self.assertNotIn("aprovar", r)
         self.assertEqual(r["titulo_gancho"], "MEU DEUS! QUE ISSO AQUI")                 # no máx. 5 palavras, caixa alta, sem aspas
         self.assertEqual(r["pergunta_cta"], "você viu isso agora?")
         self.assertIn("meu deus que isso", chat.call_args[0][0][0]["content"])
@@ -197,17 +225,18 @@ class TestLigacaoComOGerarCortes(BaseCorte):
     def test_julgar_groq_resposta_ruim_devolve_none(self):
         from unittest import mock
         import gerar_cortes as g
-        for ruim in (None, "", "não sei", '{"aprovar": true}', '{"score": "alto"}', "[1, 2]"):
+        for ruim in (None, "", "não sei", '{"aprovar": true}', '{"score": "alto"}', '{"reason": "x"}', "[1, 2]"):
             with mock.patch.object(g, "groq_chat_with_fallback", return_value=ruim):
                 self.assertIsNone(corte.julgar_groq(RAIZ, "k", "texto", {}, 40.0, "Alan"), repr(ruim))
 
-    def test_aprovar_ausente_vale_pela_nota(self):
+    def test_so_o_titulo_ja_serve_e_so_a_nota_tambem(self):
         from unittest import mock
         import gerar_cortes as g
-        with mock.patch.object(g, "groq_chat_with_fallback", return_value='{"score": 7.5, "reason": "ok"}'):
-            self.assertTrue(corte.julgar_groq(RAIZ, "k", "texto", {}, 40.0, "Alan")["aprovar"])
+        with mock.patch.object(g, "groq_chat_with_fallback", return_value='{"titulo_gancho": "Que loucura", "pergunta_cta": "viu?"}'):
+            r = corte.julgar_groq(RAIZ, "k", "texto", {}, 40.0, "Alan")
+        self.assertEqual((r["score"], r["titulo_gancho"], r["pergunta_cta"]), (None, "QUE LOUCURA", "viu?"))
         with mock.patch.object(g, "groq_chat_with_fallback", return_value='{"score": 4, "reason": "ok"}'):
-            self.assertFalse(corte.julgar_groq(RAIZ, "k", "texto", {}, 40.0, "Alan")["aprovar"])
+            self.assertEqual(corte.julgar_groq(RAIZ, "k", "texto", {}, 40.0, "Alan")["score"], 4.0)
 
     def test_transcrever_groq_chama_o_whisper_do_projeto(self):
         from unittest import mock
@@ -225,7 +254,7 @@ class TestNoMonitor(unittest.TestCase):
 
         class T(BaseProcesso):
             def runTest(self):
-                resultados = iter([{"resultado": "enviado", "arquivo": "live_x.mp4", "score": 8.0, "fonte": "ia", "motivo": "boa"},
+                resultados = iter([{"resultado": "enviado", "arquivo": "CorteLive_x.mp4", "nota": 8.0, "potencial": "alto", "motivo": "boa"},
                                    {"resultado": "descartado", "score": 3.0, "fonte": "ia", "motivo": "fraca"}])
                 m = self.monitor(volume, enviar_cortes=True, produtor=lambda mom, caminho: next(resultados))
                 self.assertEqual(m.executar_ate_parar(), 0)
@@ -234,7 +263,7 @@ class TestNoMonitor(unittest.TestCase):
                 self.assertEqual(st["ultimo_corte"]["resultado"], "descartado")
                 ms = self.momentos(m)
                 self.assertEqual([x["corte"]["resultado"] for x in ms], ["enviado", "descartado"])
-                self.assertEqual(ms[0]["corte"]["arquivo"], "live_x.mp4")
+                self.assertEqual(ms[0]["corte"]["arquivo"], "CorteLive_x.mp4")
 
         t = T()
         t.setUp()
@@ -287,16 +316,16 @@ class TestNoMonitor(unittest.TestCase):
                 self.executar_original = self.executar
                 info = {"plataforma": "twitch", "canal": "alanzoka", "nome": "Alan", "layout": "", "url": "u"}
                 p = corte.ProdutorCortes(self.raiz, info, "ffmpeg-falso", chave="k", executar=exe, transcrever=lambda a: FALA,
-                                         julgar=lambda t, s, d: {"aprovar": True, "score": 9.0, "reason": "ótimo",
+                                         julgar=lambda t, s, d: {"score": 9.0, "reason": "ótimo",
                                                                  "titulo_gancho": "OLHA ISSO", "pergunta_cta": "E AGORA?"},
                                          pasta_temp=self.raiz / "t")
                 m = processo.MonitorCanal(raiz=self.raiz, replay=self.video, ffmpeg="ffmpeg-falso", executar=exe,
                                           fabrica_ingestor=self.fabrica(volume, 60), enviar_cortes=True, produtor=p)
                 self.assertEqual(m.executar_ate_parar(), 0)
                 self.assertEqual(self.status(m)["cortes_enviados"], 2)
-                mp4 = sorted((self.raiz / "cortes_prontos").glob("live_*.mp4"))
+                mp4 = sorted((self.raiz / "cortes_prontos").glob("CorteLive_*.mp4"))
                 teste.assertEqual(len(mp4), 2)
-                teste.assertEqual(len(list((self.raiz / "cortes_prontos" / "_brutos").glob("live_*.mp4"))), 2)
+                teste.assertEqual(len(list((self.raiz / "cortes_prontos" / "_brutos").glob("CorteLive_*.mp4"))), 2)
 
         t = T()
         t.setUp()
@@ -316,14 +345,15 @@ class TestCorteNaListaDeCortesProntos(Base):
                 Path(cmd[-1]).write_bytes(b"mp3" * 100)
             return SimpleNamespace(returncode=0, stdout="", stderr="Duration: 00:00:45.00,")
         c = corte.ProdutorCortes(self.raiz, CANAL, "ffmpeg-falso", chave="k", executar=exe, transcrever=lambda a: FALA,
-            julgar=lambda t, s, d: {"aprovar": True, "score": 8.0, "reason": "boa", "titulo_gancho": "UAU", "pergunta_cta": "VIU?"})
+            julgar=lambda t, s, d: {"score": 8.0, "reason": "boa", "titulo_gancho": "UAU", "pergunta_cta": "VIU?"})
         cand = self.raiz / "momento.mp4"
         cand.write_bytes(b"corte" * 500)
         nome = c(momento(), cand)["arquivo"]
         _, d = self.json("GET", "/api/cortes")
         item = next(x for x in d["cortes"] if x["nome"] == nome)
         self.assertEqual((item["titulo"], item["nota"], item["modo"], item["bruto"], item["editavel"]), ("UAU", 80, "gameplay", True, True))
-        self.assertEqual((item["origem"], item["canal"]), ("live", "Alan"))
+        self.assertEqual((item["origem"], item["canal"], item["potencial"]), ("live", "Alan", "alto"))
+        self.assertTrue(nome.startswith("CorteLive_"))
         self.assertEqual(self.json("POST", "/api/cortes/editar", {"nome": nome, "opcoes": {"layout": "inteiro"}})[0], 201)
 
 

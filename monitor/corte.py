@@ -1,13 +1,12 @@
 """Do momento detectado ao corte BRUTO em "Cortes prontos" (a mesma coisa que o modo Gameplay faz com um vídeo).
 
-Para cada momento que o monitor detecta:
-  1. transcreve a fala do corte candidato (Whisper do Groq);
-  2. a IA (Groq) lê a transcrição e os sinais e decide: serve como corte? nota 0-10, motivo, título e pergunta;
-  3. se servir, guarda o corte BRUTO (sem layout, tarja nem legenda) em cortes_prontos/_brutos + uma cópia visível em
-     cortes_prontos, com o .json no mesmo formato do modo Gameplay (legenda_segmentos, bruto, edicao) mais a origem
-     (live, canal, sinais). Dali segue o fluxo normal: Editar, linha do tempo, aprovar.
-Sem chave do Groq ou sem fala, vale só a nota dos sinais (mais exigente) e o corte vai sem legenda.
-A IA nunca vê a imagem e nunca inventa tempo: o corte é a janela que o monitor ancorou no pico.
+Quem decide é a NOTA do momento (0-10, a que o painel mostra): abaixo de 6,5 o corte é descartado; de 6,5 a 7,5 entra com
+a marcação "Potencial Médio"; acima de 7,5 (7,6 a 10) entra com "Potencial Alto". A IA NÃO veta: para os momentos que
+entram, ela lê a transcrição e escreve o título, a pergunta e o motivo (e dá a própria nota, guardada à parte).
+O corte é o candidato que o monitor extraiu (a janela ancorada no pico) e vai para cortes_prontos/_brutos + uma cópia
+visível em cortes_prontos, com o .json no formato do modo Gameplay (legenda_segmentos, bruto, edicao) e a origem (live,
+canal, sinais). Dali segue o fluxo normal: Editar, linha do tempo, aprovar. Nome: CorteLive_AAAAMMDD_HHMMSS_notaN.N.mp4.
+Sem chave do Groq ou sem fala, o corte vai igual, sem legenda e com o título padrão.
 """
 import json
 import os
@@ -18,9 +17,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-NOTA_MINIMA_IA = 6.0          # score 0-10 que a IA precisa dar para o corte ir para "Cortes prontos"
-NOTA_MINIMA_SINAIS = 7.0      # sem IA (sem chave, sem fala ou IA fora do ar): nota dos sinais (0-10) mínima
-PALAVRAS_MINIMAS = 6          # menos palavras que isso = "sem fala"
+NOTA_DESCARTE = 6.5           # nota (0-10) abaixo disso: o corte é descartado
+NOTA_ALTO = 7.5               # acima disso (7,6 a 10): Potencial Alto; de 6,5 a 7,5: Potencial Médio
+PALAVRAS_MINIMAS = 6          # menos palavras que isso = "sem fala": a IA nem é chamada
 TEXTO_MAX_CHARS = 2400        # quanto da transcrição vai para a IA
 BRUTOS = "_brutos"
 RE_NOME = re.compile(r"[^a-z0-9_-]+")
@@ -93,26 +92,29 @@ def montar_prompt(texto, resumo, duracao, canal_nome):
     tipos = ", ".join(sorted((resumo.get("sinais") or {}).keys())) or "nenhum"
     return (
         "Você é um editor especialista em Shorts/TikTok/Reels de games e lives. Abaixo está a transcrição EXATA da fala "
-        f"de um trecho de {duracao:.0f} segundos de uma live de {canal_nome or 'um streamer'}, que o sistema separou "
-        "porque houve um pico (volume, chat ou palavras de reação). Decida se vale virar um corte.\n\n"
-        "ACEITE: reação explosiva, história engraçada ou chocante, clutch/vitória, fail épico, frase de impacto, risada.\n"
-        "REJEITE: saudações, enrolação, explicação de contexto, conversa com o chat sem graça, texto sem sentido "
-        "(transcrição ruim) ou fala cortada que não faz sentido sozinha.\n\n"
+        f"de um trecho de {duracao:.0f} segundos de uma live de {canal_nome or 'um streamer'}, que o sistema JÁ escolheu "
+        "como corte porque houve um pico (volume, chat ou palavras de reação). Seu trabalho é escrever o título, a "
+        "pergunta e dar uma nota ao trecho.\n\n"
+        "Uma nota alta é para reação explosiva, história engraçada ou chocante, clutch/vitória, fail épico, frase de "
+        "impacto, risada. Nota baixa é para saudação, enrolação, explicação de contexto, leitura de doações, conversa "
+        "sem graça ou texto sem sentido (transcrição ruim).\n\n"
         f"SINAIS DETECTADOS (só contexto, NÃO são fatos do vídeo): {tipos}; {sinais}\n\n"
         f"TRANSCRIÇÃO:\n{texto[:TEXTO_MAX_CHARS]}\n\n"
         "Responda APENAS com JSON válido neste formato:\n"
-        '{"aprovar": true, "score": 8.5, "reason": "motivo curto (máx 60 caracteres)", '
+        '{"score": 8.5, "reason": "motivo curto (máx 60 caracteres)", '
         '"titulo_gancho": "TÍTULO EM CAIXA ALTA, MÁX 5 PALAVRAS", "pergunta_cta": "PERGUNTA CURTA?"}\n\n'
         "Regras:\n"
         "- score: de 0 a 10, o potencial viral do trecho.\n"
         "- titulo_gancho e pergunta_cta: baseados SOMENTE no que foi dito na transcrição. NÃO invente fatos, nomes nem "
-        "acontecimentos. Se o texto não fizer sentido, use \"\" nos dois.\n"
-        "- Se não for bom, use \"aprovar\": false."
+        "acontecimentos. Se o texto não fizer sentido, use \"\" nos dois."
     )
 
 
 def julgar_groq(raiz, chave, texto, resumo, duracao, canal_nome):
-    """-> {"aprovar", "score", "reason", "titulo_gancho", "pergunta_cta"} ou None se a IA não respondeu direito."""
+    """-> {"score" (ou None), "reason", "titulo_gancho", "pergunta_cta"} ou None se a IA não respondeu direito.
+
+    A IA não aprova nem reprova: quem decide se o corte entra é a nota do momento.
+    """
     g = _gerar_cortes(raiz)
     resposta = g.groq_chat_with_fallback([{"role": "user", "content": montar_prompt(texto, resumo, duracao, canal_nome)}],
                                          chave, g.get_text_models_to_try, max_tokens=500, temperature=0.3)
@@ -123,15 +125,14 @@ def julgar_groq(raiz, chave, texto, resumo, duracao, canal_nome):
         return None
     try:
         score = float(dados.get("score"))
+        score = None if score != score else max(0.0, min(10.0, score))      # NaN = sem nota
     except (TypeError, ValueError):
+        score = None
+    titulo, pergunta = g._clean_hook_title(dados.get("titulo_gancho")), g._clean_hook_question(dados.get("pergunta_cta"))
+    if score is None and not (titulo and pergunta):
         return None
-    if score != score:                                          # NaN
-        return None
-    aprovar = dados.get("aprovar")
-    return {"aprovar": bool(aprovar) if isinstance(aprovar, bool) else score >= NOTA_MINIMA_IA,
-            "score": max(0.0, min(10.0, score)), "reason": str(dados.get("reason") or "").strip()[:60],
-            "titulo_gancho": g._clean_hook_title(dados.get("titulo_gancho")),
-            "pergunta_cta": g._clean_hook_question(dados.get("pergunta_cta"))}
+    return {"score": score, "reason": str(dados.get("reason") or "").strip()[:60],
+            "titulo_gancho": titulo, "pergunta_cta": pergunta}
 
 
 def segmentos_do_corte(segmentos):
@@ -172,31 +173,41 @@ class ProdutorCortes:
         self.log = registrar or (lambda msg, nivel="INFO": print(f"[{nivel}] {msg}", flush=True))
 
     # ------------------------------------------------------------------ decisão
-    def _decidir(self, momento, resumo, texto, palavras, duracao):
-        """-> (aprovado, fonte, score 0-10, motivo, ia). ia é o dicionário da IA (ou None)."""
-        nota_sinais = float(resumo.get("nota") or 0)
-        if self.chave and palavras >= PALAVRAS_MINIMAS:
-            try:
-                ia = self.julgar(texto, resumo, duracao)
-            except Exception as e:                                   # a IA nunca derruba o monitor
-                self.log(f"a IA falhou ao julgar o momento: {e}", "WARN")
-                ia = None
-            if ia is not None:
-                ok = bool(ia["aprovar"]) and ia["score"] >= NOTA_MINIMA_IA
-                return ok, "ia", ia["score"], ia["reason"] or ("aprovado pela IA" if ok else "a IA não achou bom"), ia
-            motivo = "IA indisponível; vale a nota dos sinais"
-        elif not self.chave:
-            motivo = "sem chave do Groq; vale a nota dos sinais"
-        else:
-            motivo = "quase sem fala; vale a nota dos sinais"
-        ok = nota_sinais >= NOTA_MINIMA_SINAIS
-        return ok, "sinais", nota_sinais, motivo if ok else f"{motivo} ({nota_sinais:.1f} < {NOTA_MINIMA_SINAIS:.1f})", None
+    @staticmethod
+    def classificar(nota):
+        """(nota arredondada em 1 casa, "descartado" | "medio" | "alto"): a mesma nota que aparece no nome e no painel."""
+        n = round(float(nota or 0), 1)
+        if n < NOTA_DESCARTE:
+            return n, "descartado"
+        return n, ("medio" if n <= NOTA_ALTO else "alto")
+
+    def _julgar(self, texto, resumo, duracao, palavras):
+        """A IA só escreve título, pergunta e motivo (e dá a nota dela). None se não houver chave, fala ou resposta."""
+        if not self.chave or palavras < PALAVRAS_MINIMAS:
+            return None
+        try:
+            return self.julgar(texto, resumo, duracao)
+        except Exception as e:                                       # a IA nunca derruba o monitor
+            self.log(f"a IA falhou ao escrever o título do corte: {e}", "WARN")
+            return None
+
+    def _apagar(self, caminho):
+        try:
+            Path(caminho).unlink()
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------ gancho
     def __call__(self, momento, caminho):
         if not caminho or not Path(caminho).is_file():
             return {"resultado": "sem_corte", "motivo": "o corte candidato não foi extraído"}
         resumo = momento.resumo()
+        nota, potencial = self.classificar(resumo.get("nota"))
+        if potencial == "descartado":
+            self._apagar(caminho)                                    # descartado de vez: não sobra arquivo
+            self.log(f"momento descartado: nota {nota:.1f} abaixo de {NOTA_DESCARTE:.1f}")
+            return {"resultado": "descartado", "nota": nota,
+                    "motivo": f"nota {nota:.1f}, abaixo do mínimo de {NOTA_DESCARTE:.1f}"}
         duracao = duracao_do_video(self.ffmpeg, caminho, self.executar) or (momento.t1 - momento.t0)
         self.pasta_temp.mkdir(parents=True, exist_ok=True)
         segmentos, texto = [], ""
@@ -209,41 +220,37 @@ class ProdutorCortes:
                 self.log(f"não foi possível transcrever o corte: {e}", "WARN")
                 segmentos = []
             finally:
-                try:
-                    audio.unlink()
-                except OSError:
-                    pass
+                self._apagar(audio)
             texto = " ".join(s["text"] for s in segmentos).strip()
         palavras = len(texto.split())
-        ok, fonte, score, motivo, ia = self._decidir(momento, resumo, texto, palavras, duracao)
-        base = {"fonte": fonte, "score": round(score, 1), "motivo": motivo}
-        if not ok:
-            self.log(f"momento descartado ({fonte}, {score:.1f}): {motivo}")
-            return {"resultado": "descartado", **base}
+        ia = self._julgar(texto, resumo, duracao, palavras)
         try:
-            nome = self._exportar(momento, resumo, Path(caminho), duracao, segmentos, texto, palavras, fonte, score, motivo, ia)
+            nome = self._exportar(momento, resumo, Path(caminho), duracao, segmentos, texto, palavras, nota, potencial, ia)
         except OSError as e:
             self.log(f"não foi possível guardar o corte bruto: {e}", "ERROR")
-            return {"resultado": "erro", "motivo": f"não foi possível guardar o corte: {e}"}
-        self.log(f"corte bruto enviado para Cortes prontos: {nome} (nota {round(score * 10)}/100, {fonte})", "CLIP")
-        return {"resultado": "enviado", "arquivo": nome, **base}
+            return {"resultado": "erro", "nota": nota, "motivo": f"não foi possível guardar o corte: {e}"}
+        self._apagar(caminho)                                        # o corte agora está em Cortes prontos
+        rotulo = "Potencial Alto" if potencial == "alto" else "Potencial Médio"
+        self.log(f"corte enviado para Cortes prontos: {nome} (nota {nota:.1f}, {rotulo})", "CLIP")
+        return {"resultado": "enviado", "arquivo": nome, "nota": nota, "potencial": potencial,
+                "motivo": (ia or {}).get("reason") or rotulo}
 
     # ------------------------------------------------------------------ gravação
-    def _nome(self, canal):
-        base = f"live_{RE_NOME.sub('-', str(canal.get('canal', 'canal')).lower().lstrip('@')).strip('-')[:30] or 'canal'}_{self.agora().strftime('%Y%m%d_%H%M%S')}"
+    def _nome(self, nota):
+        base = f"CorteLive_{self.agora().strftime('%Y%m%d_%H%M%S')}_nota{nota:.1f}"
         nome, n = f"{base}.mp4", 2
         while (self.saida / nome).exists():
             nome, n = f"{base}_{n}.mp4", n + 1
         return nome
 
-    def _exportar(self, momento, resumo, candidato, duracao, segmentos, texto, palavras, fonte, score, motivo, ia):
+    def _exportar(self, momento, resumo, candidato, duracao, segmentos, texto, palavras, nota, potencial, ia):
         canal = self.canal
         pasta_brutos = self.saida / BRUTOS
         pasta_brutos.mkdir(parents=True, exist_ok=True)
-        nome = self._nome(canal)
+        nome = self._nome(nota)
         bruto, visivel = pasta_brutos / nome, self.saida / nome
         tmp_bruto = pasta_brutos / (nome + ".tmp")
-        shutil.copy2(str(candidato), str(tmp_bruto))                       # o candidato continua na pasta da live
+        shutil.copy2(str(candidato), str(tmp_bruto))
         tmp_bruto.replace(bruto)
         titulo = (ia or {}).get("titulo_gancho") or ""
         pergunta = (ia or {}).get("pergunta_cta") or ""
@@ -251,15 +258,18 @@ class ProdutorCortes:
         meta = {
             "titulo_gancho": titulo if com_gancho else "MOMENTO INCRÍVEL NA LIVE",
             "pergunta_cta": pergunta if com_gancho else "O QUE VOCÊ ACHOU?",
-            "nota": int(round(score * 10)),
+            "nota": int(round(nota * 10)),
             "transcricao": texto,
             "transcricao_fonte": "transcrição real do corte (live)" if texto else "sem fala transcrita",
             "palavras": palavras,
             "palavras_por_segundo": round(palavras / duracao, 2) if duracao else None,
             "fonte_titulo": "ia_texto_real" if com_gancho else "padrao",
-            "score_selecao": round(score, 2),
-            "motivo_selecao": motivo,
-            "fonte_selecao": fonte,
+            "score_selecao": nota,
+            "motivo_selecao": (ia or {}).get("reason") or "; ".join(str(d) for d in (resumo.get("detalhes") or [])[:3])[:60],
+            "fonte_selecao": "sinais",
+            "potencial": potencial,
+            "score_ia": round(ia["score"], 1) if ia and ia.get("score") is not None else None,
+            "motivo_ia": (ia or {}).get("reason") or None,
             "clip_start": 0.0,
             "clip_end": round(duracao, 2),
             "clip_duration": round(duracao, 2),
