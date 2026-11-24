@@ -191,6 +191,7 @@ function montarCorte(c) {
   if (c.estado === "aprovado") selos.append(selo("Aprovado", "concluido"));
   if (c.nota != null) selos.append(selo(`nota ${c.nota}`));
   if (c.score != null) selos.append(selo(`score ${Number(c.score).toFixed(1)}`));
+  if (c.origem === "live") selos.append(selo(c.canal ? `live · ${c.canal}` : "live", "concluido"));
   if (c.modo) selos.append(selo(c.modo));
   if (c.bruto) selos.append(selo("bruto: sem edição", "aviso"));
   else if (c.edicao && c.edicao.estado === "renderizado") selos.append(selo("editado", "concluido"));

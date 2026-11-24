@@ -126,7 +126,7 @@ class GerenteLives:
         if status:
             saida.update({k: status.get(k) for k in ("estado", "detalhe", "erro", "buffer_s", "tempo_monitor_s", "chat", "sensibilidade",
                                                      "segmentos", "sinais_audio", "sinais_chat", "sinais_palavra", "momentos_salvos",
-                                                     "mensagens_chat", "reinicios", "ultimo_sinal", "ultimo_momento", "iniciado_em",
+                                                     "mensagens_chat", "reinicios", "cortes_enviados", "cortes_descartados", "cortes_erro", "ultimo_corte", "ia", "enviar_cortes", "ultimo_sinal", "ultimo_momento", "iniciado_em",
                                                      "atualizado_em")})
             saida["total_momentos"] = status.get("momentos", 0)
             if rodando:

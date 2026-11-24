@@ -6,7 +6,7 @@ Um MonitorCanal por live (a interface sobe um processo `python -m monitor` por c
   3. mede o áudio de cada segmento e ouve o chat, gerando sinais;
   4. o agregador junta os sinais em "momentos" ancorados no horário do pico;
   5. cada momento vira um registro em momentos.jsonl e (opcional) um corte candidato extraído do anel.
-A IA e o corte bruto em cortes_prontos entram na etapa seguinte, pelo gancho `ao_momento`.
+Com `enviar_cortes`, cada momento passa pelo ProdutorCortes (corte.py): transcrição, juízo da IA e corte BRUTO em cortes_prontos.
 Estado em disco (para a interface): status.json; controle: arquivos parar.flag e pausar.flag na pasta de estado.
 """
 import json
@@ -46,7 +46,8 @@ def log(msg, nivel="INFO"):
 class MonitorCanal:
     def __init__(self, raiz=None, url=None, replay=None, chat_arquivo=None, sensibilidade=SENSIBILIDADE_PADRAO,
                  identificador=None, salvar_momentos=True, registro=None, ffmpeg=None, ao_momento=None,
-                 chat_real=True, relogio=time.time, fabrica_ingestor=None, executar=None, espera_offline=60.0):
+                 chat_real=True, relogio=time.time, fabrica_ingestor=None, executar=None, espera_offline=60.0,
+                 enviar_cortes=False, produtor=None):
         if sensibilidade not in SENSIBILIDADES:
             raise ValueError("sensibilidade inválida")
         self.raiz = Path(raiz or RAIZ)
@@ -54,6 +55,8 @@ class MonitorCanal:
         self.chat_arquivo = Path(chat_arquivo) if chat_arquivo else None
         self.sensibilidade, self.salvar_momentos, self.chat_real = sensibilidade, salvar_momentos, chat_real
         self.ao_momento, self.relogio, self.executar, self.espera_offline = ao_momento, relogio, executar, espera_offline
+        self.enviar_cortes, self.produtor = enviar_cortes, produtor
+        self.canal_info = {}
         self.registro = RegistroCanais(registro or (self.raiz / "canais_permitidos.json"))
         self.url_canal = url
         self.plataforma = self.canal = None
@@ -79,8 +82,9 @@ class MonitorCanal:
         self.estado, self.detalhe, self.erro = "iniciando", "", ""
         self.ultimo_t = 0.0
         self.contagem = {"segmentos": 0, "sinais_audio": 0, "sinais_chat": 0, "sinais_palavra": 0, "momentos": 0,
-                         "momentos_salvos": 0, "mensagens_chat": 0}
-        self.ultimo_sinal = self.ultimo_momento = None
+                         "momentos_salvos": 0, "mensagens_chat": 0, "cortes_enviados": 0, "cortes_descartados": 0, "cortes_erro": 0}
+        self.ultimo_sinal = self.ultimo_momento = self.ultimo_corte = None
+        self.ia_ligada = False
         self.iniciado_em = datetime.now().isoformat(timespec="seconds")
         self.threads = []
         self.ingestor = None
@@ -94,12 +98,14 @@ class MonitorCanal:
         if self.replay is not None:
             return True, "replay (arquivo local)"
         r = self.registro.verificar(self.url_canal)
+        if r.get("permitido") and r.get("canal_info"):
+            self.canal_info = r["canal_info"]
         return bool(r.get("permitido")), r.get("motivo", "")
 
     # ------------------------------------------------------------------ estado em disco
     def _status(self):
         with self.trava:
-            ult_sinal, ult_mom = self.ultimo_sinal, self.ultimo_momento
+            ult_sinal, ult_mom, ult_corte = self.ultimo_sinal, self.ultimo_momento, self.ultimo_corte
             return {
                 "id": self.id, "estado": self.estado, "detalhe": self.detalhe, "erro": self.erro,
                 "plataforma": self.plataforma, "canal": self.canal, "replay": str(self.replay) if self.replay else None,
@@ -107,7 +113,8 @@ class MonitorCanal:
                 "buffer_s": self.anel.segundos(), "tempo_monitor_s": round(self.ultimo_t, 1),
                 **self.contagem, "descartes": dict(self.agregador.descartes),
                 "reinicios": self.ingestor.reinicios if self.ingestor else 0,
-                "ultimo_sinal": ult_sinal, "ultimo_momento": ult_mom,
+                "ultimo_sinal": ult_sinal, "ultimo_momento": ult_mom, "ultimo_corte": ult_corte,
+                "enviar_cortes": bool(self.ao_momento), "ia": self.ia_ligada,
                 "pid": os.getpid(), "iniciado_em": self.iniciado_em,
                 "atualizado_em": datetime.now().isoformat(timespec="seconds"),
             }
@@ -222,14 +229,25 @@ class MonitorCanal:
                 log(f"não foi possível extrair o corte candidato: {msg}", "WARN")
         registro = {**m.resumo(), "cobertura": round(cobertura, 2), "arquivo": caminho.name if caminho else None,
                     "em": datetime.now().isoformat(timespec="seconds")}
+        if self.ao_momento:
+            try:
+                resultado = self.ao_momento(m, caminho)
+            except Exception as e:                                          # o corte nunca derruba o monitor
+                log(f"erro ao produzir o corte do momento: {e}", "ERROR")
+                resultado = {"resultado": "erro", "motivo": str(e)[:200]}
+            if isinstance(resultado, dict):
+                chave = {"enviado": "cortes_enviados", "descartado": "cortes_descartados", "erro": "cortes_erro"}.get(resultado.get("resultado"))
+                with self.trava:
+                    if chave:
+                        self.contagem[chave] += 1
+                    self.ultimo_corte = {**resultado, "em": datetime.now().isoformat(timespec="seconds")}
+                registro["corte"] = resultado
         try:
             self.pasta_estado.mkdir(parents=True, exist_ok=True)
             with open(self.pasta_estado / "momentos.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(registro, ensure_ascii=False) + "\n")
         except OSError as e:
             log(f"não foi possível registrar o momento: {e}", "WARN")
-        if self.ao_momento:
-            self.ao_momento(m, caminho)
 
     # ------------------------------------------------------------------ ciclo de vida
     def _entrada(self):
@@ -241,7 +259,24 @@ class MonitorCanal:
         self.chat_estado = "desligado"
         log(msg, "WARN")
 
+    def _preparar_produtor(self):
+        """Liga a IA e o corte bruto (se pedido e se ninguém passou um gancho próprio)."""
+        if self.ao_momento is not None or not self.enviar_cortes:
+            return
+        produtor = self.produtor
+        if produtor is None:
+            from .corte import ProdutorCortes
+            info = self.canal_info or {}
+            canal = {"plataforma": self.plataforma or "replay", "canal": self.canal or self.id, "nome": info.get("nome") or self.canal or self.id,
+                     "layout": info.get("layout"), "url": self.url_live}
+            produtor = ProdutorCortes(self.raiz, canal, self.ffmpeg, executar=self.executar, pasta_temp=self.pasta_anel, registrar=log)
+        self.ao_momento = produtor
+        self.ia_ligada = bool(getattr(produtor, "chave", None))
+        log("IA " + ("ligada: cada momento é transcrito e julgado antes de virar corte" if self.ia_ligada
+                     else "desligada (sem GROQ_API_KEY no .env): vale só a nota dos sinais"))
+
     def iniciar(self):
+        self._preparar_produtor()
         self.pasta_estado.mkdir(parents=True, exist_ok=True)
         self.pasta_anel.mkdir(parents=True, exist_ok=True)
         for f in ("parar.flag",):

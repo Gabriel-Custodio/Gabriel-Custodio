@@ -18,6 +18,7 @@ def main(argv=None):
     ap.add_argument("--id", help="nome da pasta de estado desta live (padrão: plataforma-canal)")
     ap.add_argument("--sem-cortes-candidatos", action="store_true", help="só detecta e registra; não extrai os cortes candidatos")
     ap.add_argument("--sem-chat", action="store_true", help="não abre o chat da live")
+    ap.add_argument("--sem-corte-bruto", action="store_true", help="só detecta e registra; não manda cortes para a pasta Cortes prontos")
     ap.add_argument("--raiz", help="pasta do projeto (padrão: a deste programa)")
     a = ap.parse_args(argv)
     if a.chat_arquivo and not a.replay:
@@ -26,7 +27,8 @@ def main(argv=None):
         ap.error(f"arquivo de replay não encontrado: {a.replay}")
     try:
         m = MonitorCanal(raiz=a.raiz, url=a.url, replay=a.replay, chat_arquivo=a.chat_arquivo, sensibilidade=a.sensibilidade,
-                         identificador=a.id, salvar_momentos=not a.sem_cortes_candidatos, chat_real=not a.sem_chat)
+                         identificador=a.id, salvar_momentos=not a.sem_cortes_candidatos, chat_real=not a.sem_chat,
+                         enviar_cortes=not a.sem_corte_bruto and not a.sem_cortes_candidatos)
     except ValueError as e:
         ap.error(str(e))
     for nome in ("SIGINT", "SIGTERM", "SIGBREAK"):

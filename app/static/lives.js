@@ -148,6 +148,11 @@ function lvPintar(box, v) {
     n.textContent = `Assistindo há ${lvDuracao(v.tempo_monitor_s)} · ${v.total_momentos || 0} momento(s) detectado(s) · ` +
                     `${(v.sinais_audio || 0) + (v.sinais_chat || 0) + (v.sinais_palavra || 0)} sinal(is) · ${chat}` +
                     (v.reinicios ? ` · ${v.reinicios} reconexão(ões)` : "");
+    if (v.enviar_cortes) {
+      n.textContent += ` · ${v.cortes_enviados || 0} corte(s) enviado(s) para Cortes prontos` +
+                       (v.cortes_descartados ? ` (${v.cortes_descartados} descartado(s) pela IA)` : "") +
+                       (v.cortes_erro ? ` · ${v.cortes_erro} com erro` : "") + (v.ia ? " · IA ligada" : " · IA desligada: sem GROQ_API_KEY no .env");
+    }
     n.hidden = false;
   } else if (!v.rodando && v.segundos != null) {
     n.textContent = `Última vez: ${lvDuracao(v.segundos)} · ${v.total_momentos || 0} momento(s) detectado(s)`;
@@ -167,7 +172,14 @@ function lvPintar(box, v) {
   ul.replaceChildren(...itens.map((m) => {
     const li = document.createElement("li");
     const tipos = Object.keys(m.sinais || {}).map((t) => ({ audio: "volume", chat: "chat", palavra: "palavras" }[t] || t)).join(" + ");
-    li.textContent = `Momento nota ${Number(m.nota).toFixed(1)} · ${tipos || "sinais"} · ${m.em ? m.em.replace("T", " ") : ""}`;
+    let fim = "";
+    if (m.corte) {
+      const r = m.corte;
+      fim = r.resultado === "enviado" ? ` → enviado para Cortes prontos (${r.arquivo})`
+          : r.resultado === "descartado" ? ` → descartado: ${r.motivo || "sem motivo"}`
+          : ` → não virou corte: ${r.motivo || r.resultado}`;
+    }
+    li.textContent = `Momento nota ${Number(m.nota).toFixed(1)} · ${tipos || "sinais"} · ${m.em ? m.em.replace("T", " ") : ""}${fim}`;
     return li;
   }));
   ul.hidden = !itens.length;

@@ -241,6 +241,8 @@ class Estado:
                 "fim_s": meta.get("clip_end"),
                 "duracao_s": meta.get("clip_duration"),
                 "tem_json": bool(meta),
+                "origem": meta.get("origem") if meta.get("origem") in ("live",) else None,      # corte vindo do monitor de lives
+                "canal": str((meta.get("live") or {}).get("nome") or "")[:60] if isinstance(meta.get("live"), dict) else "",
                 "bruto": bool(meta.get("bruto")),                                  # ainda sem edição (tela completa)
                 "editavel": (self.brutos / arq.name).is_file(),
                 "layout": meta.get("layout"),
