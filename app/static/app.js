@@ -296,7 +296,7 @@ $("btn-pasta").addEventListener("click", async () => {
   try {
     const estado = await api("/api/estado");
     mostrarPrerequisitos(estado.prerequisitos);
-    $("aviso-versao").hidden = Array.isArray(estado.recursos) && estado.recursos.includes("edicao") && estado.recursos.includes("linha_do_tempo") && estado.recursos.includes("canais");
+    $("aviso-versao").hidden = Array.isArray(estado.recursos) && estado.recursos.includes("edicao") && estado.recursos.includes("linha_do_tempo") && estado.recursos.includes("canais") && estado.recursos.includes("monitor_lives");
     atualizarEstadoJob(estado.job);
     if (estado.job && estado.job.estado === "rodando") iniciarConsulta();
     else if (estado.job) consultarLog();

@@ -37,6 +37,7 @@ from urllib.parse import parse_qs, urlparse
 
 import canais as modulo_canais
 from canais import PLATAFORMAS, RegistroCanais
+from lives import GerenteLives
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
@@ -45,7 +46,7 @@ PORTA_PADRAO = 8765
 MODOS = {"ia": "Narração por IA", "gameplay": "Gameplay / Streamer", "original": "Áudio original"}
 LAYOUTS = {"cam", "fit", "clipflow"}
 FUNDOS = {"blur", "black"}
-RECURSOS = ["edicao", "linha_do_tempo", "canais"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
+RECURSOS = ["edicao", "linha_do_tempo", "canais", "monitor_lives"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
 RE_SLUG = re.compile(r"^[a-z0-9_-]{1,40}$")
 CAM_ALTURA_MIN, CAM_ALTURA_MAX, CAM_ALTURA_PADRAO = 300, 1100, 600
 ORDENS = ("cam_primeiro", "game_primeiro")
@@ -194,6 +195,7 @@ class Estado:
         self.edicoes = self.saida / "_edicoes"        # opções da última edição de cada corte
         self.canais = RegistroCanais(self.raiz / "canais_permitidos.json")   # quem o monitor de lives pode assistir
         self.python = python or sys.executable
+        self.lives = GerenteLives(self.raiz, self.canais, python=self.python)   # um processo de monitor por live
         self.token = secrets.token_urlsafe(32)
         self.job = None
         self.trava = threading.Lock()          # protege self.job e o arquivo de status
@@ -724,6 +726,15 @@ class Manipulador(BaseHTTPRequestHandler):
         if caminho == "/api/canais":
             return self._json({"canais": self.estado.canais.listar(), "plataformas": list(PLATAFORMAS), "maximo": modulo_canais.MAX_CANAIS,
                                "layouts": [{"slug": l["slug"], "nome": l["nome"]} for l in self.estado.listar_layouts()]})
+        if caminho == "/api/lives":
+            return self._json(self.estado.lives.listar())
+        if caminho == "/api/lives/log":
+            try:
+                indice = int((consulta.get("desde") or ["0"])[0])
+            except ValueError:
+                indice = 0
+            linhas, proximo = self.estado.lives.log((consulta.get("id") or [""])[0], indice)
+            return self._json({"linhas": linhas, "proximo": proximo})
         if caminho == "/api/log":
             return self._log(consulta)
         if caminho == "/video":
@@ -754,11 +765,30 @@ class Manipulador(BaseHTTPRequestHandler):
                 canal = self.estado.canais.definir_ativo(str(dados.get("id") or ""), dados.get("ativo"))
             except ValueError as e:
                 return self._erro(400, str(e))
+            if canal and dados.get("ativo") is False:
+                self.estado.lives.parar(canal["id"])              # canal suspenso: o monitor para de assistir já
             return self._json({"canal": canal}) if canal else self._erro(404, "Canal não encontrado.")
         if caminho == "/api/canais/apagar":
-            return self._json({"ok": True}) if self.estado.canais.apagar(str(dados.get("id") or "")) else self._erro(404, "Canal não encontrado.")
+            apagou = self.estado.canais.apagar(str(dados.get("id") or ""))
+            if apagou:
+                self.estado.lives.parar(str(dados.get("id") or ""))   # canal apagado: idem
+            return self._json({"ok": True}) if apagou else self._erro(404, "Canal não encontrado.")
         if caminho == "/api/canais/verificar":
             return self._json(self.estado.canais.verificar(dados.get("url"), dados.get("plataforma")))
+        if caminho == "/api/lives/iniciar":
+            try:
+                return self._json({"live": self.estado.lives.iniciar(dados.get("id"))}, 201)
+            except ValueError as e:
+                return self._erro(409, str(e))
+        if caminho == "/api/lives/parar":
+            return self._json({"parando": True}) if self.estado.lives.parar(dados.get("id")) else self._erro(404, "Esse canal não está sendo monitorado agora.")
+        if caminho == "/api/lives/pausar":
+            if not isinstance(dados.get("pausar"), bool):
+                return self._erro(400, "Opção inválida.")
+            try:
+                return self._json({"ok": self.estado.lives.pausar(dados.get("id"), dados["pausar"])})
+            except ValueError as e:
+                return self._erro(409, str(e))
         if caminho == "/api/layouts/apagar":
             return self._json({"ok": True}) if self.estado.apagar_layout(dados.get("slug")) else self._erro(404, "Layout não encontrado.")
         if caminho == "/api/cortes/editar":
@@ -916,6 +946,7 @@ def main():
 
     estado = servidor.estado
     atexit.register(estado.parar)
+    atexit.register(estado.lives.parar_todas)
     url = f"http://127.0.0.1:{servidor.server_address[1]}/"
     print("=" * 60)
     print("  FÁBRICA DE CORTES - INTERFACE LOCAL")
@@ -931,6 +962,7 @@ def main():
         print("\nEncerrando...")
     finally:
         estado.parar()
+        estado.lives.parar_todas()
         servidor.server_close()
 
 

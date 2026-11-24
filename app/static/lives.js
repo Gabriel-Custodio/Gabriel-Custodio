@@ -2,7 +2,7 @@
 /* Aba "Monitor de lives": a lista de canais (Twitch e YouTube) que o monitor pode assistir, adicionados pelo link do canal.
    Usa $, api, post, selo de app.js. Todo texto vindo do servidor entra na página com textContent. */
 
-const CN = { canais: [], layouts: [], editando: null, maximo: 2 };
+const CN = { canais: [], layouts: [], editando: null, maximo: 2, lives: {}, maxLives: 2, logs: {} };
 const cnCheia = () => CN.canais.length >= CN.maximo;
 
 function cnErro(msg) { $("cn-erro").textContent = msg || ""; $("cn-erro").hidden = !msg; }
@@ -81,6 +81,7 @@ function cnLinha(c) {
     const l = CN.layouts.find((x) => x.slug === c.layout);
     const d4 = document.createElement("p"); d4.className = "cn-detalhe"; d4.textContent = `Layout salvo: ${l ? l.nome : c.layout}`; li.append(d4);
   }
+  li.append(cnMonitor(c));
   const acoes = document.createElement("div"); acoes.className = "cn-acoes";
   acoes.append(
     cnBotao("Editar", "", () => cnEditar(c)),
@@ -88,6 +89,136 @@ function cnLinha(c) {
     cnBotao("Apagar", "perigo", () => cnApagar(c)));
   li.append(acoes);
   return li;
+}
+
+/* ---------------------------------------------------------------- monitor ao vivo (por canal) */
+const LV_ESTADOS = {
+  parado: ["Monitor parado", ""], iniciando: ["Iniciando o monitor…", "rodando"], conectando: ["Conectando à live…", "rodando"],
+  gravando: ["Assistindo a live agora", "concluido"], offline: ["Live fora do ar (verificando de novo)", "aviso"],
+  erro: ["Com problema", "erro"], bloqueado: ["Bloqueado: canal não permitido", "erro"], parando: ["Parando…", "rodando"],
+  fim: ["Acabou", ""],
+};
+
+function lvDuracao(s) {
+  s = Math.max(0, Math.round(s || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  return h ? `${h} h ${m} min` : (m ? `${m} min ${r} s` : `${r} s`);
+}
+
+function cnMonitor(c) {
+  const box = document.createElement("div");
+  box.className = "lv"; box.dataset.id = c.id;
+  const topo = document.createElement("div"); topo.className = "lv-topo";
+  const estado = document.createElement("span"); estado.className = "selo lv-estado";
+  const resumo = document.createElement("span"); resumo.className = "lv-resumo";
+  const acoes = document.createElement("div"); acoes.className = "lv-acoes";
+  const iniciar = cnBotao("Iniciar monitor", "primario", () => lvIniciar(c));
+  const pausar = cnBotao("Pausar", "", () => lvPausar(c));
+  const parar = cnBotao("Parar", "perigo", () => lvParar(c));
+  iniciar.classList.add("lv-iniciar"); pausar.classList.add("lv-pausar"); parar.classList.add("lv-parar");
+  acoes.append(iniciar, pausar, parar);
+  topo.append(estado, acoes);
+  const numeros = document.createElement("p"); numeros.className = "cn-detalhe lv-numeros";
+  const msg = document.createElement("p"); msg.className = "erro lv-msg"; msg.hidden = true;
+  const momentos = document.createElement("ul"); momentos.className = "lv-momentos";
+  const logd = document.createElement("details"); logd.className = "lv-log";
+  const sum = document.createElement("summary"); sum.textContent = "Ver o que o monitor está fazendo (log)";
+  const pre = document.createElement("pre"); pre.className = "lv-pre";
+  logd.append(sum, pre);
+  logd.addEventListener("toggle", () => { if (logd.open) lvLog(c.id); });
+  box.append(topo, resumo, numeros, msg, momentos, logd);
+  lvPintar(box, CN.lives[c.id]);
+  return box;
+}
+
+function lvPintar(box, v) {
+  const q = (cl) => box.querySelector(cl);
+  const c = CN.canais.find((x) => x.id === box.dataset.id) || {};
+  v = v || { rodando: false, estado: "parado" };
+  let [rotulo, nivel] = LV_ESTADOS[v.estado] || [v.estado, ""];
+  if (v.rodando && v.pausado) { rotulo = "Pausado (continua assistindo, sem gerar momentos)"; nivel = "aviso"; }
+  if (v.sem_resposta) { rotulo = "Sem resposta do monitor"; nivel = "erro"; }
+  const el = q(".lv-estado");
+  el.textContent = rotulo; el.className = `selo lv-estado ${nivel}`;
+  q(".lv-resumo").textContent = v.detalhe && v.estado !== "gravando" ? v.detalhe : "";
+  q(".lv-resumo").hidden = !q(".lv-resumo").textContent;
+  const n = q(".lv-numeros");
+  if (v.rodando && v.estado === "gravando") {
+    const chat = v.chat && v.chat !== "desligado" ? `chat: ${v.mensagens_chat || 0} mensagens` : "chat desligado";
+    n.textContent = `Assistindo há ${lvDuracao(v.tempo_monitor_s)} · ${v.total_momentos || 0} momento(s) detectado(s) · ` +
+                    `${(v.sinais_audio || 0) + (v.sinais_chat || 0) + (v.sinais_palavra || 0)} sinal(is) · ${chat}` +
+                    (v.reinicios ? ` · ${v.reinicios} reconexão(ões)` : "");
+    n.hidden = false;
+  } else if (!v.rodando && v.segundos != null) {
+    n.textContent = `Última vez: ${lvDuracao(v.segundos)} · ${v.total_momentos || 0} momento(s) detectado(s)`;
+    n.hidden = false;
+  } else n.hidden = true;
+  const msg = q(".lv-msg");
+  const erro = !v.rodando && v.estado === "erro" || v.estado === "bloqueado" ? (v.erro || v.detalhe) : "";
+  msg.textContent = erro || ""; msg.hidden = !erro;
+  const ativo = c.situacao === "ativo";
+  const cheio = Object.values(CN.lives).filter((x) => x.rodando).length >= CN.maxLives;
+  const ini = q(".lv-iniciar"), pau = q(".lv-pausar"), par = q(".lv-parar");
+  ini.hidden = !!v.rodando; ini.disabled = !ativo || cheio;
+  ini.title = !ativo ? "Canal suspenso: reative-o para monitorar" : (cheio ? `Já há ${CN.maxLives} lives sendo monitoradas` : "");
+  pau.hidden = !v.rodando; pau.textContent = v.pausado ? "Retomar" : "Pausar";
+  par.hidden = !v.rodando; par.disabled = !!v.parando;
+  const ul = q(".lv-momentos"), itens = (v.momentos || []);
+  ul.replaceChildren(...itens.map((m) => {
+    const li = document.createElement("li");
+    const tipos = Object.keys(m.sinais || {}).map((t) => ({ audio: "volume", chat: "chat", palavra: "palavras" }[t] || t)).join(" + ");
+    li.textContent = `Momento nota ${Number(m.nota).toFixed(1)} · ${tipos || "sinais"} · ${m.em ? m.em.replace("T", " ") : ""}`;
+    return li;
+  }));
+  ul.hidden = !itens.length;
+}
+
+function lvMsg(id, texto) {
+  const box = document.querySelector(`.lv[data-id="${CSS.escape(id)}"] .lv-msg`);
+  if (box) { box.textContent = texto || ""; box.hidden = !texto; }
+}
+
+async function lvAcao(c, caminho, corpo) {
+  try { await post(caminho, { id: c.id, ...(corpo || {}) }); }
+  catch (e) { lvMsg(c.id, e.message); return false; }
+  await carregarLives();
+  return true;
+}
+const lvIniciar = (c) => lvAcao(c, "/api/lives/iniciar");
+const lvParar = (c) => lvAcao(c, "/api/lives/parar");
+const lvPausar = (c) => lvAcao(c, "/api/lives/pausar", { pausar: !(CN.lives[c.id] && CN.lives[c.id].pausado) });
+
+async function lvLog(id) {
+  const pre = document.querySelector(`.lv[data-id="${CSS.escape(id)}"] .lv-pre`);
+  if (!pre) return;
+  try {
+    const d = await api(`/api/lives/log?id=${encodeURIComponent(id)}&desde=0`);
+    pre.textContent = (d.linhas || []).slice(-60).join("\n") || "Ainda sem mensagens.";
+    pre.scrollTop = pre.scrollHeight;
+  } catch (e) { pre.textContent = e.message; }
+}
+
+/* Atualiza só o painel de cada canal (não refaz a lista, para não fechar o log aberto) */
+async function carregarLives() {
+  let d;
+  try { d = await api("/api/lives"); } catch (e) { return; }
+  CN.maxLives = d.maximo || CN.maxLives;
+  CN.lives = {};
+  for (const l of d.lives || []) CN.lives[l.canal.id] = l;
+  for (const box of document.querySelectorAll(".lv")) {
+    lvPintar(box, CN.lives[box.dataset.id]);
+    const det = box.querySelector(".lv-log");
+    if (det && det.open) lvLog(box.dataset.id);
+  }
+}
+
+let lvTemporizador = null;
+function lvAtivarAtualizacao() {
+  if (lvTemporizador) return;
+  lvTemporizador = setInterval(() => {
+    if (document.hidden || $("painel-lives").hidden) return;
+    carregarLives();
+  }, 2000);
 }
 
 async function carregarCanais() {
@@ -100,7 +231,9 @@ async function carregarCanais() {
   }
   cnPreencherLayouts();
   const lista = $("cn-lista");
+  try { const l = await api("/api/lives"); CN.maxLives = l.maximo || CN.maxLives; CN.lives = {}; for (const x of l.lives || []) CN.lives[x.canal.id] = x; } catch (e) { /* servidor antigo: sem monitor */ }
   lista.replaceChildren(...CN.canais.map(cnLinha));
+  lvAtivarAtualizacao();
   $("cn-vazio").hidden = CN.canais.length > 0;
   cnAtualizarCheio();
 }

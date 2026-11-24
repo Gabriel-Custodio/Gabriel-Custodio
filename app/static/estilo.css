@@ -223,3 +223,14 @@ input[type="text"], input[type="number"], input[type="date"], select {
 .cn-acoes .btn { padding: 5px 11px; font-size: 13px; }
 .cn-lista { margin-top: 12px; }
 #cn-form h2 { margin-bottom: 12px; }
+
+/* monitor ao vivo dentro do cartão do canal */
+.lv { display: grid; gap: 6px; border-top: 1px solid var(--borda); padding-top: 10px; margin-top: 2px; }
+.lv-topo { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.lv-acoes { display: flex; flex-wrap: wrap; gap: 8px; }
+.lv-acoes .btn { padding: 5px 11px; font-size: 13px; }
+.lv-resumo, .lv .erro { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.lv-resumo { color: var(--suave); }
+.lv-momentos { margin: 0; padding-left: 18px; font-size: 13px; color: var(--suave); display: grid; gap: 2px; }
+.lv-log summary { font-size: 13px; color: var(--suave); cursor: pointer; }
+.lv-pre { margin: 6px 0 0; padding: 8px 10px; max-height: 220px; overflow: auto; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--borda); border-radius: 6px; }
