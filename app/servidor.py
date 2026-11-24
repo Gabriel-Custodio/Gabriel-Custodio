@@ -35,6 +35,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from canais import PLATAFORMAS, RegistroCanais
+
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 PORTA_PADRAO = 8765
@@ -42,7 +44,7 @@ PORTA_PADRAO = 8765
 MODOS = {"ia": "Narração por IA", "gameplay": "Gameplay / Streamer", "original": "Áudio original"}
 LAYOUTS = {"cam", "fit", "clipflow"}
 FUNDOS = {"blur", "black"}
-RECURSOS = ["edicao", "linha_do_tempo"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
+RECURSOS = ["edicao", "linha_do_tempo", "canais"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
 RE_SLUG = re.compile(r"^[a-z0-9_-]{1,40}$")
 CAM_ALTURA_MIN, CAM_ALTURA_MAX, CAM_ALTURA_PADRAO = 300, 1100, 600
 ORDENS = ("cam_primeiro", "game_primeiro")
@@ -189,6 +191,7 @@ class Estado:
         self.layouts = self.raiz / "layouts_salvos"
         self.brutos = self.saida / "_brutos"          # cortes brutos originais (cada edição parte deles)
         self.edicoes = self.saida / "_edicoes"        # opções da última edição de cada corte
+        self.canais = RegistroCanais(self.raiz / "canais_permitidos.json")   # quem o monitor de lives pode assistir
         self.python = python or sys.executable
         self.token = secrets.token_urlsafe(32)
         self.job = None
@@ -421,6 +424,14 @@ class Estado:
             return False
         caminho.unlink()
         return True
+
+    # ---- canais permitidos (monitor de lives)
+    def salvar_canal(self, dados):
+        """Cadastra/atualiza um canal permitido. Levanta ValueError com a mensagem para a tela."""
+        layout = str((dados or {}).get("layout") or "").strip() if isinstance(dados, dict) else ""
+        if layout and not self.layout_existe(layout):
+            raise ValueError("O layout escolhido não existe mais. Escolha outro ou deixe em branco.")
+        return self.canais.salvar(dados)
 
     def layout_existe(self, slug):
         return isinstance(slug, str) and bool(RE_SLUG.match(slug)) and (self.layouts / f"{slug}.json").is_file()
@@ -709,6 +720,9 @@ class Manipulador(BaseHTTPRequestHandler):
             return self._json({"cortes": self.estado.listar_cortes()})
         if caminho == "/api/layouts":
             return self._json({"layouts": self.estado.listar_layouts()})
+        if caminho == "/api/canais":
+            return self._json({"canais": self.estado.canais.listar(), "plataformas": list(PLATAFORMAS),
+                               "layouts": [{"slug": l["slug"], "nome": l["nome"]} for l in self.estado.listar_layouts()]})
         if caminho == "/api/log":
             return self._log(consulta)
         if caminho == "/video":
@@ -729,6 +743,21 @@ class Manipulador(BaseHTTPRequestHandler):
                 return self._json({"layout": self.estado.salvar_layout(dados)}, 201)
             except ValueError as e:
                 return self._erro(400, str(e))
+        if caminho == "/api/canais":
+            try:
+                return self._json({"canal": self.estado.salvar_canal(dados)}, 201)
+            except ValueError as e:
+                return self._erro(400, str(e))
+        if caminho == "/api/canais/ativo":
+            try:
+                canal = self.estado.canais.definir_ativo(str(dados.get("id") or ""), dados.get("ativo"))
+            except ValueError as e:
+                return self._erro(400, str(e))
+            return self._json({"canal": canal}) if canal else self._erro(404, "Canal não encontrado.")
+        if caminho == "/api/canais/apagar":
+            return self._json({"ok": True}) if self.estado.canais.apagar(str(dados.get("id") or "")) else self._erro(404, "Canal não encontrado.")
+        if caminho == "/api/canais/verificar":
+            return self._json(self.estado.canais.verificar(dados.get("url"), dados.get("plataforma")))
         if caminho == "/api/layouts/apagar":
             return self._json({"ok": True}) if self.estado.apagar_layout(dados.get("slug")) else self._erro(404, "Layout não encontrado.")
         if caminho == "/api/cortes/editar":

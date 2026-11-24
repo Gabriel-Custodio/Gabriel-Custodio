@@ -27,3 +27,5 @@ app/logs/
 layouts_salvos/
 app/quadros/
 temp_layout/
+canais_permitidos.json
+canais_permitidos.corrompido.json

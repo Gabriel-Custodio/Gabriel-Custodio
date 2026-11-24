@@ -22,6 +22,7 @@
     <button type="button" role="tab" id="aba-cortes" aria-selected="false" aria-controls="painel-cortes" tabindex="-1">
       Cortes prontos <span id="contador" class="contador">0</span>
     </button>
+    <button type="button" role="tab" id="aba-lives" aria-selected="false" aria-controls="painel-lives" tabindex="-1">Monitor de lives</button>
   </nav>
 
   <main>
@@ -104,6 +105,52 @@
           <button type="button" id="ver-cortes" class="btn">Ver cortes prontos</button>
         </p>
       </section>
+    </section>
+
+    <!-- ======================= MONITOR DE LIVES ======================= -->
+    <section id="painel-lives" role="tabpanel" aria-labelledby="aba-lives" hidden>
+      <form id="cn-form" class="cartao" autocomplete="off" novalidate>
+        <h2 id="cn-titulo-form">Monitor de lives</h2>
+        <p class="ajuda">Coloque aqui o <strong>link do canal</strong> do streamer (Twitch ou YouTube). O monitor só assiste a canais desta lista, e só deve entrar nela quem <strong>permite cortar a live e postar os cortes em outra plataforma</strong>. A permissão vale até você suspender ou apagar o canal.</p>
+        <div class="campo">
+          <label for="cn-canal">Link do canal</label>
+          <input id="cn-canal" type="text" inputmode="url" maxlength="300" placeholder="https://www.twitch.tv/nome_do_canal  ou  https://www.youtube.com/@nome_do_canal">
+        </div>
+        <fieldset class="campo">
+          <legend>O streamer permite (marque só se for verdade)</legend>
+          <label class="inline caixa"><input type="checkbox" id="cn-cortar"> <strong>Cortar</strong> a live dele</label>
+          <label class="inline caixa"><input type="checkbox" id="cn-postar"> <strong>Postar os cortes em outra plataforma</strong></label>
+        </fieldset>
+        <details class="avancado" id="cn-mais">
+          <summary>Mais opções (nome, layout, observações)</summary>
+          <div class="grade-campos">
+            <div class="campo">
+              <label for="cn-nome">Nome do streamer</label>
+              <input id="cn-nome" type="text" maxlength="60" placeholder="Em branco: usa o nome do canal">
+            </div>
+            <div class="campo">
+              <label for="cn-layout">Layout salvo do streamer</label>
+              <select id="cn-layout"><option value="">Nenhum</option></select>
+            </div>
+          </div>
+          <div class="campo">
+            <label for="cn-obs">Observações</label>
+            <input id="cn-obs" type="text" maxlength="300" placeholder="Ex.: só pode postar com crédito ao canal">
+          </div>
+        </details>
+        <div class="acoes-form">
+          <button type="submit" class="btn primario" id="cn-salvar">Adicionar canal</button>
+          <button type="button" class="btn" id="cn-limpar">Limpar</button>
+          <span id="cn-estado" class="selo" role="status" hidden></span>
+        </div>
+        <p id="cn-erro" class="erro" role="alert" hidden></p>
+      </form>
+
+      <div class="cartao">
+        <h2>Canais monitorados</h2>
+        <p id="cn-vazio" class="vazio" hidden>Nenhum canal na lista ainda. Sem canais, o monitor não assiste a nada.</p>
+        <ul id="cn-lista" class="cn-lista"></ul>
+      </div>
     </section>
 
     <!-- ======================= CORTES ======================= -->
@@ -266,5 +313,6 @@
   <script src="/static/timeline-logica.js"></script>
   <script src="/static/timeline.js"></script>
   <script src="/static/editor.js"></script>
+  <script src="/static/lives.js"></script>
 </body>
 </html>

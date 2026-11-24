@@ -30,7 +30,7 @@ function formatarTempo(segundos) {
 }
 
 // ------------------------------------------------------------- abas
-const ABAS = ["gerar", "cortes"];
+const ABAS = ["gerar", "cortes", "lives"];
 function mostrarAba(nome) {
   for (const a of ABAS) {
     const ativa = a === nome;
@@ -39,6 +39,7 @@ function mostrarAba(nome) {
     $(`painel-${a}`).hidden = !ativa;
   }
   if (nome === "cortes") carregarCortes();
+  if (nome === "lives" && typeof carregarCanais === "function") carregarCanais();
 }
 for (const a of ABAS) $(`aba-${a}`).addEventListener("click", () => mostrarAba(a));
 $("ver-cortes").addEventListener("click", () => mostrarAba("cortes"));
@@ -295,7 +296,7 @@ $("btn-pasta").addEventListener("click", async () => {
   try {
     const estado = await api("/api/estado");
     mostrarPrerequisitos(estado.prerequisitos);
-    $("aviso-versao").hidden = Array.isArray(estado.recursos) && estado.recursos.includes("edicao") && estado.recursos.includes("linha_do_tempo");
+    $("aviso-versao").hidden = Array.isArray(estado.recursos) && estado.recursos.includes("edicao") && estado.recursos.includes("linha_do_tempo") && estado.recursos.includes("canais");
     atualizarEstadoJob(estado.job);
     if (estado.job && estado.job.estado === "rodando") iniciarConsulta();
     else if (estado.job) consultarLog();
@@ -304,4 +305,5 @@ $("btn-pasta").addEventListener("click", async () => {
   }
   atualizarContador();
   if (location.hash === "#cortes") mostrarAba("cortes");   // link direto para a aba de cortes
+  if (location.hash === "#lives") mostrarAba("lives");
 })();
