@@ -5056,6 +5056,15 @@ def trim_raw_video(raw, trechos, output_path):
     return True
 
 
+HOOK_TEXT_MAX_CHARS = 60
+
+
+def clean_hook_text(value):
+    """Texto digitado para a tarja: sem caracteres de controle, espaços simples, no máximo HOOK_TEXT_MAX_CHARS."""
+    value = "".join(c for c in str(value) if ord(c) >= 32 and ord(c) != 127)
+    return " ".join(value.split())[:HOOK_TEXT_MAX_CHARS].strip()
+
+
 def normalize_edit_options(data):
     """Valida as opções de edição de um corte. None se algo estiver errado (nunca levanta erro)."""
     if not isinstance(data, dict) or data.get("layout") not in ("inteiro", "empilhado"):
@@ -5071,6 +5080,15 @@ def normalize_edit_options(data):
         if not isinstance(value, bool):
             return None
         opts[key] = value
+    for key in ("titulo", "pergunta"):                      # texto da tarja escrito pelo usuário (vazio/ausente = mantém o do corte)
+        value = data.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            return None
+        value = clean_hook_text(value)
+        if value:
+            opts[key] = value
     if opts["layout"] == "empilhado":
         lay = normalize_saved_layout({"nome": data.get("nome_layout") or "", "cam": data.get("cam"), "game": data.get("game"),
                                       "cam_altura": data.get("cam_altura", CAM_TOP_HEIGHT),
@@ -5079,6 +5097,73 @@ def normalize_edit_options(data):
             return None
         opts.update({"cam": lay["cam"], "game": lay["game"], "cam_altura": lay["cam_altura"], "ordem": lay["ordem"]})
     return opts
+
+
+SUGESTOES_TITULOS = 5
+
+
+def suggest_titles(text, current_title, api_key, count=SUGESTOES_TITULOS):
+    """Alternativas de título/pergunta para um corte, escritas SÓ com base na fala dele. [] se a IA não respondeu."""
+    text = (text or "").strip()
+    if not text or not api_key:
+        return []
+    atual = f'Título atual (NÃO repita nem copie): "{current_title}"\n\n' if current_title else ""
+    prompt = (
+        "Você é um especialista em títulos virais para Shorts/Reels/TikTok. Abaixo está a transcrição EXATA da fala de "
+        f"um corte de live/gameplay. Escreva {count} opções de título DIFERENTES entre si, cada uma com um estilo: "
+        "curiosidade, humor, choque/reação, pergunta, resultado/final surpreendente.\n\n"
+        f"{atual}"
+        f"TRANSCRIÇÃO:\n{text[:2400]}\n\n"
+        "Responda APENAS com JSON válido, uma lista de objetos:\n"
+        '[{"titulo_gancho": "TÍTULO EM CAIXA ALTA, MÁX 5 PALAVRAS", "pergunta_cta": "PERGUNTA CURTA?"}]\n\n'
+        "Regras:\n"
+        "- Baseie-se SOMENTE no que foi dito na transcrição. NÃO invente fatos, nomes nem acontecimentos.\n"
+        "- O título precisa combinar com o que acontece no trecho, sem exagerar nem prometer o que não foi dito.\n"
+        "- titulo_gancho: máximo 5 palavras, sem pontuação final. pergunta_cta: máximo 4 palavras."
+    )
+    answer = groq_chat_with_fallback([{"role": "user", "content": prompt}], api_key, get_text_models_to_try,
+                                     max_tokens=900, temperature=0.9)
+    data = extract_json(answer) if answer else None
+    if not isinstance(data, list):
+        return []
+    out, vistos = [], {(current_title or "").strip().upper()}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        titulo, pergunta = _clean_hook_title(item.get("titulo_gancho")), _clean_hook_question(item.get("pergunta_cta"))
+        if not titulo or titulo in vistos:
+            continue
+        vistos.add(titulo)
+        out.append({"titulo": titulo, "pergunta": pergunta})
+        if len(out) >= count:
+            break
+    return out
+
+
+def suggest_titles_for_clip(name):
+    """--sugerir-titulos: imprime 'TITULOS_JSON=[...]' com opções para o corte (lê a transcrição do .json). True se deu certo."""
+    name = Path(str(name)).name
+    if not name.lower().endswith(".mp4") or name.startswith((".", "_")):
+        print(f"❌ Nome de corte inválido: {name!r}")
+        return False
+    try:
+        meta = json.loads((OUTPUT_DIR / name).with_suffix(".json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = None
+    if not isinstance(meta, dict) or not str(meta.get("transcricao") or "").strip():
+        print("❌ Este corte não tem a transcrição guardada; não dá para sugerir títulos.")
+        return False
+    load_env_file()
+    api_key = get_groq_key()
+    if not api_key:
+        print("❌ Sem GROQ_API_KEY no .env: não dá para sugerir títulos.")
+        return False
+    options = suggest_titles(str(meta["transcricao"]), str(meta.get("titulo_gancho") or ""), api_key)
+    if not options:
+        print("❌ A IA não devolveu sugestões agora (limite ou instabilidade). Tente de novo em instantes.")
+        return False
+    print("TITULOS_JSON=" + json.dumps(options, ensure_ascii=False))
+    return True
 
 
 def render_edit(name):
@@ -5118,6 +5203,13 @@ def render_edit(name):
     duration = float(meta.get("clip_duration") or 0) or get_video_duration(raw)
     text = str(meta.get("transcricao") or "")
     hook = {"titulo_gancho": meta.get("titulo_gancho", ""), "pergunta_cta": meta.get("pergunta_cta", ""), "nota": meta.get("nota", 0)}
+    novo_titulo = opts.get("titulo") or opts.get("pergunta")
+    if opts.get("titulo"):
+        hook["titulo_gancho"] = opts["titulo"].upper()                  # a tarja usa caixa alta
+    if opts.get("pergunta"):
+        hook["pergunta_cta"] = opts["pergunta"]
+    if novo_titulo:
+        print(f"   ✏️  Título da tarja: {hook['titulo_gancho']!r} | pergunta: {hook['pergunta_cta']!r}")
     STREAMER_NOME = meta.get("streamer") or None
     os.environ["CORTES_RESUMO"] = "1" if opts["resumo"] else "0"
     os.environ["CORTES_CTA"] = "1" if opts["cta"] else "0"
@@ -5174,6 +5266,10 @@ def render_edit(name):
     except OSError as e:
         print(f"❌ Não foi possível trocar o corte: {e}")
         return False
+    if novo_titulo:                                                      # o card passa a mostrar o texto escolhido
+        meta.setdefault("titulo_original", {"titulo_gancho": meta.get("titulo_gancho", ""), "pergunta_cta": meta.get("pergunta_cta", ""),
+                                            "fonte_titulo": meta.get("fonte_titulo")})
+        meta.update({"titulo_gancho": hook["titulo_gancho"], "pergunta_cta": hook["pergunta_cta"], "fonte_titulo": "manual"})
     meta.update({
         "bruto": False, "layout": LAYOUT_APLICADO, "camera_ampliacao": CAM_AMPLIACAO,
         "layout_salvo": None, "resumo_intro": intro_info, "cta_final": cta_info,
@@ -5567,6 +5663,8 @@ def main():
                              "ex.: 0.78,0.37,0.21,0.22. Tem prioridade sobre --webcam e a detecção por IA")
     parser.add_argument("--layout-salvo", metavar="NOME",
                         help="Modo gameplay: usa um layout criado no editor da interface (pasta layouts_salvos/)")
+    parser.add_argument("--sugerir-titulos", metavar="CORTE.mp4", dest="sugerir_titulos",
+                        help="Sugere títulos para um corte pronto (a IA lê a transcrição guardada) e imprime TITULOS_JSON=[...]")
     parser.add_argument("--renderizar", metavar="CORTE.mp4",
                         help="Renderiza de novo um corte bruto com as opções salvas em cortes_prontos/_edicoes/ (usado pelo menu Editar da interface)")
     parser.add_argument("--cortes", type=int, metavar="N",
@@ -5592,6 +5690,9 @@ def main():
             print(f"❌ Layout salvo não encontrado ou inválido: {args.layout_salvo!r} (procurei em {LAYOUTS_DIR}{os.sep}).")
             sys.exit(1)
         print(f"🎨 Layout personalizado: {CUSTOM_LAYOUT.get('nome') or CUSTOM_LAYOUT['slug']}")
+
+    if args.sugerir_titulos:
+        sys.exit(0 if suggest_titles_for_clip(args.sugerir_titulos) else 1)
 
     if args.renderizar:
         if not resolve_ffmpeg():

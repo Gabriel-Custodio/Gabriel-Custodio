@@ -298,6 +298,7 @@ function edAbrir(corte) {
   $("ed-log").textContent = "";
   $("dlg-titulo").textContent = `Editar: ${corte.titulo || corte.nome}`;
   const op = corte.edicao && corte.edicao.opcoes;           // opções da última edição (se houve)
+  edTituloAbrir(corte);
   edMarcar("ed-layout", op ? op.layout : "empilhado");
   $("ed-tarja").checked = op ? op.tarja : true;
   $("ed-legenda").checked = op ? op.legenda : true;
@@ -335,6 +336,61 @@ $("ed-fechar").addEventListener("click", edFechar);
 $("ed-fechar-x").addEventListener("click", edFechar);
 edDlg.addEventListener("close", () => { edVideo.pause(); TLUI.fechar(); });
 
+// ---------------------------------------------------------------- título do corte (campo e sugestões da IA)
+function edTituloAbrir(corte) {
+  ED.tituloInicial = corte.titulo || ""; ED.perguntaInicial = corte.pergunta || "";
+  $("ed-titulo").value = ED.tituloInicial; $("ed-pergunta").value = ED.perguntaInicial;
+  $("ed-sugestoes").replaceChildren();
+  $("ed-sug-erro").hidden = true; $("ed-sug-estado").hidden = true;
+  $("ed-sugerir").disabled = false; $("ed-sugerir").textContent = "Sugerir outros títulos";
+  edTituloMudou();
+}
+
+function edTituloMudou() {
+  $("ed-titulo-voltar").hidden = $("ed-titulo").value === ED.tituloInicial && $("ed-pergunta").value === ED.perguntaInicial;
+}
+$("ed-titulo").addEventListener("input", edTituloMudou);
+$("ed-pergunta").addEventListener("input", edTituloMudou);
+$("ed-titulo-voltar").addEventListener("click", () => {
+  $("ed-titulo").value = ED.tituloInicial; $("ed-pergunta").value = ED.perguntaInicial;
+  for (const b of document.querySelectorAll("#ed-sugestoes .btn")) b.classList.remove("escolhido");
+  edTituloMudou();
+});
+
+function edMostrarSugestoes(itens) {
+  $("ed-sugestoes").replaceChildren(...itens.map((s) => {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "btn";
+    b.textContent = s.pergunta ? `${s.titulo} · ${s.pergunta}` : s.titulo;     // texto vindo do servidor: só textContent
+    b.addEventListener("click", () => {
+      $("ed-titulo").value = s.titulo; $("ed-pergunta").value = s.pergunta || "";
+      for (const o of document.querySelectorAll("#ed-sugestoes .btn")) o.classList.toggle("escolhido", o === b);
+      edTituloMudou();
+    });
+    li.append(b);
+    return li;
+  }));
+}
+
+$("ed-sugerir").addEventListener("click", async () => {
+  const nome = ED.corte && ED.corte.nome;
+  if (!nome) return;
+  $("ed-sug-erro").hidden = true;
+  $("ed-sugerir").disabled = true; $("ed-sugerir").textContent = "Pedindo à IA…";
+  $("ed-sug-estado").textContent = "A IA está lendo a fala do corte"; $("ed-sug-estado").hidden = false;
+  try {
+    const d = await post("/api/cortes/titulos", { nome });
+    if (!ED.corte || ED.corte.nome !== nome) return;                          // trocou de corte enquanto esperava
+    edMostrarSugestoes(d.titulos || []);
+  } catch (e) {
+    $("ed-sug-erro").textContent = e.message; $("ed-sug-erro").hidden = false;
+  } finally {
+    $("ed-sugerir").disabled = false; $("ed-sugerir").textContent = "Sugerir outros títulos";
+    $("ed-sug-estado").hidden = true;
+  }
+});
+
 // ---------------------------------------------------------------- renderizar de novo
 function edOpcoes() {
   const o = { layout: edLayout(), tarja: $("ed-tarja").checked, legenda: $("ed-legenda").checked,
@@ -344,6 +400,9 @@ function edOpcoes() {
   }
   const trechos = TLUI.trechos();                             // null = vídeo inteiro
   if (trechos) o.trechos = trechos;
+  const titulo = $("ed-titulo").value.trim(), pergunta = $("ed-pergunta").value.trim();
+  if (titulo && titulo !== ED.tituloInicial) o.titulo = titulo;                // só manda o que o usuário mudou
+  if (pergunta && pergunta !== ED.perguntaInicial) o.pergunta = pergunta;
   return o;
 }
 

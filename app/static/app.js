@@ -174,7 +174,7 @@ function selo(texto, classe) {
 
 function fonteTitulo(valor) {
   return { ia_trecho_real: "título da IA (fala real)", ia_texto_real: "título da IA (fala real)",
-           padrao: "título padrão (IA falhou)" }[valor] || null;
+           padrao: "título padrão (IA falhou)", manual: "título escolhido por você" }[valor] || null;
 }
 
 function montarCorte(c) {
@@ -299,7 +299,7 @@ $("btn-pasta").addEventListener("click", async () => {
   try {
     const estado = await api("/api/estado");
     mostrarPrerequisitos(estado.prerequisitos);
-    $("aviso-versao").hidden = Array.isArray(estado.recursos) && estado.recursos.includes("edicao") && estado.recursos.includes("linha_do_tempo") && estado.recursos.includes("canais") && estado.recursos.includes("monitor_lives");
+    $("aviso-versao").hidden = Array.isArray(estado.recursos) && estado.recursos.includes("edicao") && estado.recursos.includes("linha_do_tempo") && estado.recursos.includes("canais") && estado.recursos.includes("monitor_lives") && estado.recursos.includes("titulo_editavel");
     atualizarEstadoJob(estado.job);
     if (estado.job && estado.job.estado === "rodando") iniciarConsulta();
     else if (estado.job) consultarLog();

@@ -46,12 +46,14 @@ PORTA_PADRAO = 8765
 MODOS = {"ia": "Narração por IA", "gameplay": "Gameplay / Streamer", "original": "Áudio original"}
 LAYOUTS = {"cam", "fit", "clipflow"}
 FUNDOS = {"blur", "black"}
-RECURSOS = ["edicao", "linha_do_tempo", "canais", "monitor_lives"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
+RECURSOS = ["edicao", "linha_do_tempo", "canais", "monitor_lives", "titulo_editavel"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
 RE_SLUG = re.compile(r"^[a-z0-9_-]{1,40}$")
 CAM_ALTURA_MIN, CAM_ALTURA_MAX, CAM_ALTURA_PADRAO = 300, 1100, 600
 ORDENS = ("cam_primeiro", "game_primeiro")
 TRECHOS_MAX = 60           # pedaços mantidos na linha do tempo (igual ao gerar_cortes.py)
 TRECHO_MIN_S = 0.2
+TITULO_MAX = 60            # caracteres do título/pergunta da tarja (igual ao gerar_cortes.py)
+SUGERIR_TIMEOUT_S = 75     # tempo máximo esperando as sugestões de título
 TRECHOS_TOTAL_MIN_S = 1.0
 MAX_LINHAS_LOG = 20000
 MAX_CORPO = 64 * 1024
@@ -341,6 +343,15 @@ class Estado:
         trechos = Estado._trechos_limpos(dados.get("trechos"))
         if trechos:
             opcoes["trechos"] = trechos
+        for chave in ("titulo", "pergunta"):                    # texto da tarja escolhido pelo usuário (vazio = mantém o do corte)
+            valor = dados.get(chave)
+            if valor is None:
+                continue
+            if not isinstance(valor, str):
+                raise ValueError("Título inválido.")
+            valor = " ".join("".join(c for c in valor if ord(c) >= 32 and ord(c) != 127).split())[:TITULO_MAX].strip()
+            if valor:
+                opcoes[chave] = valor
         if opcoes["layout"] == "empilhado":
             limpo = Estado._layout_limpo({"nome": "", "cam": dados.get("cam"), "game": dados.get("game"),
                                           "cam_altura": dados.get("cam_altura", CAM_ALTURA_PADRAO),
@@ -371,6 +382,45 @@ class Estado:
         comando = [self.python, str(self.raiz / "gerar_cortes.py"), "--renderizar", nome]
         params = {"modo": "edicao", "url": nome}
         return self._lancar(comando, {}, params, f"▶ Renderizando de novo: {nome}")
+
+    def sugerir_titulos(self, nome):
+        """Pede à IA (gerar_cortes.py --sugerir-titulos) alternativas de título para o corte. Levanta ValueError com a mensagem."""
+        nome = so_nome_de_arquivo(nome)
+        if nome is None or self.caminho_corte(nome) is None:
+            raise ValueError("Corte não encontrado.")
+        meta = ler_json((self.saida / nome).with_suffix(".json"))
+        if not str(meta.get("transcricao") or "").strip():
+            raise ValueError("Este corte não tem a transcrição guardada, então não dá para sugerir títulos.")
+        if not chave_groq_configurada(self.raiz):
+            raise ValueError("Falta a chave do Groq: coloque GROQ_API_KEY no arquivo .env para a IA sugerir títulos.")
+        if not (self.raiz / "gerar_cortes.py").is_file():
+            raise ValueError("gerar_cortes.py não encontrado na pasta do projeto.")
+        env = os.environ.copy()
+        env.update({"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"})
+        kwargs = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform.startswith("win") else {}
+        try:
+            r = subprocess.run([self.python, str(self.raiz / "gerar_cortes.py"), "--sugerir-titulos", nome], cwd=str(self.raiz),
+                               env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=SUGERIR_TIMEOUT_S, **kwargs)
+        except subprocess.TimeoutExpired:
+            raise ValueError("A IA demorou demais para responder. Tente de novo.")
+        except OSError as e:
+            raise ValueError(f"Não foi possível consultar a IA: {e}")
+        for linha in (r.stdout or "").splitlines():
+            if linha.startswith("TITULOS_JSON="):
+                try:
+                    itens = json.loads(linha[len("TITULOS_JSON="):])
+                except ValueError:
+                    break
+                limpos = []
+                for i in itens if isinstance(itens, list) else []:
+                    if isinstance(i, dict) and isinstance(i.get("titulo"), str) and i["titulo"].strip():
+                        limpos.append({"titulo": i["titulo"].strip()[:TITULO_MAX],
+                                       "pergunta": str(i.get("pergunta") or "").strip()[:TITULO_MAX]})
+                if limpos:
+                    return limpos
+        motivo = next((l.strip().lstrip("❌ ").strip() for l in reversed((r.stdout or "").splitlines()) if "❌" in l), "")
+        raise ValueError(motivo or "A IA não devolveu sugestões agora. Tente de novo em instantes.")
 
     # ---- layouts salvos (editor de layout)
     def listar_layouts(self):
@@ -761,6 +811,11 @@ class Manipulador(BaseHTTPRequestHandler):
         if caminho == "/api/canais":
             try:
                 return self._json({"canal": self.estado.salvar_canal(dados)}, 201)
+            except ValueError as e:
+                return self._erro(400, str(e))
+        if caminho == "/api/cortes/titulos":
+            try:
+                return self._json({"titulos": self.estado.sugerir_titulos(dados.get("nome"))})
             except ValueError as e:
                 return self._erro(400, str(e))
         if caminho == "/api/canais/ativo":

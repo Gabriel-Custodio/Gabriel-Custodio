@@ -239,6 +239,28 @@
       <p class="ajuda">Clique na linha do tempo para ir a um ponto. Puxe as alças amarelas para <strong>aparar o início e o fim</strong>, ou use <strong>Dividir no cursor</strong> e <strong>Excluir trecho</strong> para tirar um pedaço do meio. A legenda acompanha o que sobrar. Os cortes só valem depois de <strong>Renderizar de novo</strong>; o vídeo bruto nunca é alterado.</p>
     </div>
 
+    <div class="dlg-bloco" id="ed-bloco-titulo">
+      <h3>Título do corte</h3>
+      <p class="ajuda">O título e a pergunta aparecem na tarja do vídeo (se a tarja estiver ligada) e no card do corte. Escreva o seu ou peça sugestões à IA, que lê só a fala do corte. Vale ao clicar em <strong>Renderizar de novo</strong>.</p>
+      <div class="grade-campos">
+        <div class="campo">
+          <label for="ed-titulo">Título (até 60 caracteres)</label>
+          <input id="ed-titulo" type="text" maxlength="60" autocomplete="off">
+        </div>
+        <div class="campo">
+          <label for="ed-pergunta">Pergunta (opcional)</label>
+          <input id="ed-pergunta" type="text" maxlength="60" autocomplete="off">
+        </div>
+      </div>
+      <div class="acoes-form">
+        <button type="button" id="ed-sugerir" class="btn">Sugerir outros títulos</button>
+        <button type="button" id="ed-titulo-voltar" class="btn" hidden>Voltar ao título atual</button>
+        <span id="ed-sug-estado" class="selo" role="status" hidden></span>
+      </div>
+      <p id="ed-sug-erro" class="erro" role="alert" hidden></p>
+      <ul id="ed-sugestoes" class="ed-sugestoes" aria-label="Títulos sugeridos"></ul>
+    </div>
+
     <div class="dlg-bloco">
       <h3>1. Layout</h3>
       <label class="opcao"><input type="radio" name="ed-layout" value="empilhado" checked>
