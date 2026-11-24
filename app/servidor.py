@@ -16,6 +16,7 @@ import argparse
 import atexit
 import hmac
 import json
+import math
 import mimetypes
 import os
 import re
@@ -41,10 +42,13 @@ PORTA_PADRAO = 8765
 MODOS = {"ia": "Narração por IA", "gameplay": "Gameplay / Streamer", "original": "Áudio original"}
 LAYOUTS = {"cam", "fit", "clipflow"}
 FUNDOS = {"blur", "black"}
-RECURSOS = ["edicao"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
+RECURSOS = ["edicao", "linha_do_tempo"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
 RE_SLUG = re.compile(r"^[a-z0-9_-]{1,40}$")
 CAM_ALTURA_MIN, CAM_ALTURA_MAX, CAM_ALTURA_PADRAO = 300, 1100, 600
 ORDENS = ("cam_primeiro", "game_primeiro")
+TRECHOS_MAX = 60           # pedaços mantidos na linha do tempo (igual ao gerar_cortes.py)
+TRECHO_MIN_S = 0.2
+TRECHOS_TOTAL_MIN_S = 1.0
 MAX_LINHAS_LOG = 20000
 MAX_CORPO = 64 * 1024
 RE_URL = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
@@ -291,6 +295,30 @@ class Estado:
         return caminho
 
     @staticmethod
+    def _trechos_limpos(valor):
+        """Trechos mantidos da linha do tempo: [[ini, fim], ...] em segundos, em ordem. None = corte inteiro. Levanta ValueError."""
+        if valor is None:
+            return None
+        erro = ValueError("Trechos inválidos: confira os cortes da linha do tempo.")
+        if not isinstance(valor, list) or not 1 <= len(valor) <= TRECHOS_MAX:
+            raise erro
+        saida, ultimo = [], 0.0
+        for item in valor:
+            if not isinstance(item, list) or len(item) != 2:
+                raise erro
+            a, b = item
+            if any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in (a, b)):
+                raise erro
+            a, b = float(a), float(b)
+            if not (math.isfinite(a) and math.isfinite(b)) or a < ultimo - 1e-6 or b - a < TRECHO_MIN_S:
+                raise erro
+            saida.append([round(a, 3), round(b, 3)])
+            ultimo = b
+        if sum(b - a for a, b in saida) < TRECHOS_TOTAL_MIN_S:
+            raise ValueError("O corte aparado ficaria curto demais (mínimo de 1 segundo).")
+        return saida
+
+    @staticmethod
     def validar_opcoes_edicao(dados):
         """Opções de edição vindas da tela -> dict limpo (o gerar_cortes.py valida de novo). Levanta ValueError."""
         if not isinstance(dados, dict) or dados.get("layout") not in ("inteiro", "empilhado"):
@@ -301,6 +329,9 @@ class Estado:
             if not isinstance(valor, bool):
                 raise ValueError("Opção inválida.")
             opcoes[chave] = valor
+        trechos = Estado._trechos_limpos(dados.get("trechos"))
+        if trechos:
+            opcoes["trechos"] = trechos
         if opcoes["layout"] == "empilhado":
             limpo = Estado._layout_limpo({"nome": "", "cam": dados.get("cam"), "game": dados.get("game"),
                                           "cam_altura": dados.get("cam_altura", CAM_ALTURA_PADRAO),

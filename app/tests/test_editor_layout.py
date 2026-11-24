@@ -259,6 +259,7 @@ class TestEdicaoNoServidor(BaseEditor):
     def test_estado_informa_os_recursos_do_servidor(self):
         _, estado = self.json("GET", "/api/estado")
         self.assertIn("edicao", estado["recursos"])                       # a página usa isto para avisar de servidor antigo
+        self.assertIn("linha_do_tempo", estado["recursos"])
 
     def test_video_bruto_e_video_atual_sao_arquivos_diferentes(self):
         self.criar_bruto()
@@ -311,6 +312,31 @@ class TestEdicaoNoServidor(BaseEditor):
         for corpo, rotulo in casos:
             self.assertEqual(self.json("POST", "/api/cortes/editar", corpo)[0], 400, rotulo)
         self.assertFalse((self.saida / "_edicoes").exists())            # nada foi gravado nem executado
+
+    def test_editar_com_trechos_da_linha_do_tempo(self):
+        self.criar_bruto()
+        trechos = [[0, 4.5], [7, 10.25]]
+        self.assertEqual(self.editar({**OPCOES_INTEIRO, "trechos": trechos})[0], 201)
+        self.esperar_fim()
+        salvo = json.loads((self.saida / "_edicoes" / "corte_gameplay_1_TESTE.json").read_text(encoding="utf-8"))
+        self.assertEqual(salvo["trechos"], trechos)
+        self.assertEqual(g.normalize_edit_options(salvo)["trechos"], trechos)      # o script aceita o que o servidor gravou
+
+    def test_editar_sem_trechos_nao_grava_a_chave(self):
+        self.criar_bruto()
+        self.assertEqual(self.editar({**OPCOES_INTEIRO, "trechos": None})[0], 201)
+        self.esperar_fim()
+        salvo = json.loads((self.saida / "_edicoes" / "corte_gameplay_1_TESTE.json").read_text(encoding="utf-8"))
+        self.assertNotIn("trechos", salvo)
+
+    def test_editar_trechos_invalidos(self):
+        self.criar_bruto()
+        ruins = [[], "texto", [[0, 5], [4, 9]], [[5, 4]], [[-1, 5]], [[0, 0.1]], [[0, 0.4]], [["a", 5]], [[True, 5]],
+                 [[0, 5, 6]], [[0, float("inf")]], [[i, i + 0.5] for i in range(0, 61)], [[0, 0.5], [1, 1.4]], 7]
+        for ruim in ruins:
+            status, _ = self.editar({**OPCOES_INTEIRO, "trechos": ruim})
+            self.assertEqual(status, 400, repr(ruim)[:60])
+        self.assertFalse((self.saida / "_edicoes").exists())
 
     def test_nao_edita_com_outra_execucao_rodando(self):
         self.criar_bruto()
@@ -514,7 +540,7 @@ class TestRenderizarEdicao(BaseScript):
         def run(cmd, *a, **k):
             self.cmds.append(cmd)
             if ffmpeg_ok and "-filter_complex" in cmd:
-                Path(cmd[-1]).write_bytes(b"EDITADO" * 100)
+                Path(cmd[-1]).write_bytes(b"EDITADO" * 200)
             return ffmpeg_ok, "", ""
 
         def intro(path, texto, chave, streamer=None):
@@ -538,7 +564,7 @@ class TestRenderizarEdicao(BaseScript):
     def test_empilhado_com_tudo(self):
         self.montar({**OPCOES_EMPILHADO, "resumo": True, "cta": True})
         self.assertTrue(self.renderizar())
-        self.assertEqual((self.out / self.NOME).read_bytes(), b"EDITADO" * 100)             # o visível foi trocado
+        self.assertEqual((self.out / self.NOME).read_bytes(), b"EDITADO" * 200)             # o visível foi trocado
         self.assertEqual((self.out / "_brutos" / self.NOME).read_bytes(), b"BRUTO" * 100)    # o bruto não foi tocado
         m = self.meta()
         self.assertEqual((m["bruto"], m["layout"], m["edicao"]["estado"]), (False, "custom", "renderizado"))
@@ -614,6 +640,119 @@ class TestRenderizarEdicao(BaseScript):
         fonte = (RAIZ / "gerar_cortes.py").read_text(encoding="utf-8")
         self.assertIn('"--renderizar"', fonte)
         self.assertIn("render_edit(args.renderizar)", fonte)
+
+
+class TestLinhaDoTempo(TestRenderizarEdicao):
+    """Trechos mantidos na linha do tempo: o bruto é aparado antes do layout; legenda e texto acompanham."""
+    TRECHOS = [[0, 4], [7, 10]]
+    BASE = {**OPCOES_EMPILHADO, "resumo": False, "cta": False}
+
+    def filtros(self):
+        """Os comandos do ffmpeg com filtro (sem as consultas de duração): [aparar, layout] ou só [layout]."""
+        return [c for c in self.cmds if "-filter_complex" in c]
+
+    def test_normalize_trechos(self):
+        self.assertEqual(g.normalize_trechos(None), (None, True))
+        self.assertEqual(g.normalize_trechos([[0, 4], [7, 10.1234]]), ([[0.0, 4.0], [7.0, 10.123]], True))
+        for ruim in ([], "x", [[0]], [[0, 5], [4, 9]], [[5, 4]], [[-1, 5]], [[0, 0.1]], [["a", 5]], [[True, 5]],
+                     [[0, 0.5], [1, 1.4]], [[0, float("nan")]], [[i, i + 0.5] for i in range(0, 61)]):
+            self.assertEqual(g.normalize_trechos(ruim)[1], False, repr(ruim)[:50])
+
+    def test_normalize_edit_options_guarda_ou_ignora_os_trechos(self):
+        self.assertEqual(g.normalize_edit_options({**OPCOES_INTEIRO, "trechos": self.TRECHOS})["trechos"], [[0.0, 4.0], [7.0, 10.0]])
+        self.assertNotIn("trechos", g.normalize_edit_options(OPCOES_INTEIRO))
+        self.assertIsNone(g.normalize_edit_options({**OPCOES_INTEIRO, "trechos": [[3, 1]]}))
+
+    def test_clamp_trechos(self):
+        self.assertIsNone(g.clamp_trechos(None, 10))
+        self.assertIsNone(g.clamp_trechos([[0, 10]], 10))                       # o vídeo inteiro não precisa de corte
+        self.assertIsNone(g.clamp_trechos([[0, 99]], 10))
+        self.assertEqual(g.clamp_trechos([[1, 99]], 10), [[1, 10]])
+        self.assertEqual(g.clamp_trechos([[0, 4], [20, 30]], 10), [[0, 4]])     # o que cai depois do fim some
+
+    def test_remap_segments(self):
+        segs = g.relative_segments(SEGMENTOS, 100.0, 110.0)
+        novo = g.remap_segments(segs, [[0, 4], [7, 10]])
+        self.assertEqual(len(novo), 1)
+        self.assertEqual(novo[0]["text"], "olha so isso")
+        self.assertEqual([(w["word"], w["start"], w["end"]) for w in novo[0]["words"]],
+                         [("olha", 1.0, 1.5), ("so", 1.5, 2.0), ("isso", 4.5, 6.0)])   # "isso" andou 3s para a esquerda
+        self.assertEqual((novo[0]["start"], novo[0]["end"]), (1.0, 6.0))
+        # palavras só no trecho excluído somem junto com a frase
+        self.assertEqual(g.remap_segments(segs, [[4, 6]]), [])
+        # frase sem palavras marcadas acompanha o meio dela
+        solta = [{"start": 5.0, "end": 8.0, "text": "sem palavras"}]
+        self.assertEqual(g.remap_segments(solta, [[4, 10]])[0]["start"], 1.0)
+        self.assertEqual(g.remap_segments(None, [[0, 5]]), [])
+
+    def test_trim_raw_video_monta_o_grafo(self):
+        self.cmds = []
+        def run(cmd, *a, **k):
+            self.cmds.append(cmd)
+            Path(cmd[-1]).write_bytes(b"X" * 2048)
+            return True, "", ""
+        with mock.patch.object(g, "run_cmd", run):
+            self.assertTrue(g.trim_raw_video(self.dir / "r.mp4", [[0, 4], [7.5, 10]], self.temp / "o.mp4"))
+        grafo = self.cmds[0][self.cmds[0].index("-filter_complex") + 1]
+        self.assertIn("[0:v]trim=start=7.500:end=10.000,setpts=PTS-STARTPTS[v1]", grafo)
+        self.assertIn("[0:a]atrim=start=0.000:end=4.000,asetpts=PTS-STARTPTS[a0]", grafo)
+        self.assertIn("[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]", grafo)
+        with mock.patch.object(g, "run_cmd", lambda *a, **k: (False, "", "erro")):
+            self.assertFalse(g.trim_raw_video(self.dir / "r.mp4", [[0, 4]], self.temp / "o2.mp4"))
+
+    def test_renderiza_so_os_trechos_mantidos(self):
+        self.montar({**self.BASE, "trechos": self.TRECHOS})
+        self.assertTrue(self.renderizar())
+        trim, layout = self.filtros()
+        self.assertIn("concat=n=2", trim[trim.index("-filter_complex") + 1])
+        self.assertEqual(trim[trim.index("-i") + 1], str(self.out / "_brutos" / self.NOME))    # sempre aparado a partir do bruto
+        entrada = layout[layout.index("-i") + 1]
+        self.assertTrue(entrada.endswith("_aparado.mp4"), entrada)                              # o layout usa o aparado
+        m = self.meta()
+        self.assertEqual(m["trechos_mantidos"], [[0.0, 4.0], [7.0, 10.0]])
+        self.assertEqual(m["duracao_final_s"], 7.0)
+        self.assertEqual(m["edicao"]["opcoes"]["trechos"], [[0.0, 4.0], [7.0, 10.0]])           # o editor reabre com os mesmos cortes
+        self.assertEqual((self.out / "_brutos" / self.NOME).read_bytes(), b"BRUTO" * 100)       # bruto intacto
+        self.assertFalse(list(self.temp.glob("*_aparado.mp4")))                                 # sem lixo temporário
+        self.assertEqual((self.out / self.NOME).read_bytes(), b"EDITADO" * 200)
+
+    def test_texto_do_resumo_acompanha_o_que_sobrou(self):
+        self.montar({**self.BASE, "resumo": True, "trechos": self.TRECHOS})
+        self.assertTrue(self.renderizar())
+        self.assertEqual(self.extras["intro"][0], "olha so isso")
+
+    def test_legenda_usa_os_tempos_novos(self):
+        self.montar({**self.BASE, "trechos": self.TRECHOS})
+        self.assertTrue(self.renderizar())
+        grafo = self.filtros()[1][self.filtros()[1].index("-filter_complex") + 1]
+        self.assertIn("subtitles=", grafo)
+
+    def test_trechos_que_cobrem_tudo_nao_apara(self):
+        self.montar({**self.BASE, "trechos": [[0, 10]]})
+        self.assertTrue(self.renderizar())
+        self.assertEqual(len(self.filtros()), 1)                                # só o layout, sem aparar
+        self.assertIsNone(self.meta()["trechos_mantidos"])
+
+    def test_falha_ao_aparar_deixa_o_corte_como_estava(self):
+        self.montar({**self.BASE, "trechos": self.TRECHOS})
+        self.assertFalse(self.renderizar(ffmpeg_ok=False))
+        self.assertEqual((self.out / self.NOME).read_bytes(), b"BRUTO" * 100)
+        self.assertTrue(self.meta()["bruto"])
+
+
+class TestLinhaDoTempoNoNavegador(unittest.TestCase):
+    """A matemática da linha do tempo (timeline-logica.js) roda no gjs, que não precisa de navegador."""
+
+    def test_logica_da_linha_do_tempo(self):
+        import shutil
+        import subprocess
+        gjs = shutil.which("gjs")
+        if gjs is None:
+            self.skipTest("gjs não está instalado")
+        raiz = Path(__file__).resolve().parent
+        r = subprocess.run([gjs, str(raiz / "timeline_logica_teste.js"), str(raiz.parent / "static" / "timeline-logica.js")],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.stdout.strip(), "OK", r.stdout + r.stderr)
 
 
 class TestLayoutSemTarja(BaseScript):

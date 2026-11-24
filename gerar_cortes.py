@@ -4953,11 +4953,119 @@ def export_raw_gameplay(clip, segments, output_path, segment_path, hook_data, ho
     return True
 
 
+EDIT_MAX_TRECHOS = 60          # pedaços mantidos na linha do tempo
+EDIT_MIN_TRECHO_S = 0.2        # um pedaço menor que isso não tem utilidade
+EDIT_MIN_TOTAL_S = 1.0         # o corte aparado precisa durar pelo menos isso
+
+
+def normalize_trechos(value):
+    """Trechos MANTIDOS do corte bruto ([[ini, fim], ...] em segundos, em ordem e sem sobreposição).
+
+    Devolve (lista, ok): None sem trechos = corte inteiro; ok=False se algo estiver errado.
+    """
+    if value is None:
+        return None, True
+    if not isinstance(value, (list, tuple)) or not 1 <= len(value) <= EDIT_MAX_TRECHOS:
+        return None, False
+    out, ultimo = [], 0.0
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            return None, False
+        a, b = item
+        if isinstance(a, bool) or isinstance(b, bool) or not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+            return None, False
+        a, b = float(a), float(b)
+        if not (math.isfinite(a) and math.isfinite(b)) or a < ultimo - 1e-6 or b - a < EDIT_MIN_TRECHO_S:
+            return None, False
+        out.append([round(a, 3), round(b, 3)])
+        ultimo = b
+    if sum(b - a for a, b in out) < EDIT_MIN_TOTAL_S:
+        return None, False
+    return out, True
+
+
+def clamp_trechos(trechos, duration):
+    """Limita os trechos à duração real do bruto; descarta o que ficar vazio. None = corte inteiro."""
+    if not trechos:
+        return None
+    out = []
+    for a, b in trechos:
+        a, b = max(0.0, a), min(duration, b)
+        if b - a >= EDIT_MIN_TRECHO_S:
+            out.append([a, b])
+    if not out or (len(out) == 1 and out[0][0] <= 0.05 and out[0][1] >= duration - 0.05):
+        return None
+    return out
+
+
+def remap_segments(segments, trechos):
+    """Reposiciona a transcrição (tempos relativos ao bruto) na linha do tempo aparada.
+
+    Palavras fora dos trechos mantidos somem; as demais andam para a esquerda pelo que foi cortado antes delas.
+    """
+    def locate(mid):
+        deslocamento = 0.0
+        for a, b in trechos:
+            if a <= mid <= b:
+                return a, b, deslocamento
+            deslocamento += b - a
+        return None
+
+    out = []
+    for seg in segments or []:
+        words = []
+        for w in seg.get("words") or []:
+            pos = locate((w["start"] + w["end"]) / 2)
+            if pos is None:
+                continue
+            a, b, off = pos
+            ws, we = max(w["start"], a) - a + off, min(w["end"], b) - a + off
+            if we > ws:
+                words.append({"word": w["word"], "start": round(ws, 3), "end": round(we, 3)})
+        if words:
+            out.append({"start": words[0]["start"], "end": words[-1]["end"],
+                        "text": " ".join(str(w["word"]).strip() for w in words), "words": words})
+        elif not seg.get("words"):
+            pos = locate((seg["start"] + seg["end"]) / 2)
+            if pos is not None:
+                a, b, off = pos
+                out.append({"start": round(max(seg["start"], a) - a + off, 3), "end": round(min(seg["end"], b) - a + off, 3),
+                            "text": seg["text"]})
+    return [s for s in out if s["end"] > s["start"]]
+
+
+def trim_raw_video(raw, trechos, output_path):
+    """Monta um vídeo só com os trechos mantidos do bruto (re-codifica com qualidade alta; o resultado final é codificado de novo)."""
+    partes, rotulos = [], []
+    for i, (a, b) in enumerate(trechos):
+        partes.append(f"[0:v]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS[v{i}];"
+                      f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS[a{i}]")
+        rotulos.append(f"[v{i}][a{i}]")
+    graph = ";".join(partes) + f";{''.join(rotulos)}concat=n={len(trechos)}:v=1:a=1[v][a]"
+    cmd = [FFMPEG.as_posix(), "-y", "-hide_banner", "-loglevel", "error", "-i", str(raw),
+           "-filter_complex", graph, "-map", "[v]", "-map", "[a]",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", str(INTERMEDIATE_CRF),
+           "-c:a", "aac", "-b:a", "192k", "-fps_mode", "cfr", str(output_path)]
+    ok, _, err = run_cmd(cmd, timeout=300)
+    if not ok:
+        print(f"   ❌ Falha ao aparar o corte: {err[:300]}")
+        return False
+    if not Path(output_path).exists() or Path(output_path).stat().st_size < 1024:
+        print("   ❌ O corte aparado saiu vazio.")
+        return False
+    return True
+
+
 def normalize_edit_options(data):
     """Valida as opções de edição de um corte. None se algo estiver errado (nunca levanta erro)."""
     if not isinstance(data, dict) or data.get("layout") not in ("inteiro", "empilhado"):
         return None
     opts = {"layout": data["layout"]}
+    trechos, ok = normalize_trechos(data.get("trechos"))
+    if not ok:
+        return None
+    if trechos:
+        opts["trechos"] = trechos
     for key in ("tarja", "legenda", "resumo", "cta"):
         value = data.get(key, True)
         if not isinstance(value, bool):
@@ -5014,10 +5122,26 @@ def render_edit(name):
     os.environ["CORTES_RESUMO"] = "1" if opts["resumo"] else "0"
     os.environ["CORTES_CTA"] = "1" if opts["cta"] else "0"
 
+    # Linha do tempo: só os trechos mantidos entram. A legenda e o texto do resumo acompanham o que sobrou.
+    segs = meta.get("legenda_segmentos") or []
+    source = raw
+    trimmed = None
+    trechos = clamp_trechos(opts["trechos"], get_video_duration(raw) or duration) if opts.get("trechos") else None
+    if trechos:
+        print(f"   ✂️  Linha do tempo: {len(trechos)} trecho(s) mantido(s) ({sum(b - a for a, b in trechos):.1f}s de {duration:.1f}s)")
+        trimmed = TEMP_DIR / f"edicao_{visible.stem}_aparado.mp4"
+        if not trim_raw_video(raw, trechos, trimmed):
+            print("❌ Falha ao aparar: o corte continua como estava.")
+            return False
+        source = trimmed
+        duration = get_video_duration(trimmed) or sum(b - a for a, b in trechos)
+        segs = remap_segments(segs, trechos)
+        if segs:
+            text = " ".join(s["text"] for s in segs)
+
     ass_path = None
     if opts["legenda"]:
         ass_path = TEMP_DIR / f"edicao_{visible.stem}_subs.ass"
-        segs = meta.get("legenda_segmentos") or []
         if not segs or not create_karaoke_ass_subtitle(segs, 0.0, duration, duration, ass_path):
             print("   ⚠️  Sem legenda disponível para este corte; renderizando sem ela.")
             ass_path = None
@@ -5032,9 +5156,14 @@ def render_edit(name):
         FIT_SUBTITLE_BELOW_VIDEO = True
 
     tmp_out = TEMP_DIR / f"edicao_{visible.stem}.mp4"
-    ok = process_clipflow_layout(input_path=raw, output_path=tmp_out, webcam_pos=None, ass_path=ass_path,
+    ok = process_clipflow_layout(input_path=source, output_path=tmp_out, webcam_pos=None, ass_path=ass_path,
                                  hook_data=hook if opts["tarja"] else None, clip_duration=duration,
                                  groq_api_key=groq_api_key, clip_text=text, audio_mode="original")
+    if trimmed is not None:
+        try:
+            trimmed.unlink()
+        except OSError:
+            pass
     if not ok or not tmp_out.exists():
         print("❌ Falha ao renderizar: o corte continua como estava.")
         return False
@@ -5048,6 +5177,7 @@ def render_edit(name):
     meta.update({
         "bruto": False, "layout": LAYOUT_APLICADO, "camera_ampliacao": CAM_AMPLIACAO,
         "layout_salvo": None, "resumo_intro": intro_info, "cta_final": cta_info,
+        "trechos_mantidos": trechos,
         "duracao_final_s": round(duration + (intro_info["duracao_s"] if intro_info else 0)
                                  + (cta_info["duracao_s"] if cta_info else 0), 2),
         "edicao": {"estado": "renderizado", "opcoes": opts, "em": datetime.now().isoformat()},

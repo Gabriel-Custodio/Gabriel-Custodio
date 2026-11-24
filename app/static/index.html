@@ -161,6 +161,43 @@
     </div>
 
     <div class="dlg-bloco">
+      <h3>Vídeo e linha do tempo</h3>
+      <div class="ed-fonte">
+        <video id="ed-video" controls muted playsinline preload="auto"></video>
+        <button type="button" id="ed-pegar-quadro" class="btn">Usar este quadro</button>
+      </div>
+      <div id="tl" class="tl" aria-label="Linha do tempo do corte">
+        <div class="tl-barra">
+          <span id="tl-tempo" class="tl-tempo" title="Posição atual">00:00</span>
+          <button type="button" id="tl-desfazer" class="btn" disabled>Desfazer</button>
+          <button type="button" id="tl-refazer" class="btn" disabled>Refazer</button>
+          <button type="button" id="tl-dividir" class="btn" title="Divide o trecho na posição do cursor">Dividir no cursor</button>
+          <button type="button" id="tl-excluir" class="btn" title="Exclui (ou restaura) o trecho em que o cursor está">Excluir trecho</button>
+          <span class="tl-zoom">
+            <label for="tl-zoom" class="tl-zoom-rot">Zoom</label>
+            <input id="tl-zoom" type="range" min="1" max="8" step="0.1" value="1" aria-label="Zoom da linha do tempo">
+          </span>
+        </div>
+        <div class="tl-corpo">
+          <div class="tl-rotulos" aria-hidden="true"><span class="tl-rot-regua"></span><span>Áudio</span><span>Vídeo</span></div>
+          <div id="tl-rolagem" class="tl-rolagem">
+            <div id="tl-conteudo" class="tl-conteudo">
+              <canvas id="tl-regua" class="tl-regua"></canvas>
+              <canvas id="tl-ondas" class="tl-ondas"></canvas>
+              <canvas id="tl-quadros" class="tl-quadros"></canvas>
+              <div id="tl-pecas" class="tl-pecas"></div>
+              <div id="tl-ini" class="tl-alca ini" title="Arraste para aparar o início" role="slider" aria-label="Início do corte"></div>
+              <div id="tl-fim" class="tl-alca fim" title="Arraste para aparar o fim" role="slider" aria-label="Fim do corte"></div>
+              <div id="tl-cursor" class="tl-cursor"></div>
+            </div>
+          </div>
+        </div>
+        <p id="tl-info" class="ajuda" role="status"></p>
+      </div>
+      <p class="ajuda">Clique na linha do tempo para ir a um ponto. Puxe as alças amarelas para <strong>aparar o início e o fim</strong>, ou use <strong>Dividir no cursor</strong> e <strong>Excluir trecho</strong> para tirar um pedaço do meio. A legenda acompanha o que sobrar. Os cortes só valem depois de <strong>Renderizar de novo</strong>; o vídeo bruto nunca é alterado.</p>
+    </div>
+
+    <div class="dlg-bloco">
       <h3>1. Layout</h3>
       <label class="opcao"><input type="radio" name="ed-layout" value="empilhado" checked>
         <span><strong>Câmera + gameplay (caixas)</strong><small>Você escolhe o recorte da câmera e o do gameplay e como eles ficam empilhados.</small></span></label>
@@ -170,11 +207,7 @@
     </div>
 
     <div id="ed-caixas" class="dlg-bloco">
-      <p class="ajuda">Pause o vídeo num momento em que a câmera e o gameplay aparecem e clique em <strong>Usar este quadro</strong>. Depois <strong>arraste uma caixa para movê-la</strong> e puxe um canto para mudar o tamanho (a proporção fica travada, então nada é esticado).</p>
-      <div class="ed-fonte">
-        <video id="ed-video" controls muted playsinline preload="auto"></video>
-        <button type="button" id="ed-pegar-quadro" class="btn">Usar este quadro</button>
-      </div>
+      <p class="ajuda">Pause o vídeo lá em cima num momento em que a câmera e o gameplay aparecem e clique em <strong>Usar este quadro</strong>. Depois <strong>arraste uma caixa para movê-la</strong> e puxe um canto para mudar o tamanho (a proporção fica travada, então nada é esticado).</p>
       <div id="ed-area-caixas" hidden>
         <div class="ed-grade">
           <div class="ed-col">
@@ -230,6 +263,8 @@
   </dialog>
 
   <script src="/static/app.js"></script>
+  <script src="/static/timeline-logica.js"></script>
+  <script src="/static/timeline.js"></script>
   <script src="/static/editor.js"></script>
 </body>
 </html>

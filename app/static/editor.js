@@ -244,6 +244,7 @@ function edMostrarLayout() {
   const empilhado = edLayout() === "empilhado";
   $("ed-caixas").hidden = !empilhado;
   $("ed-inteiro-info").hidden = empilhado;
+  $("ed-pegar-quadro").hidden = !empilhado;                 // o vídeo e a linha do tempo servem aos dois layouts
   $("ed-tarja-rotulo").textContent = empilhado
     ? "Tarja vermelha entre a câmera e o gameplay (com “CURTA · COMENTE · COMPARTILHE”)"
     : "Tarja vermelha acima do vídeo (título do corte e “CURTA · COMENTE · COMPARTILHE”)";
@@ -318,18 +319,21 @@ function edAbrir(corte) {
   $("ed-renderizar").disabled = false;
   edVideo.onloadedmetadata = () => { edVideo.currentTime = Math.max(0.1, edVideo.duration * 0.4); };
   edVideo.onseeked = () => { edVideo.onseeked = null; edPegarQuadro(ED.manter); };   // 1º quadro: o meio do corte
-  edVideo.src = `/video?nome=${encodeURIComponent(corte.nome)}&bruto=1&t=${Date.now()}`;
+  const src = `/video?nome=${encodeURIComponent(corte.nome)}&bruto=1&t=${Date.now()}`;
+  TLUI.abrir(src, op && op.trechos);                         // linha do tempo: refaz os cortes da última edição
+  edVideo.src = src;
   edCarregarLista();
   if (typeof edDlg.showModal === "function") edDlg.showModal(); else edDlg.setAttribute("open", "");
 }
 
 function edFechar() {
   edVideo.pause();
+  TLUI.fechar();
   edDlg.close();
 }
 $("ed-fechar").addEventListener("click", edFechar);
 $("ed-fechar-x").addEventListener("click", edFechar);
-edDlg.addEventListener("close", () => edVideo.pause());
+edDlg.addEventListener("close", () => { edVideo.pause(); TLUI.fechar(); });
 
 // ---------------------------------------------------------------- renderizar de novo
 function edOpcoes() {
@@ -338,11 +342,14 @@ function edOpcoes() {
   if (o.layout === "empilhado") {
     Object.assign(o, { cam: ED.cam, game: ED.game, cam_altura: ED.camAltura, ordem: ED.ordem });
   }
+  const trechos = TLUI.trechos();                             // null = vídeo inteiro
+  if (trechos) o.trechos = trechos;
   return o;
 }
 
 $("ed-renderizar").addEventListener("click", async () => {
   edErro("");
+  if (!TLUI.pronto()) { edErro("Espere o vídeo carregar."); return; }
   if (edLayout() === "empilhado" && !edImgOk()) { edErro("Espere o quadro carregar."); return; }
   $("ed-renderizar").disabled = true;
   try {
