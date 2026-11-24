@@ -167,7 +167,8 @@ class TestAgregador(unittest.TestCase):
         self.assertIsNotNone(a.aberto)
 
     def test_limite_por_hora(self):
-        a = Agregador("baixa")                                                     # 4 por hora
+        a = Agregador("baixa")
+        a.max_hora = 4                                                              # 4 por hora (o padrão é maior)
         for i in range(5):
             t = 100.0 + i * 600.0
             a.adicionar(audio(t, 9.0))
@@ -176,6 +177,33 @@ class TestAgregador(unittest.TestCase):
         self.assertEqual(a.descartes["limite_por_hora"], 1)
         a.adicionar(audio(100.0 + 5 * 600.0 + 700.0, 9.0))                           # passou a hora: libera de novo
         self.assertIsNotNone(a.aberto)
+
+    def test_limites_por_hora_padrao(self):
+        self.assertEqual({k: v["max_hora"] for k, v in sinais.SENSIBILIDADES.items()}, {"baixa": 12, "media": 20, "alta": 30})
+
+    def test_momentos_fracos_nao_gastam_a_cota_por_hora(self):
+        a = Agregador("media")
+        a.max_hora = 3
+        for i in range(10):                                                         # 10 momentos fracos (nota 5,5: abaixo de 6,5)
+            t = 100.0 + i * 100.0
+            a.adicionar(audio(t, 5.5))
+            self.assertEqual(len(a.avancar(t + 15.0)), 1)
+        self.assertEqual((len(a.fechados), len(a.contados), a.descartes["limite_por_hora"]), (10, 0, 0))
+        for i in range(3):                                                          # 3 fortes cabem
+            t = 2000.0 + i * 100.0
+            a.adicionar(audio(t, 9.0))
+            self.assertEqual(len(a.avancar(t + 15.0)), 1)
+        a.adicionar(audio(2400.0, 9.0))                                              # o 4º forte na mesma hora: limite
+        self.assertIsNone(a.aberto)
+        self.assertEqual(a.descartes["limite_por_hora"], 1)
+
+    def test_nota_exata_do_descarte_conta(self):
+        a = Agregador("media")
+        a.max_hora = 1
+        a.adicionar(audio(100.0, 6.5)); a.avancar(115.0)
+        self.assertEqual(len(a.contados), 1)
+        a.adicionar(audio(300.0, 9.0))
+        self.assertEqual(a.descartes["limite_por_hora"], 1)
 
     def test_momento_continuo_fecha_no_limite_de_duracao(self):
         a = Agregador("media")

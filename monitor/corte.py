@@ -17,7 +17,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-NOTA_DESCARTE = 6.5           # nota (0-10) abaixo disso: o corte é descartado
+from .sinais import NOTA_DESCARTE      # 6,5: nota (0-10) abaixo disso o corte é descartado (a mesma conta do limite por hora)
+
 NOTA_ALTO = 7.5               # acima disso (7,6 a 10): Potencial Alto; de 6,5 a 7,5: Potencial Médio
 PALAVRAS_MINIMAS = 6          # menos palavras que isso = "sem fala": a IA nem é chamada
 TEXTO_MAX_CHARS = 2400        # quanto da transcrição vai para a IA

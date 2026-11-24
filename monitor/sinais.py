@@ -13,11 +13,12 @@ from typing import Deque, List, Optional
 
 # parâmetros por sensibilidade (a tela escolhe uma; o padrão é "media")
 SENSIBILIDADES = {
-    "baixa": {"audio_db": 8.0, "chat_fator": 3.0, "gatilho": 6.5, "max_hora": 4},
-    "media": {"audio_db": 6.0, "chat_fator": 2.2, "gatilho": 5.0, "max_hora": 6},
-    "alta":  {"audio_db": 4.0, "chat_fator": 1.7, "gatilho": 3.5, "max_hora": 10},
+    "baixa": {"audio_db": 8.0, "chat_fator": 3.0, "gatilho": 6.5, "max_hora": 12},
+    "media": {"audio_db": 6.0, "chat_fator": 2.2, "gatilho": 5.0, "max_hora": 20},
+    "alta":  {"audio_db": 4.0, "chat_fator": 1.7, "gatilho": 3.5, "max_hora": 30},
 }
 SENSIBILIDADE_PADRAO = "media"
+NOTA_DESCARTE = 6.5            # momento com nota abaixo disso (arredondada em 1 casa) vira descarte: não conta no limite por hora
 
 PISO_LUFS = -45.0              # abaixo disso é silêncio: não entra na linha de base nem dispara
 AQUECIMENTO_AUDIO = 12         # medições (segmentos) antes de poder disparar: a live precisa "mostrar o normal" antes
@@ -146,6 +147,7 @@ class Agregador:
     - A janela do corte termina pos_roll s depois do pico e tem `duracao` s (ancorada no horário do pico).
     - Só fecha o momento quando já passou pos_roll sem novos sinais, ou quando ele passou do limite de duração.
     - Momento muito perto do anterior (distancia_min_s) ou acima do máximo por hora é descartado (e contado).
+    - O máximo por hora conta só os momentos que valem corte (nota >= NOTA_DESCARTE): os fracos não gastam a cota.
     """
 
     def __init__(self, sensibilidade=SENSIBILIDADE_PADRAO, pre_roll=35.0, pos_roll=10.0, fusao_s=20.0,
@@ -157,7 +159,8 @@ class Agregador:
         self.fusao_s, self.distancia_min_s, self.limite_aberto_s = fusao_s, distancia_min_s, limite_aberto_s
         self.sinais: Deque[Sinal] = deque()
         self.aberto: Optional[dict] = None
-        self.fechados: List[float] = []              # tempo (do pico) dos momentos já entregues
+        self.fechados: List[float] = []              # tempo (do pico) dos momentos já entregues (vale para a distância mínima)
+        self.contados: List[float] = []              # idem, só os que valem corte (vale para o limite por hora)
         self.descartes: Counter = Counter()
         self.agora = 0.0
 
@@ -195,11 +198,18 @@ class Agregador:
         if self.fechados and abs(sinal.t - self.fechados[-1]) < self.distancia_min_s:
             self.descartes["muito_perto_do_anterior"] += 1
             return
-        recentes = [p for p in self.fechados if p > self.agora - 3600.0]
+        recentes = [p for p in self.contados if p > self.agora - 3600.0]
         if len(recentes) >= self.max_hora:
             self.descartes["limite_por_hora"] += 1
             return
         self.aberto = {"pico_t": sinal.t, "primeiro_t": sinal.t, "ultimo_t": sinal.t, "nota": nota, "sinais": list(proximos)}
+
+    def _fechar(self, a):
+        self.fechados.append(a["pico_t"])
+        self.fechados = self.fechados[-200:]
+        if round(a["nota"], 1) >= NOTA_DESCARTE:
+            self.contados.append(a["pico_t"])
+            self.contados = self.contados[-200:]
 
     def avancar(self, agora) -> List[Momento]:
         """Diz que horas são no vídeo; devolve os momentos que ficaram prontos (o buffer já cobre o pós-roll)."""
@@ -211,8 +221,7 @@ class Agregador:
             fim = a["pico_t"] + self.pos_roll
             prontos.append(Momento(pico_t=a["pico_t"], primeiro_t=a["primeiro_t"], ultimo_t=a["ultimo_t"], nota=a["nota"],
                                    t0=fim - self.duracao, t1=fim, sinais=a["sinais"]))
-            self.fechados.append(a["pico_t"])
-            self.fechados = self.fechados[-200:]
+            self._fechar(a)
             self.aberto = None
         return prontos
 
@@ -223,6 +232,6 @@ class Agregador:
             return []
         fim = min(a["pico_t"] + self.pos_roll, max(self.agora, a["pico_t"]))
         self.aberto = None
-        self.fechados.append(a["pico_t"])
+        self._fechar(a)
         return [Momento(pico_t=a["pico_t"], primeiro_t=a["primeiro_t"], ultimo_t=a["ultimo_t"], nota=a["nota"],
                         t0=fim - self.duracao, t1=fim, sinais=a["sinais"])]
