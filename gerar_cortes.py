@@ -138,6 +138,10 @@ GAMEPLAY_MIN_WORDS_PER_SECOND = 0.8 # densidade mínima de fala no trecho (palav
 GAMEPLAY_PAD_BEFORE = 0.3           # folga antes da primeira fala (s)
 GAMEPLAY_PAD_AFTER = 0.5            # folga depois da última fala (s)
 
+# Vídeo longo (v4.0, pacote longos/): os melhores momentos do MESMO vídeo, juntos num bruto horizontal 1920x1080.
+# A análise é uma só (a mesma dos cortes); o vídeo longo precisa de mais notas, então a IA vê mais candidatos por faixa.
+LONGO_CANDIDATOS_POR_FAIXA = 12
+
 # ========== CONFIGURAÇÕES CLIPFLOW 3 CAMADAS (NOVO 2025 - igual monitor_lives.py) ==========
 CLIPFLOW_WEBAM_HEIGHT = 730                    # Altura do bloco webcam (topo)
 CLIPFLOW_HOOK_BAR_HEIGHT = 180                 # Altura da faixa divisória de gancho (meio)
@@ -2011,15 +2015,16 @@ def _clean_hook_question(value):
     return (' '.join(words).rstrip('?!.… ') + '?') if words else ''
 
 
-def analyze_band_with_ai(candidates, api_key):
+def analyze_band_with_ai(candidates, api_key, limit=None):
     """A IA ESCOLHE entre candidatos reais numerados; não calcula tempo nem escreve o texto.
 
     Retorna a lista dos candidatos escolhidos (com score, motivo e, se houver, o gancho), uma lista
     vazia se a IA não achou nada bom, ou None se a chamada falhou (quem chama usa a nota local).
+    `limit`: quantos a IA pode devolver (padrão GAMEPLAY_CLIPS_PER_BAND; o vídeo longo pede mais).
     """
     if not candidates:
         return []
-    limit = GAMEPLAY_CLIPS_PER_BAND
+    limit = limit or GAMEPLAY_CLIPS_PER_BAND
     listing = "\n".join(
         f"[{n}] {c['text'][:GAMEPLAY_CANDIDATE_TEXT_CHARS]}" for n, c in enumerate(candidates, 1))
     prompt = (
@@ -2080,26 +2085,13 @@ def analyze_band_with_ai(candidates, api_key):
     return picked
 
 
-def find_best_clips_gameplay_ai(segments, video_duration, api_key, num_clips=GAMEPLAY_DEFAULT_CLIPS):
-    """Seleciona os melhores trechos do modo Gameplay: candidatos reais + escolha da IA."""
-    if not segments or not api_key:
-        print("   ⚠️  Sem segmentos ou API key, usando método tradicional...")
-        return find_best_clips(segments, video_duration, num_clips)
+def score_bands(all_pool, video_duration, api_key, per_band=GAMEPLAY_CANDIDATES_PER_BAND, limit=None):
+    """Dá nota aos candidatos faixa a faixa (IA; se a IA falhar numa faixa, usa a nota local).
 
-    print(f"\n🤖 Modo Gameplay IA: montando candidatos a partir da transcrição real...")
-    all_pool = build_gameplay_candidates(segments, video_duration)
-    print(f"   🧩 {len(all_pool)} trechos candidatos com fala suficiente em todo o vídeo")
-    all_pool, ignorados = filtrar_repetidos(all_pool)
-    if ignorados:
-        print(f"   🚫 {ignorados} candidato(s) ignorado(s) por repetirem cortes já feitos deste vídeo; restam {len(all_pool)}")
-    if not all_pool:
-        if ignorados:
-            print("   ⚠️  Todos os trechos com fala deste vídeo já foram cortados antes.")
-            dica_historico_esgotado()
-            return []
-        print("   ⚠️  Nenhum trecho com fala suficiente, usando método tradicional...")
-        return find_best_clips(segments, video_duration, num_clips)
-
+    Devolve todos os candidatos que receberam nota (cada um com score, reason, fonte e, às vezes, hook_data).
+    `per_band`: quantos candidatos reais a IA vê por faixa; `limit`: quantos ela pode devolver por faixa.
+    """
+    limit = limit or GAMEPLAY_CLIPS_PER_BAND
     band_duration = video_duration / GAMEPLAY_TIME_BANDS
     all_candidates = []
 
@@ -2108,16 +2100,16 @@ def find_best_clips_gameplay_ai(segments, video_duration, api_key, num_clips=GAM
         band_end = min((band_idx + 1) * band_duration, video_duration)
         print(f"   📍 Faixa {band_idx + 1}/{GAMEPLAY_TIME_BANDS}: {band_start/60:.1f}min - {band_end/60:.1f}min")
 
-        pool = select_band_candidates(all_pool, band_start, band_end, GAMEPLAY_CANDIDATES_PER_BAND)
+        pool = select_band_candidates(all_pool, band_start, band_end, per_band)
         if not pool:
             print("      ⚠️  Sem trechos com fala suficiente nesta faixa")
             continue
 
-        picks = analyze_band_with_ai(pool, api_key)
+        picks = analyze_band_with_ai(pool, api_key, limit=limit)
         if picks is None:
             print("      ⚠️  IA indisponível nesta faixa: usando a nota local (fala, risadas, exclamações)")
             picks = []
-            for cand in sorted(pool, key=lambda c: c['local_score'], reverse=True)[:GAMEPLAY_CLIPS_PER_BAND]:
+            for cand in sorted(pool, key=lambda c: c['local_score'], reverse=True)[:limit]:
                 cand = dict(cand)
                 cand.update({'score': min(cand['local_score'], 10.0), 'fonte': 'local',
                              'reason': 'trecho com mais fala e reação (sem IA)'})
@@ -2125,12 +2117,12 @@ def find_best_clips_gameplay_ai(segments, video_duration, api_key, num_clips=GAM
         for cand in picks:
             cand['band'] = band_idx + 1
         all_candidates.extend(picks)
+    return all_candidates
 
-    if not all_candidates:
-        print("   ⚠️  IA não retornou candidatos, usando método tradicional...")
-        return find_best_clips(segments, video_duration, num_clips)
 
-    all_candidates.sort(key=lambda x: x['score'], reverse=True)
+def select_spaced_clips(all_candidates, segments, num_clips):
+    """Dos candidatos com nota, escolhe os N melhores com espaço entre si (anti-repetição) e confere a fala real."""
+    all_candidates = sorted(all_candidates, key=lambda x: x['score'], reverse=True)
 
     print(f"\n🔍 Aplicando filtro anti-repetição (mínimo {GAMEPLAY_MIN_GAP_SECONDS}s entre cortes)...")
     selected = []
@@ -2186,6 +2178,118 @@ def find_best_clips_gameplay_ai(segments, video_duration, api_key, num_clips=GAM
         print(f"     Fala real ({c['words']} palavras, {c['wps']}/s): {c['text'][:120]}...")
 
     return selected[:num_clips]
+
+
+def find_best_clips_gameplay_ai(segments, video_duration, api_key, num_clips=GAMEPLAY_DEFAULT_CLIPS):
+    """Seleciona os melhores trechos do modo Gameplay: candidatos reais + escolha da IA."""
+    if not segments or not api_key:
+        print("   ⚠️  Sem segmentos ou API key, usando método tradicional...")
+        return find_best_clips(segments, video_duration, num_clips)
+
+    print(f"\n🤖 Modo Gameplay IA: montando candidatos a partir da transcrição real...")
+    all_pool = build_gameplay_candidates(segments, video_duration)
+    print(f"   🧩 {len(all_pool)} trechos candidatos com fala suficiente em todo o vídeo")
+    all_pool, ignorados = filtrar_repetidos(all_pool)
+    if ignorados:
+        print(f"   🚫 {ignorados} candidato(s) ignorado(s) por repetirem cortes já feitos deste vídeo; restam {len(all_pool)}")
+    if not all_pool:
+        if ignorados:
+            print("   ⚠️  Todos os trechos com fala deste vídeo já foram cortados antes.")
+            dica_historico_esgotado()
+            return []
+        print("   ⚠️  Nenhum trecho com fala suficiente, usando método tradicional...")
+        return find_best_clips(segments, video_duration, num_clips)
+
+    all_candidates = score_bands(all_pool, video_duration, api_key)
+    if not all_candidates:
+        print("   ⚠️  IA não retornou candidatos, usando método tradicional...")
+        return find_best_clips(segments, video_duration, num_clips)
+
+    return select_spaced_clips(all_candidates, segments, num_clips)
+
+
+def analyze_gameplay_video(segments, video_duration, api_key, num_clips, want_long):
+    """Devolve (cortes curtos, momentos com nota para o vídeo longo ou None).
+
+    Sem vídeo longo é o caminho de sempre. Com ele, UMA análise (a mesma transcrição e as mesmas notas da IA)
+    alimenta os dois: os cortes curtos saem do topo e o vídeo longo usa os momentos com nota alta.
+    """
+    if not want_long:
+        return find_best_clips_gameplay_ai(segments, video_duration, api_key, num_clips), None
+    if not segments or not api_key:
+        print("   ⚠️  O vídeo longo precisa da transcrição e da GROQ_API_KEY (as notas vêm da IA): ele não será gerado.")
+        clips = find_best_clips_gameplay_ai(segments, video_duration, api_key, num_clips) if num_clips > 0 else []
+        return clips, None
+
+    print("\n🤖 Modo Gameplay IA (cortes + vídeo longo): montando candidatos a partir da transcrição real...")
+    pool = build_gameplay_candidates(segments, video_duration)
+    print(f"   🧩 {len(pool)} trechos candidatos com fala suficiente em todo o vídeo")
+    scored = score_bands(pool, video_duration, api_key, per_band=LONGO_CANDIDATOS_POR_FAIXA,
+                         limit=LONGO_CANDIDATOS_POR_FAIXA)
+    clips = []
+    if num_clips > 0:
+        if not scored:
+            print("   ⚠️  IA não retornou candidatos, usando método tradicional para os cortes...")
+            clips = find_best_clips(segments, video_duration, num_clips)
+        else:
+            novos, ignorados = filtrar_repetidos(scored)         # só os cortes respeitam o histórico; o vídeo longo não
+            if ignorados:
+                print(f"   🚫 {ignorados} candidato(s) ignorado(s) nos cortes curtos por repetirem cortes já feitos deste vídeo")
+            if novos:
+                clips = select_spaced_clips([dict(c) for c in novos], segments, num_clips)
+            elif ignorados:
+                print("   ⚠️  Todos os trechos com nota deste vídeo já viraram cortes antes.")
+                dica_historico_esgotado()
+    return clips, scored
+
+
+def build_long_video(video_path, scored, segments, alvo_min, url=None):
+    """Escolhe os momentos, monta o bruto horizontal e grava o .json em videos_longos/. Devolve o .json ou None.
+
+    NUNCA levanta erro: os cortes curtos já foram salvos e não podem se perder por causa disto.
+    """
+    try:
+        import longos
+        alvo_s = alvo_min * 60
+        print("\n" + "=" * 60)
+        print(f"🎞️  VÍDEO LONGO (horizontal 1920x1080, alvo {alvo_min} min, nota mínima {longos.NOTA_MINIMA:g})")
+        print("=" * 60)
+        escolhidos, resumo = longos.selecionar(scored, alvo_s)
+        print(f"   🧮 {resumo['elegiveis']} momento(s) com nota {longos.NOTA_MINIMA:g} ou mais; "
+              f"{resumo['escolhidos']} escolhido(s), {resumo['total_s'] / 60:.1f} min")
+        if resumo["motivo"]:
+            print(f"   ⚠️  {resumo['motivo']}")
+        if not resumo["viavel"]:
+            return None
+        for i, c in enumerate(escolhidos, 1):
+            print(f"  {i}. {c['start']:.1f}s - {c['end']:.1f}s ({c['duration']:.1f}s) | Nota: {float(c['score']):.1f} | {c.get('reason', '')}")
+        nome = longos.nome_do_video()
+        pasta = Path(longos.PASTA)
+        bruto = pasta / longos.PASTA_BRUTOS / nome
+        montado = longos.montar_bruto(video_path, escolhidos, bruto, TEMP_DIR, FFMPEG.as_posix(), run_cmd,
+                                      get_video_duration, log=print)
+        if not montado:
+            return None
+        meta = longos.metadados(montado["momentos"], segments, montado["duracao_s"], alvo_s, resumo, url=url,
+                                video_id=HISTORICO.video_key if HISTORICO else None, streamer=STREAMER_NOME,
+                                fonte_resolucao=FONTE_RESOLUCAO)
+        json_path = pasta / (Path(nome).stem + ".json")
+        try:
+            tmp = json_path.with_name(json_path.name + ".tmp")
+            tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(str(tmp), str(json_path))
+        except OSError as erro:
+            print(f"   ❌ Não foi possível salvar os dados do vídeo longo: {erro}")
+            try:
+                bruto.unlink()
+            except OSError:
+                pass
+            return None
+        print(f"✅ Vídeo longo bruto salvo: {bruto} ({montado['duracao_s'] / 60:.1f} min, {len(montado['momentos'])} momentos)")
+        return json_path
+    except Exception as erro:                                       # noqa: BLE001 - não pode derrubar os cortes já feitos
+        print(f"❌ Vídeo longo: erro inesperado: {erro}")
+        return None
 
 
 def clip_file_title(clip, max_chars=50):
@@ -5669,6 +5773,9 @@ def main():
                         help="Renderiza de novo um corte bruto com as opções salvas em cortes_prontos/_edicoes/ (usado pelo menu Editar da interface)")
     parser.add_argument("--cortes", type=int, metavar="N",
                         help="Modo gameplay: quantidade de cortes (1-10), sem perguntar no terminal")
+    parser.add_argument("--video-longo", type=int, metavar="MIN", dest="video_longo",
+                        help="Modo gameplay: além dos cortes, monta um vídeo longo horizontal (1920x1080) com os melhores "
+                             "momentos do vídeo, de 4 a 12 minutos (salvo em videos_longos/). Com --cortes 0 gera só o longo")
     parser.add_argument("--repetir", action="store_true",
                         help="Permite repetir trechos que já viraram corte em execuções anteriores deste vídeo")
     parser.add_argument("--importar-existentes", action="store_true",
@@ -5681,6 +5788,14 @@ def main():
                         help="Nome do streamer, usado no resumo narrado (padrão: nome do canal, se não for um canal de cortes)")
     parser.add_argument("--repair", metavar="CLIP_PATH", help="Reparar/Reprocessar clipe existente: corrige sincronia A/V e aplica layout ClipFlow 3 camadas")
     args = parser.parse_args()
+    if args.video_longo is not None:
+        from longos import DURACAO_MAX_MIN, DURACAO_MIN_MIN, duracao_valida
+        if not duracao_valida(args.video_longo):
+            print(f"❌ --video-longo deve ser um número de minutos de {DURACAO_MIN_MIN} a {DURACAO_MAX_MIN}.")
+            sys.exit(1)
+        if args.audio != "gameplay":
+            print("⚠️  --video-longo só vale no modo gameplay: ignorado.")
+            args.video_longo = None
     if args.sem_resumo:
         os.environ["CORTES_RESUMO"] = "0"
     if args.sem_cta:
@@ -5940,6 +6055,12 @@ def main():
                 else:
                     print("   ℹ️  Sem câmera definida: os cortes sairão no layout fit.")
 
+        quer_longo = args.video_longo is not None
+        pool_longo = None
+        longo_json = None
+        if quer_longo and video_duration <= 90:
+            print(f"\nℹ️  Vídeo com {video_duration:.0f}s (até 90s): é curto demais para um vídeo longo, só o corte único sai.")
+            quer_longo = False
         if video_duration <= 90:
             print(f"\n⚡ Vídeo curto detectado ({video_duration:.1f}s <= 90s): usando vídeo inteiro como único corte")
             num_clips = 1
@@ -5956,7 +6077,7 @@ def main():
             print(f"   ✅ Clip único criado: 0s - {video_duration:.1f}s ({video_duration:.1f}s)")
         else:
             if args.cortes is not None:
-                num_clips = max(GAMEPLAY_MIN_CLIPS, min(GAMEPLAY_MAX_CLIPS, args.cortes))
+                num_clips = 0 if (args.cortes == 0 and quer_longo) else max(GAMEPLAY_MIN_CLIPS, min(GAMEPLAY_MAX_CLIPS, args.cortes))
                 print(f"\n📊 Quantidade de cortes: {num_clips} (definida por --cortes)")
             else:
                 print(f"\n📊 Quantidade de cortes (padrão: {GAMEPLAY_DEFAULT_CLIPS}, min: {GAMEPLAY_MIN_CLIPS}, max: {GAMEPLAY_MAX_CLIPS}):")
@@ -5977,28 +6098,37 @@ def main():
             print(f"   ✅ Serão gerados {num_clips} cortes")
 
             if groq_api_key:
-                clips = find_best_clips_gameplay_ai(segments, video_duration, groq_api_key, num_clips)
+                clips, pool_longo = analyze_gameplay_video(segments, video_duration, groq_api_key, num_clips, quer_longo)
             else:
+                if quer_longo:
+                    print("   ⚠️  O vídeo longo precisa da GROQ_API_KEY (as notas vêm da IA): ele não será gerado.")
+                    quer_longo = False
+                if num_clips == 0:
+                    print("❌ Sem cortes para gerar e sem vídeo longo: nada a fazer.")
+                    sys.exit(1)
                 print("   ⚠️  Sem GROQ_API_KEY, usando método tradicional de sliding window...")
                 clips = find_best_clips(segments, video_duration, num_clips)
 
-            if not clips:
+            if num_clips > 0 and not clips and not pool_longo:
                 print("❌ Não foi possível identificar trechos viáveis.")
                 dica_historico_esgotado()
                 sys.exit(1)
-            if len(clips) < num_clips:
+            if num_clips > 0 and not clips:
+                print("⚠️  Nenhum corte curto novo: segue só com o vídeo longo.")
+            elif num_clips > 0 and len(clips) < num_clips:
                 print(f"⚠️  Só {len(clips)} trecho(s) novo(s) (você pediu {num_clips}).")
                 dica_historico_esgotado()
 
-        print(f"\n🎯 {len(clips)} melhores trechos identificados:")
-        for i, clip in enumerate(clips, 1):
-            print(f"  {i}. {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s) | Score: {clip['score']:.1f}")
-            print(f"     Motivo: {clip.get('reason', 'N/A')}")
-            print(f"     Texto: {clip['text'][:120]}...")
+        if clips:
+            print(f"\n🎯 {len(clips)} melhores trechos identificados:")
+            for i, clip in enumerate(clips, 1):
+                print(f"  {i}. {clip['start']:.1f}s - {clip['end']:.1f}s ({clip['duration']:.1f}s) | Score: {clip['score']:.1f}")
+                print(f"     Motivo: {clip.get('reason', 'N/A')}")
+                print(f"     Texto: {clip['text'][:120]}...")
 
-        print("\n" + "=" * 60)
-        print("🎬 INICIANDO EXPORTAÇÃO DOS CORTES (GAMEPLAY - ClipFlow 3 Camadas)")
-        print("=" * 60)
+            print("\n" + "=" * 60)
+            print("🎬 INICIANDO EXPORTAÇÃO DOS CORTES (GAMEPLAY - ClipFlow 3 Camadas)")
+            print("=" * 60)
 
         success_count = 0
         for i, clip in enumerate(clips, 1):
@@ -6011,6 +6141,9 @@ def main():
                 registrar_corte_no_historico(clip['start'], clip['end'], "gameplay", output_path,
                                              (clip.get('hook_data') or {}).get('titulo_gancho', ''))
 
+        if quer_longo and pool_longo is not None:           # depois dos cortes: se falhar, eles já estão salvos
+            longo_json = build_long_video(video_path, pool_longo, segments, args.video_longo, url_limpa)
+
         print("\n🧹 Limpando arquivos temporários...")
         if TEMP_DIR.exists():
             shutil.rmtree(TEMP_DIR)
@@ -6018,10 +6151,18 @@ def main():
         imprimir_relatorio_extras()
 
         print("\n" + "=" * 60)
-        print(f"✅ CONCLUÍDO (Gameplay): {success_count}/{len(clips)} cortes gerados com sucesso")
-        print(f"📁 Pasta de saída: {OUTPUT_DIR.absolute()}")
+        if clips:
+            print(f"✅ CONCLUÍDO (Gameplay): {success_count}/{len(clips)} cortes gerados com sucesso")
+            print(f"📁 Pasta de saída: {OUTPUT_DIR.absolute()}")
+        if quer_longo:
+            if longo_json:
+                print(f"🎞️  Vídeo longo: gerado em {longo_json.parent.absolute()}")
+            else:
+                print("⚠️  Vídeo longo: NÃO foi gerado (veja os avisos acima).")
         print("=" * 60)
 
+        if quer_longo and not longo_json and not clips:
+            sys.exit(1)
         if success_count > 0:
             print("\n📋 Próximos passos:")
             print("  1. Revise os cortes na pasta 'cortes_prontos/'")

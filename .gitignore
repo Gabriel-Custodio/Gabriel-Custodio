@@ -1,6 +1,7 @@
 ﻿.env
 bin/
 cortes_prontos/
+videos_longos/
 downloads/
 temp/
 *.mp4

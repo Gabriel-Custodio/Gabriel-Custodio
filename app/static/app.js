@@ -72,7 +72,22 @@ function alternarOpcoes() {
   $("opcoes-gameplay").hidden = modo !== "gameplay";
   $("campo-streamer").hidden = modo !== "gameplay";
   $("aviso-bruto").hidden = modo !== "gameplay";
+  alternarLongo();
 }
+
+// Vídeo longo: só no modo Gameplay; ligado, aparece a duração e o campo de cortes aceita 0 (só o vídeo longo).
+function alternarLongo() {
+  const gameplay = document.querySelector('input[name="modo"]:checked').value === "gameplay";
+  const ligado = gameplay && $("longo").checked;
+  $("campo-longo-min").hidden = !ligado;
+  $("aviso-longo").hidden = !ligado;
+  $("cortes").min = ligado ? "0" : "1";
+  $("cortes-faixa").textContent = ligado ? "0 a 10" : "1 a 10";
+}
+$("longo").addEventListener("change", alternarLongo);
+$("btn-pasta-longos").addEventListener("click", async () => {
+  try { await post("/api/pasta", { pasta: "longos" }); } catch (e) { alert(e.message); }
+});
 document.querySelectorAll('input[name="modo"]').forEach((el) => el.addEventListener("change", alternarOpcoes));
 
 function mostrarErroForm(msg) {
@@ -144,7 +159,9 @@ $("form-gerar").addEventListener("submit", async (ev) => {
                   layout: f.get("layout") || "", fundo: f.get("fundo") || "",
                   repetir: f.get("repetir") === "on", importar_existentes: f.get("importar") === "on" };
   if (modo === "gameplay") {
-    corpo.cortes = Number(f.get("cortes") || 5);
+    const cortes = String(f.get("cortes") ?? "").trim();
+    corpo.cortes = cortes === "" ? 5 : Number(cortes);            // 0 vale (só o vídeo longo)
+    if (f.get("longo") === "on") corpo.video_longo = Number(f.get("longo_min") || 8);
     corpo.streamer = String(f.get("streamer") || "").trim();
   }
   try {
@@ -299,7 +316,7 @@ $("btn-pasta").addEventListener("click", async () => {
   try {
     const estado = await api("/api/estado");
     mostrarPrerequisitos(estado.prerequisitos);
-    $("aviso-versao").hidden = Array.isArray(estado.recursos) && estado.recursos.includes("edicao") && estado.recursos.includes("linha_do_tempo") && estado.recursos.includes("canais") && estado.recursos.includes("monitor_lives") && estado.recursos.includes("titulo_editavel");
+    $("aviso-versao").hidden = Array.isArray(estado.recursos) && estado.recursos.includes("edicao") && estado.recursos.includes("linha_do_tempo") && estado.recursos.includes("canais") && estado.recursos.includes("monitor_lives") && estado.recursos.includes("titulo_editavel") && estado.recursos.includes("video_longo");
     atualizarEstadoJob(estado.job);
     if (estado.job && estado.job.estado === "rodando") iniciarConsulta();
     else if (estado.job) consultarLog();

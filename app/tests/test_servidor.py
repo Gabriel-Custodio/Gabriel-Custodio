@@ -268,6 +268,14 @@ class TestExecucao(Base):
             {"url": URL_OK, "modo": "ia", "layout": "xyz"}, {"url": URL_OK, "modo": "ia", "fundo": "rosa"},
             {"url": "https://x.com/" + "a" * 2100, "modo": "ia"},
             {"url": URL_OK, "modo": "ia", "repetir": "sim"}, {"url": URL_OK, "modo": "ia", "importar_existentes": 1},
+            {"url": URL_OK, "modo": "gameplay", "cortes": 3, "video_longo": 3},
+            {"url": URL_OK, "modo": "gameplay", "cortes": 3, "video_longo": 13},
+            {"url": URL_OK, "modo": "gameplay", "cortes": 3, "video_longo": "abc"},
+            {"url": URL_OK, "modo": "gameplay", "cortes": 3, "video_longo": 8.5},
+            {"url": URL_OK, "modo": "gameplay", "cortes": 3, "video_longo": True},
+            {"url": URL_OK, "modo": "gameplay", "cortes": 3, "video_longo": [8]},
+            {"url": URL_OK, "modo": "gameplay", "cortes": -1, "video_longo": 8},
+            {"url": URL_OK, "modo": "gameplay", "cortes": 11, "video_longo": 8},
         ]
         for corpo in ruins:
             status, dados = self.json("POST", "/api/executar", corpo)
@@ -315,6 +323,36 @@ class TestExecucao(Base):
         self.json("POST", "/api/executar", {"url": URL_OK, "modo": "ia", "repetir": False})
         texto = "\n".join(self.esperar_fim()["linhas"])
         self.assertNotIn("--repetir", texto.split("ARGS:")[-1])       # desmarcado: sem a flag
+
+    def test_video_longo_vira_flag(self):
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 3, "video_longo": 8})
+        texto = "\n".join(self.esperar_fim()["linhas"])
+        self.assertIn("'--cortes', '3', '--video-longo', '8']", texto)
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 3, "video_longo": "12"})   # texto numérico vale
+        self.assertIn("'--video-longo', '12']", "\n".join(self.esperar_fim()["linhas"]).split("ARGS:")[-1])
+        for sem in (None, False, ""):
+            self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 3, "video_longo": sem})
+            self.assertNotIn("--video-longo", "\n".join(self.esperar_fim()["linhas"]).split("ARGS:")[-1])
+
+    def test_zero_cortes_so_com_video_longo(self):
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 0, "video_longo": 5})
+        texto = "\n".join(self.esperar_fim()["linhas"])
+        self.assertIn("'--cortes', '0', '--video-longo', '5']", texto)
+        self.assertEqual(self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 0})[0], 400)
+
+    def test_video_longo_e_ignorado_fora_do_gameplay(self):
+        self.json("POST", "/api/executar", {"url": URL_OK, "modo": "original", "video_longo": 8})
+        self.assertNotIn("--video-longo", "\n".join(self.esperar_fim()["linhas"]).split("ARGS:")[-1])
+
+    def test_o_recurso_video_longo_aparece_no_estado(self):
+        self.assertIn("video_longo", self.json("GET", "/api/estado")[1]["recursos"])
+
+    def test_abrir_pasta_dos_videos_longos(self):
+        self.assertEqual(self.json("POST", "/api/pasta", {"pasta": "longos"})[0], 200)
+        self.assertEqual(self.pastas_abertas, [str(self.srv.estado.raiz / "videos_longos")])
+        self.assertTrue((self.srv.estado.raiz / "videos_longos").is_dir())
+        self.json("POST", "/api/pasta", {"pasta": "qualquer_outra"})                    # só "longos" muda a pasta
+        self.assertEqual(self.pastas_abertas[-1], str(self.srv.estado.saida))
 
     def test_resumo_no_inicio_so_vira_flag_ao_desligar(self):
         self.json("POST", "/api/executar", {"url": URL_OK, "modo": "gameplay", "cortes": 1})

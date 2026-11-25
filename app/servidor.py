@@ -46,7 +46,7 @@ PORTA_PADRAO = 8765
 MODOS = {"ia": "Narração por IA", "gameplay": "Gameplay / Streamer", "original": "Áudio original"}
 LAYOUTS = {"cam", "fit", "clipflow"}
 FUNDOS = {"blur", "black"}
-RECURSOS = ["edicao", "linha_do_tempo", "canais", "monitor_lives", "titulo_editavel"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
+RECURSOS = ["edicao", "linha_do_tempo", "canais", "monitor_lives", "titulo_editavel", "video_longo"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
 RE_SLUG = re.compile(r"^[a-z0-9_-]{1,40}$")
 CAM_ALTURA_MIN, CAM_ALTURA_MAX, CAM_ALTURA_PADRAO = 300, 1100, 600
 ORDENS = ("cam_primeiro", "game_primeiro")
@@ -55,6 +55,7 @@ TRECHO_MIN_S = 0.2
 TITULO_MAX = 60            # caracteres do título/pergunta da tarja (igual ao gerar_cortes.py)
 SUGERIR_TIMEOUT_S = 75     # tempo máximo esperando as sugestões de título
 TRECHOS_TOTAL_MIN_S = 1.0
+LONGO_MIN_MIN, LONGO_MAX_MIN = 4, 12     # duração do vídeo longo, em minutos (igual ao pacote longos/)
 MAX_LINHAS_LOG = 20000
 MAX_CORPO = 64 * 1024
 RE_URL = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
@@ -190,6 +191,7 @@ class Estado:
         self.raiz = Path(raiz).resolve()
         self.saida = self.raiz / "cortes_prontos"
         self.descartados = self.saida / "_descartados"
+        self.saida_longos = self.raiz / "videos_longos"       # vídeos longos (horizontais) gerados com a opção "vídeo longo"
         self.arquivo_status = self.saida / "_status.json"
         self.logs = APP_DIR / "logs"
         self.layouts = self.raiz / "layouts_salvos"
@@ -515,6 +517,18 @@ class Estado:
         comando = [self.python, "-u", str(self.raiz / "gerar_cortes.py"), url, "--audio", modo]
         params = {"url": url, "modo": modo}
         if modo == "gameplay":
+            longo = dados.get("video_longo")                       # minutos do vídeo longo; ausente/None/False = sem vídeo longo
+            if longo in (None, False, ""):
+                longo = None
+            else:
+                try:
+                    if longo is True or isinstance(longo, float) and longo != int(longo):
+                        raise ValueError
+                    longo = int(longo)
+                except (TypeError, ValueError, OverflowError):
+                    raise ValueError("Duração do vídeo longo inválida.")
+                if not LONGO_MIN_MIN <= longo <= LONGO_MAX_MIN:
+                    raise ValueError(f"O vídeo longo deve ter de {LONGO_MIN_MIN} a {LONGO_MAX_MIN} minutos.")
             bruto = dados.get("cortes")
             try:
                 if isinstance(bruto, bool):
@@ -522,10 +536,14 @@ class Estado:
                 cortes = 5 if bruto in (None, "") else int(bruto)
             except (TypeError, ValueError):
                 raise ValueError("Número de cortes inválido.")
-            if not 1 <= cortes <= 10:
-                raise ValueError("O número de cortes deve ser de 1 a 10.")
+            minimo = 0 if longo else 1                             # 0 cortes só vale quando há vídeo longo
+            if not minimo <= cortes <= 10:
+                raise ValueError(f"O número de cortes deve ser de {minimo} a 10.")
             comando += ["--cortes", str(cortes)]
             params["cortes"] = cortes
+            if longo:
+                comando += ["--video-longo", str(longo)]
+                params["video_longo"] = longo
             webcam = str(dados.get("webcam") or "").strip()
             if webcam:
                 if webcam not in {"1", "2", "3", "4", "5", "6", "7"}:
@@ -871,9 +889,10 @@ class Manipulador(BaseHTTPRequestHandler):
             ok, msg = self.estado.acao_corte(dados.get("nome"), dados.get("acao"))
             return self._json({"ok": True}) if ok else self._erro(400, msg)
         if caminho == "/api/pasta":
-            self.estado.saida.mkdir(parents=True, exist_ok=True)
+            pasta = self.estado.saida_longos if dados.get("pasta") == "longos" else self.estado.saida
+            pasta.mkdir(parents=True, exist_ok=True)
             try:
-                abrir_pasta(self.estado.saida)
+                abrir_pasta(pasta)
             except OSError as e:
                 return self._erro(500, f"Não foi possível abrir a pasta: {e}")
             return self._json({"ok": True})

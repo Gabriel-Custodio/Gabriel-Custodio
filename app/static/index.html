@@ -47,10 +47,20 @@
 
         <div id="opcoes-gameplay" class="grade-campos">
           <div class="campo">
-            <label for="cortes">Quantos cortes (1 a 10)</label>
+            <label for="cortes">Quantos cortes (<span id="cortes-faixa">1 a 10</span>)</label>
             <input id="cortes" name="cortes" type="number" min="1" max="10" value="5">
           </div>
+          <div class="campo">
+            <label class="inline caixa" for="longo"><input type="checkbox" id="longo" name="longo">
+              Também criar um <strong>vídeo longo</strong> (horizontal) com os melhores momentos</label>
+          </div>
+          <div class="campo" id="campo-longo-min" hidden>
+            <label for="longo-min">Duração do vídeo longo (4 a 12 min)</label>
+            <input id="longo-min" name="longo_min" type="number" min="4" max="12" value="8">
+          </div>
         </div>
+        <p id="aviso-longo" class="ajuda" hidden>O <strong>vídeo longo</strong> usa a mesma análise dos cortes: a IA junta, em ordem, os momentos com nota <strong>6,5 ou mais</strong> até fechar a duração escolhida (se não houver momentos bons o bastante, ele sai mais curto). Sai <strong>bruto</strong>, horizontal 1920x1080, na pasta <strong>videos_longos</strong>. Com <strong>0 cortes</strong>, gera só o vídeo longo. A edição dele chega na próxima etapa.
+          <button type="button" id="btn-pasta-longos" class="btn">Abrir pasta dos vídeos longos</button></p>
         <p id="aviso-bruto" class="ajuda">No modo Gameplay / Streamer o corte sai <strong>bruto</strong> (tela completa do streamer, sem fundo desfocado, tarja nem legenda). Em <strong>Cortes prontos &gt; Editar</strong> você escolhe as caixas da câmera e do gameplay, a tarja vermelha, a legenda, o resumo e a chamada final, e renderiza de novo.</p>
 
         <div id="campo-streamer" class="campo">
