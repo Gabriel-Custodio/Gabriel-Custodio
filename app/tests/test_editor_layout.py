@@ -177,9 +177,60 @@ class TestLayoutPersonalizadoNoGerarCortes(unittest.TestCase):
 
     def test_grafo_usa_a_caixa_do_gameplay_escolhida(self):
         grafo, geo = self.grafo("cam_primeiro")
-        self.assertIn("[b]crop=1056:1080:384:0,scale=1080:", grafo)
-        self.assertIn(f"[a]crop={geo['crop_w']}:{geo['crop_h']}:{geo['crop_x']}:{geo['crop_y']},scale=1080:640", grafo)
+        self.assertIn("[b]crop=1056:1080:384:0,", grafo)
+        self.assertIn(f"[a]crop={geo['crop_w']}:{geo['crop_h']}:{geo['crop_x']}:{geo['crop_y']},", grafo)
         self.assertIn("[cam][1:v][game]vstack=inputs=3", grafo)
+
+    def test_caixa_de_qualquer_formato_aparece_inteira_sobre_fundo_desfocado(self):
+        grafo, geo = self.grafo("cam_primeiro")                        # as caixas do SALVO não têm a proporção do bloco
+        self.assertTrue(geo["cam_encaixe"] and geo["game_encaixe"])
+        self.assertIn("scale=1080:640:force_original_aspect_ratio=decrease", grafo)           # frente: o recorte inteiro
+        self.assertIn("scale=1080:640:force_original_aspect_ratio=increase,crop=1080:640,gblur=sigma=30[cam_fundo]", grafo)
+        self.assertIn("[cam_fundo][cam_frente]overlay=(W-w)/2:(H-h)/2,setsar=1[cam]", grafo)
+        self.assertIn("[game_fundo][game_frente]overlay=(W-w)/2:(H-h)/2,setsar=1[game]", grafo)
+        self.assertNotIn("hflip", grafo)
+
+    def test_caixa_com_a_proporcao_do_bloco_so_preenche_como_antes(self):
+        # 960x569 na origem de 1920x1080 tem a proporção de 1080x640 (diferença menor que a tolerância)
+        exato = {**SALVO, "cam": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 569 / 1080},
+                 "game": {"x": 0.0, "y": 0.0, "w": 1056 / 1920, "h": 1056 * 1060 / 1080 / 1080}}
+        geo = g.custom_geometry(1920, 1080, g.normalize_saved_layout(exato))
+        self.assertFalse(geo["cam_encaixe"] or geo["game_encaixe"])
+        cmd = g.build_cam_cmd(self.dir / "in.mp4", self.dir / "out.mp4", None, self.dir / "faixa.png", geo, 30.0)
+        grafo = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn(f"[a]crop={geo['crop_w']}:{geo['crop_h']}:{geo['crop_x']}:{geo['crop_y']},scale=1080:640:force_original_aspect_ratio=increase", grafo)
+        self.assertNotIn("gblur", grafo)
+
+    def test_precisa_encaixe(self):
+        self.assertFalse(g.precisa_encaixe(1080, 640, 1080, 640))
+        self.assertFalse(g.precisa_encaixe(1080, 650, 1080, 640))              # 1,5% de diferença: dentro da tolerância
+        self.assertTrue(g.precisa_encaixe(960, 540, 1080, 640))                # 16:9 num bloco mais largo
+        self.assertTrue(g.precisa_encaixe(400, 600, 1080, 640))                # retrato num bloco horizontal
+        self.assertFalse(g.precisa_encaixe(0, 10, 1080, 640))
+
+    def test_espelhar_inverte_so_o_conteudo_dos_blocos(self):
+        antigo = g.ESPELHAR
+        self.addCleanup(setattr, g, "ESPELHAR", antigo)
+        g.ESPELHAR = True
+        grafo, geo = self.grafo("cam_primeiro")
+        self.assertEqual(grafo.count("hflip"), 2)                              # câmera e gameplay, uma vez cada
+        self.assertIn(f"[a]crop={geo['crop_w']}:{geo['crop_h']}:{geo['crop_x']}:{geo['crop_y']},hflip,split=2", grafo)
+        self.assertLess(grafo.index("hflip"), grafo.index("subtitles="))       # a legenda é desenhada depois: não fica ao contrário
+        self.assertLess(grafo.index("hflip"), grafo.index("vstack"))
+
+    def test_espelhar_na_tela_inteira(self):
+        antigo = g.ESPELHAR
+        self.addCleanup(setattr, g, "ESPELHAR", antigo)
+        saidas = []
+        for valor in (False, True):
+            g.ESPELHAR = valor
+            with mock.patch.object(g, "get_video_dimensions", return_value=(1920, 1080)), \
+                 mock.patch.object(g, "run_cmd", side_effect=lambda cmd, **kw: saidas.append(cmd) or (True, "", "")):
+                g.export_fit_layout(self.dir / "in.mp4", self.dir / "out.mp4", None, None, 10.0)
+        graficos = [c[c.index("-filter_complex") + 1] for c in saidas if "-filter_complex" in c]
+        self.assertEqual(len(graficos), 2)
+        self.assertNotIn("hflip", graficos[0])
+        self.assertIn("setpts=PTS-STARTPTS,hflip", graficos[1])
 
     def test_grafo_ordem_invertida_e_legenda_na_faixa(self):
         grafo, geo = self.grafo("game_primeiro")
@@ -289,7 +340,8 @@ class TestEdicaoNoServidor(BaseEditor):
         self.assertEqual(self.editar(OPCOES_INTEIRO)[0], 201)
         self.esperar_fim()
         salvo = json.loads((self.saida / "_edicoes" / "corte_gameplay_1_TESTE.json").read_text(encoding="utf-8"))
-        self.assertEqual(salvo, {"layout": "inteiro", "tarja": False, "legenda": True, "resumo": True, "cta": False})
+        self.assertEqual(salvo, {"layout": "inteiro", "tarja": False, "legenda": True, "resumo": True, "cta": False,
+                                 "espelhar": False})
         self.assertTrue(g.normalize_edit_options(salvo))
 
     def test_editar_pedidos_invalidos(self):
@@ -507,8 +559,11 @@ class TestOpcoesDeEdicao(unittest.TestCase):
         o = g.normalize_edit_options(OPCOES_EMPILHADO)
         self.assertEqual((o["layout"], o["cam_altura"], o["tarja"], o["resumo"]), ("empilhado", 640, True, False))
         self.assertEqual(g.normalize_edit_options(OPCOES_INTEIRO),
-                         {"layout": "inteiro", "tarja": False, "legenda": True, "resumo": True, "cta": False})
+                         {"layout": "inteiro", "tarja": False, "legenda": True, "resumo": True, "cta": False, "espelhar": False})
         self.assertEqual(g.normalize_edit_options({"layout": "inteiro"})["tarja"], True)       # padrão: tudo ligado
+        self.assertIs(g.normalize_edit_options({"layout": "inteiro"})["espelhar"], False)      # espelhar: desligado por padrão
+        self.assertIs(g.normalize_edit_options({"layout": "inteiro", "espelhar": True})["espelhar"], True)
+        self.assertIsNone(g.normalize_edit_options({"layout": "inteiro", "espelhar": "sim"}))
 
     def test_invalidas(self):
         for ruim in (None, [], {}, {"layout": "x"}, {**OPCOES_INTEIRO, "tarja": "sim"}, {**OPCOES_INTEIRO, "cta": None},

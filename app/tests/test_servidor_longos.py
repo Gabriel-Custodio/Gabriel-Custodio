@@ -202,8 +202,12 @@ class TestEdicao(BaseLongos):
     def test_validar_opcoes(self):
         ok = servidor.Estado.validar_opcoes_longo(self.OPCOES)
         self.assertEqual(ok, {"legenda": True, "capitulos": False, "resumo": True, "cta": False, "titulo": "Meu vídeo",
-                              "trechos": [[0.0, 30.0], [40.0, 80.0]]})
-        self.assertEqual(servidor.Estado.validar_opcoes_longo({}), {"legenda": True, "capitulos": True, "resumo": True, "cta": True})
+                              "espelhar": False, "trechos": [[0.0, 30.0], [40.0, 80.0]]})
+        self.assertEqual(servidor.Estado.validar_opcoes_longo({}),
+                         {"legenda": True, "capitulos": True, "resumo": True, "cta": True, "espelhar": False})
+        self.assertIs(servidor.Estado.validar_opcoes_longo({"espelhar": True})["espelhar"], True)
+        with self.assertRaises(ValueError):
+            servidor.Estado.validar_opcoes_longo({"espelhar": "sim"})
         for ruim in (None, "x", {"legenda": "sim"}, {"cta": 1}, {"titulo": 5}, {"trechos": [[5, 1]]}, {"trechos": "x"},
                      {"trechos": [[0, 0.5]]}, {"trechos": [[0, 1], [0.5, 3]]}):
             with self.assertRaises(ValueError, msg=str(ruim)):

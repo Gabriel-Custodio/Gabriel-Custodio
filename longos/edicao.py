@@ -35,6 +35,10 @@ def normalizar_opcoes(dados, normalizar_trechos):
         if not isinstance(valor, bool):
             return None
         opcoes[chave] = valor
+    espelhar = dados.get("espelhar", False)                  # inverte direita e esquerda do vídeo (desligado por padrão)
+    if not isinstance(espelhar, bool):
+        return None
+    opcoes["espelhar"] = espelhar
     trechos, ok = normalizar_trechos(dados.get("trechos"))
     if not ok:
         return None
@@ -121,9 +125,11 @@ def _caminho_filtro(caminho):
     return Path(caminho).as_posix().replace(":", "\\:").replace("'", "\\'")
 
 
-def comando_final(ffmpeg, fonte, ass, duracao, saida, preset=PRESET_FINAL, crf=CRF_FINAL):
-    """Renderização final: legenda/títulos queimados (se houver ASS), volume uniforme e fade no fim. Sempre 1920x1080."""
-    video = []
+def comando_final(ffmpeg, fonte, ass, duracao, saida, preset=PRESET_FINAL, crf=CRF_FINAL, espelhar=False):
+    """Renderização final: legenda/títulos queimados (se houver ASS), volume uniforme e fade no fim. Sempre 1920x1080.
+
+    espelhar: inverte direita e esquerda ANTES da legenda, então o texto continua legível."""
+    video = ["hflip"] if espelhar else []
     if ass:
         video.append(f"subtitles='{_caminho_filtro(ass)}'")
     audio = [LOUDNORM]

@@ -341,15 +341,15 @@
     </div>
 
     <div id="ed-caixas" class="dlg-bloco" data-so="curto">
-      <p class="ajuda">Pause o vídeo lá em cima num momento em que a câmera e o gameplay aparecem e clique em <strong>Usar este quadro</strong>. Depois <strong>arraste uma caixa para movê-la</strong> e puxe um canto para mudar o tamanho (a proporção fica travada, então nada é esticado).</p>
+      <p class="ajuda">Pause o vídeo lá em cima num momento em que a câmera e o gameplay aparecem e clique em <strong>Usar este quadro</strong>. Depois <strong>arraste uma caixa para movê-la</strong> e puxe um canto para mudar o tamanho (a caixa pode ter <strong>qualquer formato</strong>, por exemplo uma câmera retangular: o recorte aparece inteiro, sem esticar nem cortar; segure <strong>Shift</strong> ao puxar um canto para manter a proporção).</p>
       <div id="ed-area-caixas" hidden>
         <div class="ed-grade">
           <div class="ed-col">
             <h3>Versão em paisagem (vídeo original)</h3>
             <div id="ed-paisagem" class="ed-paisagem">
               <img id="ed-img" alt="Quadro do corte" draggable="false">
-              <div id="ed-cam" class="ed-caixa cam" title="Câmera: arraste para mover, use os cantos para redimensionar"><span class="ed-rotulo">Câmera</span></div>
-              <div id="ed-game" class="ed-caixa game" title="Gameplay: arraste para mover, use os cantos para redimensionar"><span class="ed-rotulo">Gameplay</span></div>
+              <div id="ed-cam" class="ed-caixa cam" title="Câmera: arraste para mover; cantos e lados mudam o tamanho (Shift mantém a proporção)"><span class="ed-rotulo">Câmera</span></div>
+              <div id="ed-game" class="ed-caixa game" title="Gameplay: arraste para mover; cantos e lados mudam o tamanho (Shift mantém a proporção)"><span class="ed-rotulo">Gameplay</span></div>
             </div>
           </div>
           <div class="ed-col ed-retrato-col">
@@ -357,6 +357,7 @@
             <canvas id="ed-retrato" width="270" height="480" aria-label="Prévia do vídeo vertical"></canvas>
             <p id="ed-nitidez" class="ed-nitidez" role="status"></p>
             <p class="ajuda">Arraste a linha branca para mudar a altura dos blocos.</p>
+            <button type="button" id="ed-ajustar-bloco" class="btn" title="Muda a altura do bloco da câmera para a proporção da caixa: o recorte preenche o bloco, sem fundo desfocado nas laterais">Ajustar o bloco da câmera ao formato da caixa</button>
             <fieldset class="campo">
               <legend>Ordem</legend>
               <label class="inline"><input type="radio" name="ed-ordem" value="cam_primeiro" checked> Câmera em cima</label>
@@ -384,6 +385,7 @@
       <label class="inline caixa" data-so="longo" hidden><input type="checkbox" id="ed-capitulos" checked> Título de cada momento no começo dele (ex.: “3 · SUSTO NO BAÚ”, canto de cima)</label>
       <label class="inline caixa"><input type="checkbox" id="ed-resumo" checked> Resumo narrado no início (usa IA; o vídeo para no primeiro quadro enquanto a voz resume)</label>
       <label class="inline caixa"><input type="checkbox" id="ed-cta" checked> Chamada final (a voz pede like, compartilhamento e inscrição)</label>
+      <label class="inline caixa"><input type="checkbox" id="ed-espelhar"> Espelhar o vídeo (inverte direita e esquerda; a legenda, a tarja e os textos que a gente coloca continuam normais, mas qualquer texto que apareça no jogo fica ao contrário)</label>
     </div>
 
     <div class="dlg-bloco">

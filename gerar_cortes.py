@@ -173,6 +173,8 @@ CAM_SHARPEN = "unsharp=5:5:0.8:5:5:0.0"
 # Layout PERSONALIZADO ("custom"): o usuário escolhe, no editor da interface, a caixa da câmera, a caixa do
 # gameplay e a altura do bloco da câmera; vira um arquivo em layouts_salvos/ e é usado com --layout-salvo NOME.
 LAYOUTS_DIR = Path("layouts_salvos")
+ENCAIXE_TOLERANCIA = 0.03       # caixa com proporção até 3% diferente do espaço: preenche o bloco (sem sobras visíveis)
+ESPELHAR = False                # espelha o vídeo na horizontal (edição); vem da opção "espelhar" do corte
 CUSTOM_CAM_MIN_HEIGHT = 300
 CUSTOM_CAM_MAX_HEIGHT = 1100
 CUSTOM_ORDERS = ("cam_primeiro", "game_primeiro")
@@ -3905,6 +3907,8 @@ def export_fit_layout(input_path, output_path, ass_path, hook_data, effective_du
     video = "[0:v]setpts=PTS-STARTPTS"
     if is_ia and speed_ratio and speed_ratio > 0:
         video += f",setpts={1 / speed_ratio:.6f}*PTS"
+    if ESPELHAR:
+        video += ",hflip"
     fit_scale = f"scale={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos"
 
     if not simple and fit_background_mode() == "blur":
@@ -4166,6 +4170,32 @@ def activate_saved_layout(name):
     return True
 
 
+def precisa_encaixe(cw, ch, w, h, tolerancia=None):
+    """True quando a proporção do recorte (cw x ch) difere do espaço (w x h) além da tolerância.
+
+    Nesse caso o recorte inteiro é encaixado no espaço (sem cortar nada), com o resto preenchido por um fundo desfocado;
+    dentro da tolerância ele só preenche o espaço, como sempre foi."""
+    if min(cw, ch, w, h) <= 0:
+        return False
+    tolerancia = ENCAIXE_TOLERANCIA if tolerancia is None else tolerancia
+    return abs((cw / ch) / (w / h) - 1) > tolerancia
+
+
+def graph_bloco(entrada, rotulo, w, h, recorte="", encaixe=False, espelhar=False, extra=""):
+    """Trecho do filtro que leva `[entrada]` (já com `recorte`, ex.: "crop=1:2:3:4,") a um bloco w x h chamado `[rotulo]`.
+
+    encaixe=False: preenche o bloco (corta o que sobrar). encaixe=True: mostra o recorte INTEIRO, centralizado, sobre uma
+    cópia desfocada dele mesmo. espelhar: inverte direita e esquerda do conteúdo (a legenda e a tarja não são afetadas)."""
+    pre = recorte + ("hflip," if espelhar else "")
+    if not encaixe:
+        return (f"{entrada}{pre}scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"crop={w}:{h}{extra},setsar=1[{rotulo}]")
+    return (f"{entrada}{pre}split=2[{rotulo}_a][{rotulo}_b];"
+            f"[{rotulo}_a]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},gblur=sigma=30[{rotulo}_fundo];"
+            f"[{rotulo}_b]scale={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos{extra}[{rotulo}_frente];"
+            f"[{rotulo}_fundo][{rotulo}_frente]overlay=(W-w)/2:(H-h)/2,setsar=1[{rotulo}]")
+
+
 def custom_geometry(src_w, src_h, layout):
     """Medidas do layout personalizado (mesmo formato do cam_geometry), ou None se não der."""
     if src_w <= 0 or src_h <= 0 or not layout:
@@ -4184,13 +4214,16 @@ def custom_geometry(src_w, src_h, layout):
     cam_h = int(layout["cam_altura"])
     band_h = CAM_BAND_HEIGHT if layout.get("tarja", True) else 0
     game_h = VERTICAL_HEIGHT - cam_h - band_h
+    cam_encaixe = precisa_encaixe(cw, ch, VERTICAL_WIDTH, cam_h)          # caixa de qualquer formato: aparece INTEIRA no bloco
+    game_encaixe = precisa_encaixe(gw, gh, VERTICAL_WIDTH, game_h)
     if layout.get("ordem") == "game_primeiro":
         y_game, y_band, y_cam = 0, game_h, game_h + band_h
     else:
         y_cam, y_band, y_game = 0, cam_h, cam_h + band_h
     return {
         "crop_x": cx, "crop_y": cy, "crop_w": cw, "crop_h": ch,
-        "ampliacao": round(VERTICAL_WIDTH / cw, 2),
+        "ampliacao": round(min(VERTICAL_WIDTH / cw, cam_h / ch) if cam_encaixe else VERTICAL_WIDTH / cw, 2),
+        "cam_encaixe": cam_encaixe, "game_encaixe": game_encaixe,
         "band_h": band_h, "cam_h": cam_h, "game_h": game_h, "game_crop": (gx, gy, gw, gh),
         "y_cam": y_cam, "y_band": y_band, "y_game": y_game,
     }
@@ -4255,13 +4288,13 @@ def build_cam_cmd(input_path, output_path, ass_path, band_path, geo, effective_d
     band_h = geo.get("band_h", CAM_BAND_HEIGHT)
     primeiro, segundo = ("[cam]", "[game]") if geo["y_cam"] < geo["y_game"] else ("[game]", "[cam]")
     ordem = f"{primeiro}[1:v]{segundo}" if band_h > 0 else f"{primeiro}{segundo}"
+    cam_extra = f",{CAM_SHARPEN}" if geo.get("ampliacao", 1) > CAM_SHARPEN_ABOVE else ""
     graph = (
-        f"[0:v]setpts=PTS-STARTPTS,split=2[a][b];"
-        f"[a]crop={geo['crop_w']}:{geo['crop_h']}:{geo['crop_x']}:{geo['crop_y']},"
-        f"scale={w}:{geo['cam_h']}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={w}:{geo['cam_h']}{',' + CAM_SHARPEN if geo.get('ampliacao', 1) > CAM_SHARPEN_ABOVE else ''},setsar=1[cam];"
-        f"[b]{game_src}scale={w}:{geo['game_h']}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={w}:{geo['game_h']},setsar=1[game];"
+        "[0:v]setpts=PTS-STARTPTS,split=2[a][b];"
+        + graph_bloco("[a]", "cam", w, geo["cam_h"],
+                      f"crop={geo['crop_w']}:{geo['crop_h']}:{geo['crop_x']}:{geo['crop_y']},",
+                      geo.get("cam_encaixe", False), ESPELHAR, cam_extra) + ";"
+        + graph_bloco("[b]", "game", w, geo["game_h"], game_src, geo.get("game_encaixe", False), ESPELHAR) + ";"
         f"{ordem}vstack=inputs={3 if band_h > 0 else 2}[canvas]"
     )
     label = "[canvas]"
@@ -5253,6 +5286,10 @@ def normalize_edit_options(data):
         if not isinstance(value, bool):
             return None
         opts[key] = value
+    espelhar = data.get("espelhar", False)                  # espelha o vídeo na horizontal (desligado por padrão)
+    if not isinstance(espelhar, bool):
+        return None
+    opts["espelhar"] = espelhar
     for key in ("titulo", "pergunta"):                      # texto da tarja escrito pelo usuário (vazio/ausente = mantém o do corte)
         value = data.get(key)
         if value is None:
@@ -5365,7 +5402,7 @@ def render_edit(name):
     Só troca o arquivo visível (cortes_prontos/NOME.mp4) quando o resultado completo está pronto: se algo falhar,
     o corte continua como estava.
     """
-    global CUSTOM_LAYOUT, STREAMER_NOME, FIT_SUBTITLE_BELOW_VIDEO
+    global CUSTOM_LAYOUT, STREAMER_NOME, FIT_SUBTITLE_BELOW_VIDEO, ESPELHAR
     name = Path(str(name)).name
     if not name.lower().endswith(".mp4") or name.startswith((".", "_")):
         print(f"❌ Nome de corte inválido: {name!r}")
@@ -5389,7 +5426,9 @@ def render_edit(name):
     print(f"🎬 Renderizando de novo: {name}")
     print(f"   Layout: {'câmera + gameplay (caixas)' if opts['layout'] == 'empilhado' else 'tela inteira'} | "
           f"tarja: {'sim' if opts['tarja'] else 'não'} | legenda: {'sim' if opts['legenda'] else 'não'} | "
-          f"resumo: {'sim' if opts['resumo'] else 'não'} | chamada final: {'sim' if opts['cta'] else 'não'}")
+          f"resumo: {'sim' if opts['resumo'] else 'não'} | chamada final: {'sim' if opts['cta'] else 'não'} | "
+          f"espelhado: {'sim' if opts['espelhar'] else 'não'}")
+    ESPELHAR = opts["espelhar"]
     load_env_file()
     groq_api_key = get_groq_key()
     ensure_dirs()
@@ -5618,7 +5657,7 @@ def render_edit_longo(name):
     sim = lambda v: "sim" if v else "não"
     print(f"🎞️  Renderizando o vídeo longo de novo: {name}")
     print(f"   Formato: horizontal 1920x1080 | legenda: {sim(opts['legenda'])} | títulos dos momentos: {sim(opts['capitulos'])} | "
-          f"resumo: {sim(opts['resumo'])} | chamada final: {sim(opts['cta'])}")
+          f"resumo: {sim(opts['resumo'])} | chamada final: {sim(opts['cta'])} | espelhado: {sim(opts['espelhar'])}")
     load_env_file()
     groq_api_key = get_groq_key()
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -5660,7 +5699,7 @@ def render_edit_longo(name):
 
         tmp_out = TEMP_DIR / f"longo_{stem}.mp4"
         temporarios.append(tmp_out)
-        ok, erro = run_ffmpeg_progress(longos.comando_final(FFMPEG.as_posix(), source, ass_path, duration, tmp_out),
+        ok, erro = run_ffmpeg_progress(longos.comando_final(FFMPEG.as_posix(), source, ass_path, duration, tmp_out, espelhar=opts["espelhar"]),
                                        duration, "Renderizando")
         if not ok or not tmp_out.is_file() or tmp_out.stat().st_size < 1024:
             print(f"❌ Falha ao renderizar: o vídeo longo continua como estava. {erro[-400:]}")

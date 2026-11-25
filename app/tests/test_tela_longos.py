@@ -47,6 +47,17 @@ class TestTela(unittest.TestCase):
         for nome in ("aba-longos", "painel-longos"):
             self.assertIn(f'id="{nome}"', HTML)
 
+    def test_editor_tem_caixa_livre_e_espelhar(self):
+        for nome in ("ed-espelhar", "ed-ajustar-bloco"):
+            self.assertIn(f'id="{nome}"', HTML)
+        js = (ESTATICO / "editor.js").read_text(encoding="utf-8")
+        for lado in ("nw", "ne", "sw", "se", "n", "s", "e", "w"):
+            self.assertIn(f'"{lado}"', js)
+        css = (ESTATICO / "estilo.css").read_text(encoding="utf-8")
+        for lado in ("n", "s", "e", "w"):
+            self.assertIn(f".ed-alca.{lado} ", css)
+        self.assertIn("espelhar", js)
+
     def test_o_template_do_longo_tem_o_que_o_script_procura(self):
         molde = HTML[HTML.index('<template id="tpl-longo">'):HTML.index("</template>", HTML.index('<template id="tpl-longo">'))]
         codigo = (ESTATICO / "longos.js").read_text(encoding="utf-8")

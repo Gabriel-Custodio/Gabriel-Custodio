@@ -38,7 +38,18 @@ def trechos_ok(valor):
 class TestOpcoes(unittest.TestCase):
     def test_padrao_tudo_ligado_e_sem_trechos(self):
         self.assertEqual(longos.normalizar_opcoes({}, trechos_ok),
-                         {"legenda": True, "resumo": True, "cta": True, "capitulos": True})
+                         {"legenda": True, "resumo": True, "cta": True, "capitulos": True, "espelhar": False})
+        self.assertIs(longos.normalizar_opcoes({"espelhar": True}, trechos_ok)["espelhar"], True)
+        self.assertIsNone(longos.normalizar_opcoes({"espelhar": 1}, trechos_ok))
+
+    def test_comando_final_espelha_antes_da_legenda(self):
+        normal = longos.comando_final("ffmpeg", "in.mp4", "t.ass", 60.0, "out.mp4")
+        espelhado = longos.comando_final("ffmpeg", "in.mp4", "t.ass", 60.0, "out.mp4", espelhar=True)
+        self.assertNotIn("hflip", normal[normal.index("-vf") + 1])
+        filtro = espelhado[espelhado.index("-vf") + 1]
+        self.assertTrue(filtro.startswith("hflip,subtitles="))
+        sem_legenda = longos.comando_final("ffmpeg", "in.mp4", None, 1.0, "out.mp4", espelhar=True)
+        self.assertEqual(sem_legenda[sem_legenda.index("-vf") + 1], "hflip")
 
     def test_valores_validos(self):
         o = longos.normalizar_opcoes({"legenda": False, "resumo": False, "cta": True, "capitulos": False,

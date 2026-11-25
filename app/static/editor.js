@@ -6,6 +6,7 @@
 const ED_LARGURA = 1080, ED_ALTURA = 1920, ED_FAIXA_ALTURA = 220;
 const ED_CAM_MIN = 300, ED_CAM_MAX = 1100;
 const ED_MIN_LARGURA = 0.05;                       // caixa nunca menor que 5% da largura do quadro
+const ED_MIN_ALTURA = 0.05;                        // nem que 5% da altura
 let ED_Z = 10;
 
 const ED = {
@@ -45,18 +46,28 @@ const edGameAltura = () => ED_ALTURA - ED.camAltura - edFaixa();
 const edAlturaDoBloco = (tipo) => (tipo === "cam" ? ED.camAltura : edGameAltura());
 const edImgOk = () => edImg.naturalWidth > 0 && edImg.naturalHeight > 0;
 
-/* h/w (em frações do quadro) que mantém a proporção do espaço da caixa no vídeo vertical */
+/* h/w (em frações do quadro) que mantém a proporção do espaço da caixa no vídeo vertical (caixa inicial e "ajustar") */
 function edRazao(tipo) {
   const A = ED_LARGURA / edAlturaDoBloco(tipo);
   return edImg.naturalWidth / (A * edImg.naturalHeight);
 }
 
-/* Recalcula a altura a partir da largura e mantém tudo dentro do quadro */
+/* A caixa pode ter QUALQUER formato (uma webcam retangular, por exemplo). Se o formato for diferente do espaço dela no
+   vídeo, o recorte inteiro é encaixado no espaço, com o resto preenchido por um fundo desfocado (nada é cortado nem esticado).
+   Dentro de 3% de diferença ele só preenche o espaço, igual ao servidor (ENCAIXE_TOLERANCIA). */
+const ED_ENCAIXE_TOLERANCIA = 0.03;
+function edProporcaoDiferente(tipo) {
+  const c = ED[tipo];
+  if (!edImgOk() || c.w <= 0 || c.h <= 0) return false;
+  const caixa = (c.w * edImg.naturalWidth) / (c.h * edImg.naturalHeight);
+  return Math.abs(caixa / (ED_LARGURA / edAlturaDoBloco(tipo)) - 1) > ED_ENCAIXE_TOLERANCIA;
+}
+
+/* Mantém a caixa dentro do quadro (largura e altura livres, com um mínimo) */
 function edAjustar(tipo) {
-  const c = ED[tipo], R = edRazao(tipo);
+  const c = ED[tipo];
   c.w = Math.min(Math.max(c.w, ED_MIN_LARGURA), 1);
-  c.h = c.w * R;
-  if (c.h > 1) { c.h = 1; c.w = 1 / R; }
+  c.h = Math.min(Math.max(c.h, ED_MIN_ALTURA), 1);
   c.x = Math.min(Math.max(c.x, 0), 1 - c.w);
   c.y = Math.min(Math.max(c.y, 0), 1 - c.h);
 }
@@ -79,6 +90,28 @@ function edBlocos() {
     : { game: 0, faixa: gameH, cam: gameH + f, camH, gameH, topo: gameH };
 }
 
+/* Desenha o recorte `c` no bloco (dx, dy, dw, dh) da prévia: preenchendo o bloco, ou (encaixe) inteiro sobre um fundo desfocado.
+   Com "Espelhar" ligado o conteúdo sai invertido, como no vídeo final (tarja e legenda não). */
+function edDesenharBloco(c, W, H, dx, dy, dw, dh, encaixe) {
+  const sx = c.x * W, sy = c.y * H, sw = c.w * W, sh = c.h * H;
+  edCtx.save();
+  edCtx.beginPath(); edCtx.rect(dx, dy, dw, dh); edCtx.clip();
+  if ($("ed-espelhar").checked) { edCtx.translate(dx + dw, 0); edCtx.scale(-1, 1); edCtx.translate(-dx, 0); }
+  if (!encaixe) {
+    edCtx.drawImage(edImg, sx, sy, sw, sh, dx, dy, dw, dh);
+  } else {
+    const cobre = Math.max(dw / sw, dh / sh);                // fundo: o mesmo recorte esticado até cobrir o bloco, desfocado
+    try { edCtx.filter = "blur(6px)"; } catch (_) { /* sem filtro: fica só mais escuro */ }
+    edCtx.drawImage(edImg, sx, sy, sw, sh, dx + (dw - sw * cobre) / 2, dy + (dh - sh * cobre) / 2, sw * cobre, sh * cobre);
+    edCtx.filter = "none";
+    edCtx.fillStyle = "rgba(0,0,0,.25)";
+    edCtx.fillRect(dx, dy, dw, dh);
+    const cabe = Math.min(dw / sw, dh / sh);                 // frente: o recorte inteiro, centralizado
+    edCtx.drawImage(edImg, sx, sy, sw, sh, dx + (dw - sw * cabe) / 2, dy + (dh - sh * cabe) / 2, sw * cabe, sh * cabe);
+  }
+  edCtx.restore();
+}
+
 function edDesenharRetrato() {
   const k = edCanvas.width / ED_LARGURA, b = edBlocos();
   edCtx.fillStyle = "#000";
@@ -86,8 +119,7 @@ function edDesenharRetrato() {
   if (edImgOk()) {
     const W = edImg.naturalWidth, H = edImg.naturalHeight;
     for (const tipo of ["cam", "game"]) {
-      const c = ED[tipo], altura = tipo === "cam" ? b.camH : b.gameH;
-      edCtx.drawImage(edImg, c.x * W, c.y * H, c.w * W, c.h * H, 0, b[tipo] * k, edCanvas.width, altura * k);
+      edDesenharBloco(ED[tipo], W, H, 0, b[tipo] * k, edCanvas.width, (tipo === "cam" ? b.camH : b.gameH) * k, edProporcaoDiferente(tipo));
     }
   }
   if (ED.tarja) {
@@ -122,8 +154,9 @@ function edDesenharRetrato() {
 
 /* Quantas vezes a câmera é esticada até a largura da tela (1080 px). Acima de ~2,2x ela perde definição. */
 function edAmpliacao() {
-  if (!edImgOk() || ED.cam.w <= 0) return 0;
-  return ED_LARGURA / (ED.cam.w * edImg.naturalWidth);
+  if (!edImgOk() || ED.cam.w <= 0 || ED.cam.h <= 0) return 0;
+  const largura = ED.cam.w * edImg.naturalWidth, altura = ED.cam.h * edImg.naturalHeight;
+  return edProporcaoDiferente("cam") ? Math.min(ED_LARGURA / largura, ED.camAltura / altura) : ED_LARGURA / largura;
 }
 
 function edNitidez() {
@@ -162,7 +195,7 @@ function edAtualizar() {
 // ---------------------------------------------------------------- mover e redimensionar caixas
 for (const tipo of ["cam", "game"]) {
   const el = $(`ed-${tipo}`);
-  for (const canto of ["nw", "ne", "sw", "se"]) {
+  for (const canto of ["nw", "ne", "sw", "se", "n", "s", "e", "w"]) {
     const h = document.createElement("span");
     h.className = `ed-alca ${canto}`;
     h.dataset.canto = canto;
@@ -190,15 +223,20 @@ function edIniciarArraste(ev, tipo, el) {
       c.x = c0.x + (p.x - p0.x);
       c.y = c0.y + (p.y - p0.y);
     } else {
-      // o canto oposto fica fixo; a largura vem da posição horizontal do ponteiro, a altura segue a proporção
-      const sx = canto.includes("e") ? 1 : -1, sy = canto.includes("s") ? 1 : -1;
-      const ax = sx > 0 ? c0.x : c0.x + c0.w, ay = sy > 0 ? c0.y : c0.y + c0.h;
-      const R = edRazao(tipo);
-      let w = Math.max(ED_MIN_LARGURA, sx * (p.x - ax));
-      w = Math.min(w, sx > 0 ? 1 - ax : ax, (sy > 0 ? 1 - ay : ay) / R);
-      c.w = w; c.h = w * R;
-      c.x = sx > 0 ? ax : ax - w;
-      c.y = sy > 0 ? ay : ay - c.h;
+      // o lado (ou canto) oposto fica fixo; cada lado puxado mexe só no seu eixo. Com Shift, a proporção da caixa é mantida.
+      const dx = canto.includes("e") ? 1 : canto.includes("w") ? -1 : 0, dy = canto.includes("s") ? 1 : canto.includes("n") ? -1 : 0;
+      const ax = dx > 0 ? c0.x : c0.x + c0.w, ay = dy > 0 ? c0.y : c0.y + c0.h;
+      const folgaX = dx > 0 ? 1 - ax : ax, folgaY = dy > 0 ? 1 - ay : ay;
+      let w = dx ? Math.min(Math.max(ED_MIN_LARGURA, dx * (p.x - ax)), folgaX) : c0.w;
+      let h = dy ? Math.min(Math.max(ED_MIN_ALTURA, dy * (p.y - ay)), folgaY) : c0.h;
+      if (e.shiftKey && dx && dy) {
+        const R = c0.h / c0.w;
+        w = Math.min(w, folgaY / R); h = w * R;
+        if (h > folgaY) { h = folgaY; w = h / R; }
+      }
+      c.w = w; c.h = h;
+      c.x = dx > 0 ? ax : dx < 0 ? ax - w : c0.x;
+      c.y = dy > 0 ? ay : dy < 0 ? ay - h : c0.y;
     }
     edAtualizar();
   };
@@ -247,6 +285,15 @@ document.querySelectorAll('input[name="ed-ordem"]').forEach((el) => el.addEventL
 }));
 $("ed-tarja").addEventListener("change", () => { ED.tarja = $("ed-tarja").checked; edAtualizar(); });
 $("ed-legenda").addEventListener("change", edAtualizar);
+$("ed-espelhar").addEventListener("change", edAtualizar);
+
+/* Deixa o bloco da câmera com a MESMA proporção da caixa: o recorte preenche o bloco inteiro, sem fundo desfocado nas laterais */
+$("ed-ajustar-bloco").addEventListener("click", () => {
+  if (!edImgOk()) return;
+  const c = ED.cam, alvo = ED_LARGURA * (c.h * edImg.naturalHeight) / (c.w * edImg.naturalWidth);
+  ED.camAltura = Math.min(Math.max(Math.round(alvo / 2) * 2, ED_CAM_MIN), ED_CAM_MAX);
+  edAtualizar();
+});
 
 // ---------------------------------------------------------------- layout: tela inteira ou câmera + gameplay
 const edLayout = () => document.querySelector('input[name="ed-layout"]:checked').value;
@@ -266,8 +313,10 @@ document.querySelectorAll('input[name="ed-layout"]').forEach((el) => el.addEvent
 
 // ---------------------------------------------------------------- quadro do próprio corte bruto
 function edCaixasPadrao() {
-  ED.cam = { x: 0.74, y: 0.35, w: 0.24, h: 0 };
-  ED.game = { x: 0, y: 0, w: 0.8 / edRazao("game"), h: 0 };   // 80% da altura: sobra espaço para mover nos dois sentidos
+  // caixas iniciais com a proporção do espaço delas no vídeo (a pessoa muda o formato depois, se quiser)
+  ED.cam = { x: 0.74, y: 0.35, w: 0.24, h: 0.24 * edRazao("cam") };
+  const larguraGame = 0.8 / edRazao("game");                       // 80% da altura: sobra espaço para mover nos dois sentidos
+  ED.game = { x: 0, y: 0, w: larguraGame, h: larguraGame * edRazao("game") };
   edAjustar("cam");
   edAjustar("game");
   ED.game.x = (1 - ED.game.w) / 2;
@@ -318,6 +367,7 @@ function edAbrir(corte, lib = "cortes") {
   $("ed-legenda").checked = op ? op.legenda : true;
   $("ed-resumo").checked = op ? op.resumo : true;
   $("ed-cta").checked = op ? op.cta : true;
+  $("ed-espelhar").checked = !!(op && op.espelhar);
   ED.tarja = $("ed-tarja").checked;
   ED.manter = false;
   if (op && op.layout === "empilhado") {
@@ -350,6 +400,7 @@ function edAbrirLongo(v) {
   $("ed-capitulos").checked = op ? op.capitulos : true;
   $("ed-resumo").checked = op ? op.resumo : true;
   $("ed-cta").checked = op ? op.cta : true;
+  $("ed-espelhar").checked = !!(op && op.espelhar);
   $("ed-renderizar").disabled = false;
   ED.momentos = (v.momentos || []).filter((m) => typeof m.inicio === "number" && typeof m.fim === "number");
   const nome = encodeURIComponent(v.nome);
@@ -475,7 +526,7 @@ $("ed-sugerir").addEventListener("click", async () => {
 function edOpcoes() {
   if (edLongo()) {
     const lo = { legenda: $("ed-legenda").checked, capitulos: $("ed-capitulos").checked,
-                 resumo: $("ed-resumo").checked, cta: $("ed-cta").checked };
+                 resumo: $("ed-resumo").checked, cta: $("ed-cta").checked, espelhar: $("ed-espelhar").checked };
     const aparado = TLUI.trechos();                           // null = vídeo inteiro
     if (aparado) lo.trechos = aparado;
     const t = $("ed-titulo").value.trim();
@@ -483,7 +534,7 @@ function edOpcoes() {
     return lo;
   }
   const o = { layout: edLayout(), tarja: $("ed-tarja").checked, legenda: $("ed-legenda").checked,
-              resumo: $("ed-resumo").checked, cta: $("ed-cta").checked };
+              resumo: $("ed-resumo").checked, cta: $("ed-cta").checked, espelhar: $("ed-espelhar").checked };
   if (o.layout === "empilhado") {
     Object.assign(o, { cam: ED.cam, game: ED.game, cam_altura: ED.camAltura, ordem: ED.ordem });
   }

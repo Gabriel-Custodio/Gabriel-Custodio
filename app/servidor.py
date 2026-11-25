@@ -352,6 +352,10 @@ class Estado:
             if not isinstance(valor, bool):
                 raise ValueError("Opção inválida.")
             opcoes[chave] = valor
+        espelhar = dados.get("espelhar", False)
+        if not isinstance(espelhar, bool):
+            raise ValueError("Opção inválida.")
+        opcoes["espelhar"] = espelhar
         trechos = Estado._trechos_limpos(dados.get("trechos"))
         if trechos:
             opcoes["trechos"] = trechos
@@ -541,6 +545,10 @@ class Estado:
             if not isinstance(valor, bool):
                 raise ValueError("Opção inválida.")
             opcoes[chave] = valor
+        espelhar = dados.get("espelhar", False)
+        if not isinstance(espelhar, bool):
+            raise ValueError("Opção inválida.")
+        opcoes["espelhar"] = espelhar
         trechos = Estado._trechos_limpos(dados.get("trechos"))
         if trechos:
             opcoes["trechos"] = trechos
