@@ -13,6 +13,9 @@ FADE_FINAL_S = 0.5               # fade de vídeo e de áudio no fim
 LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11"
 OPCOES_BOOL = ("legenda", "resumo", "cta", "capitulos")
 CAPITULO_DURACAO_S = 4.5         # quanto tempo o título do momento fica na tela
+LARGURA, ALTURA = 1920, 1080     # o vídeo final é sempre horizontal 16:9
+RECORTE_MIN = 0.05               # o recorte nunca é menor que 5% do quadro em cada sentido
+ENCAIXE_TOLERANCIA = 0.03        # recorte até 3% diferente de 16:9 só preenche o quadro (igual ao gerar_cortes.py)
 
 
 def limpar_titulo(valor, maximo=TITULO_MAX):
@@ -39,6 +42,11 @@ def normalizar_opcoes(dados, normalizar_trechos):
     if not isinstance(espelhar, bool):
         return None
     opcoes["espelhar"] = espelhar
+    if dados.get("recorte") is not None:                     # recorte livre do quadro (ausente = o quadro inteiro)
+        recorte = normalizar_recorte(dados["recorte"])
+        if recorte is None:
+            return None
+        opcoes["recorte"] = recorte
     trechos, ok = normalizar_trechos(dados.get("trechos"))
     if not ok:
         return None
@@ -52,6 +60,31 @@ def normalizar_opcoes(dados, normalizar_trechos):
         if titulo:
             opcoes["titulo"] = titulo
     return opcoes
+
+
+def normalizar_recorte(caixa):
+    """Caixa de recorte {x, y, w, h} em frações do quadro (0 a 1), dentro dele. None se inválida; arredonda em 5 casas.
+
+    Qualquer formato vale: o que não for 16:9 aparece inteiro sobre um fundo desfocado (ver `comando_final`)."""
+    if not isinstance(caixa, dict):
+        return None
+    try:
+        x, y, w, h = (float(caixa[k]) for k in ("x", "y", "w", "h"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(v != v or v in (math.inf, -math.inf) for v in (x, y, w, h)):
+        return None
+    if not (0 <= x < 1 and 0 <= y < 1 and RECORTE_MIN <= w <= 1 and RECORTE_MIN <= h <= 1
+            and x + w <= 1.0001 and y + h <= 1.0001):
+        return None
+    return {"x": round(x, 5), "y": round(y, 5), "w": round(min(w, 1 - x), 5), "h": round(min(h, 1 - y), 5)}
+
+
+def precisa_encaixe(largura, altura, tolerancia=ENCAIXE_TOLERANCIA):
+    """True se a proporção largura x altura difere de 16:9 além da tolerância (o recorte vai inteiro sobre fundo desfocado)."""
+    if largura <= 0 or altura <= 0:
+        return False
+    return abs((largura / altura) / (LARGURA / ALTURA) - 1) > tolerancia
 
 
 def duracao_dos_trechos(trechos, total):
@@ -125,25 +158,46 @@ def _caminho_filtro(caminho):
     return Path(caminho).as_posix().replace(":", "\\:").replace("'", "\\'")
 
 
-def comando_final(ffmpeg, fonte, ass, duracao, saida, preset=PRESET_FINAL, crf=CRF_FINAL, espelhar=False):
+def comando_final(ffmpeg, fonte, ass, duracao, saida, preset=PRESET_FINAL, crf=CRF_FINAL, espelhar=False,
+                  recorte=None, origem=None):
     """Renderização final: legenda/títulos queimados (se houver ASS), volume uniforme e fade no fim. Sempre 1920x1080.
 
-    espelhar: inverte direita e esquerda ANTES da legenda, então o texto continua legível."""
-    video = ["hflip"] if espelhar else []
+    espelhar: inverte direita e esquerda ANTES da legenda, então o texto continua legível.
+    recorte: {x,y,w,h} (frações do quadro) usado no lugar do quadro inteiro. `origem` = (largura, altura) do vídeo de
+    entrada (padrão 1920x1080). Recorte quase 16:9 só preenche o quadro; outro formato aparece INTEIRO, centralizado sobre
+    uma cópia desfocada dele mesmo (nada é cortado nem esticado)."""
+    depois = []                                        # o que vem depois do recorte/espelho: legenda e fade
     if ass:
-        video.append(f"subtitles='{_caminho_filtro(ass)}'")
+        depois.append(f"subtitles='{_caminho_filtro(ass)}'")
     audio = [LOUDNORM]
     if duracao and duracao >= 2 * FADE_FINAL_S + 1:
         inicio = duracao - FADE_FINAL_S
-        video.append(f"fade=t=out:st={inicio:.2f}:d={FADE_FINAL_S}")
+        depois.append(f"fade=t=out:st={inicio:.2f}:d={FADE_FINAL_S}")
         audio.append(f"afade=t=out:st={inicio:.2f}:d={FADE_FINAL_S}")
+    codec = ["-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(saida)]
     cmd = [str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error", "-i", str(fonte)]
-    if video:
-        cmd += ["-vf", ",".join(video)]
-    cmd += ["-af", ",".join(audio),
-            "-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(saida)]
-    return cmd
+    if not recorte:
+        video = (["hflip"] if espelhar else []) + depois
+        if video:
+            cmd += ["-vf", ",".join(video)]
+        return cmd + ["-af", ",".join(audio)] + codec
+
+    x, y, w, h = (recorte[k] for k in ("x", "y", "w", "h"))
+    sw, sh = origem or (LARGURA, ALTURA)
+    par = lambda frac, total: f"trunc({total}*{frac:.5f}/2)*2"            # medidas pares, em expressão (não depende da origem)
+    corte = f"crop={par(w, 'iw')}:{par(h, 'ih')}:{par(x, 'iw')}:{par(y, 'ih')}" + (",hflip" if espelhar else "")
+    if precisa_encaixe(w * sw, h * sh):
+        grafo = (f"[0:v]{corte},split=2[a][b];"
+                 f"[a]scale={LARGURA}:{ALTURA}:force_original_aspect_ratio=increase,crop={LARGURA}:{ALTURA},gblur=sigma=30[fundo];"
+                 f"[b]scale={LARGURA}:{ALTURA}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos[frente];"
+                 f"[fundo][frente]overlay=(W-w)/2:(H-h)/2,setsar=1")
+    else:
+        grafo = (f"[0:v]{corte},scale={LARGURA}:{ALTURA}:force_original_aspect_ratio=increase:flags=lanczos,"
+                 f"crop={LARGURA}:{ALTURA},setsar=1")
+    if depois:
+        grafo += "," + ",".join(depois)
+    return cmd + ["-filter_complex", grafo + "[vout]", "-map", "[vout]", "-map", "0:a?", "-af", ",".join(audio)] + codec
 
 
 def texto_para_resumo(caps, segmentos, duracao, maximo=2400):

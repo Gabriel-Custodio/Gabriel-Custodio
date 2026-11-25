@@ -208,6 +208,12 @@ class TestEdicao(BaseLongos):
         self.assertIs(servidor.Estado.validar_opcoes_longo({"espelhar": True})["espelhar"], True)
         with self.assertRaises(ValueError):
             servidor.Estado.validar_opcoes_longo({"espelhar": "sim"})
+        caixa = {"x": 0.1, "y": 0.2, "w": 0.5, "h": 0.4}
+        self.assertEqual(servidor.Estado.validar_opcoes_longo({"recorte": caixa})["recorte"], caixa)
+        self.assertNotIn("recorte", servidor.Estado.validar_opcoes_longo({}))
+        for ruim in ({}, "x", {"x": 0.9, "y": 0, "w": 0.5, "h": 0.5}, {"x": 0, "y": 0, "w": 0.01, "h": 0.5}):
+            with self.assertRaises(ValueError):
+                servidor.Estado.validar_opcoes_longo({"recorte": ruim})
         for ruim in (None, "x", {"legenda": "sim"}, {"cta": 1}, {"titulo": 5}, {"trechos": [[5, 1]]}, {"trechos": "x"},
                      {"trechos": [[0, 0.5]]}, {"trechos": [[0, 1], [0.5, 3]]}):
             with self.assertRaises(ValueError, msg=str(ruim)):

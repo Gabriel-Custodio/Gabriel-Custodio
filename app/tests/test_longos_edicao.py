@@ -42,6 +42,49 @@ class TestOpcoes(unittest.TestCase):
         self.assertIs(longos.normalizar_opcoes({"espelhar": True}, trechos_ok)["espelhar"], True)
         self.assertIsNone(longos.normalizar_opcoes({"espelhar": 1}, trechos_ok))
 
+    def test_recorte_validado(self):
+        caixa = {"x": 0.1, "y": 0.2, "w": 0.5, "h": 0.4}
+        self.assertEqual(longos.normalizar_opcoes({"recorte": caixa}, trechos_ok)["recorte"], caixa)
+        self.assertNotIn("recorte", longos.normalizar_opcoes({}, trechos_ok))
+        for ruim in ({}, [], "x", {"x": 0.8, "y": 0, "w": 0.5, "h": 0.5}, {"x": 0, "y": 0, "w": 0.01, "h": 0.5},
+                     {"x": 0, "y": 0, "w": 0.5, "h": 1.5}, {"x": "a", "y": 0, "w": 0.5, "h": 0.5},
+                     {"x": 0, "y": 0, "w": float("nan"), "h": 0.5}):
+            self.assertIsNone(longos.normalizar_opcoes({"recorte": ruim}, trechos_ok), ruim)
+
+    def test_precisa_encaixe_em_16_9(self):
+        self.assertFalse(longos.precisa_encaixe(1920, 1080))
+        self.assertFalse(longos.precisa_encaixe(960, 545))               # quase 16:9
+        self.assertTrue(longos.precisa_encaixe(800, 800))                # quadrado
+        self.assertTrue(longos.precisa_encaixe(1920, 500))               # faixa larga
+        self.assertFalse(longos.precisa_encaixe(0, 10))
+
+    def test_comando_final_com_recorte_16_9_so_preenche(self):
+        caixa = {"x": 0.1, "y": 0.2, "w": 0.5, "h": 0.5}
+        cmd = longos.comando_final("ffmpeg", "in.mp4", "t.ass", 60.0, "out.mp4", recorte=caixa, origem=(1920, 1080))
+        grafo = cmd[cmd.index("-filter_complex") + 1]
+        self.assertTrue(grafo.startswith("[0:v]crop=trunc(iw*0.50000/2)*2:trunc(ih*0.50000/2)*2:trunc(iw*0.10000/2)*2:trunc(ih*0.20000/2)*2,scale=1920:1080:force_original_aspect_ratio=increase"))
+        self.assertNotIn("gblur", grafo)
+        self.assertLess(grafo.index("crop="), grafo.index("subtitles="))   # a legenda vem depois do recorte
+        self.assertTrue(grafo.endswith("[vout]"))
+        self.assertEqual(cmd[cmd.index("-map") + 1], "[vout]")
+        self.assertIn("0:a?", cmd)
+        self.assertNotIn("-vf", cmd)
+
+    def test_comando_final_com_recorte_de_outro_formato_fica_inteiro_sobre_fundo_desfocado(self):
+        caixa = {"x": 0.7, "y": 0.6, "w": 0.28, "h": 0.38}               # 538x410: bem diferente de 16:9
+        cmd = longos.comando_final("ffmpeg", "in.mp4", None, 60.0, "out.mp4", recorte=caixa, origem=(1920, 1080), espelhar=True)
+        grafo = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn(",hflip,split=2[a][b]", grafo)
+        self.assertIn("gblur=sigma=30[fundo]", grafo)
+        self.assertIn("force_original_aspect_ratio=decrease", grafo)
+        self.assertIn("[fundo][frente]overlay=(W-w)/2:(H-h)/2,setsar=1", grafo)
+        self.assertLess(grafo.index("hflip"), grafo.index("fade="))
+
+    def test_comando_final_sem_recorte_continua_igual(self):
+        cmd = longos.comando_final("ffmpeg", "in.mp4", "t.ass", 60.0, "out.mp4")
+        self.assertIn("-vf", cmd)
+        self.assertNotIn("-filter_complex", cmd)
+
     def test_comando_final_espelha_antes_da_legenda(self):
         normal = longos.comando_final("ffmpeg", "in.mp4", "t.ass", 60.0, "out.mp4")
         espelhado = longos.comando_final("ffmpeg", "in.mp4", "t.ass", 60.0, "out.mp4", espelhar=True)
@@ -369,6 +412,26 @@ class TestRenderLongo(unittest.TestCase):
         self.assertEqual(self.extras["resumo"][2], "Fulano")
         self.assertIn("Momento 1 (SUSTO NO BAU): vamos abrir o bau agora", self.extras["resumo"][0])
         self.assertEqual(list(Path("temp").glob("*")), [])
+
+    def test_renderiza_com_recorte_e_espelhar(self):
+        caixa = {"x": 0.6, "y": 0.5, "w": 0.35, "h": 0.45}
+        self.escrever_opcoes({"recorte": caixa, "espelhar": True})
+        with mock.patch.object(g, "get_video_dimensions", return_value=(1920, 1080)):
+            self.assertTrue(self.rodar())
+        cmd = self.cmds[0][1]
+        grafo = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("hflip", grafo)
+        self.assertIn("gblur", grafo)                               # 672x486 não é 16:9: aparece inteiro sobre fundo desfocado
+        self.assertLess(grafo.index("hflip"), grafo.index("subtitles="))
+        meta = self.meta_atual()
+        self.assertEqual(meta["edicao"]["opcoes"]["recorte"], caixa)
+        self.assertTrue(meta["edicao"]["opcoes"]["espelhar"])
+        self.assertIn("recorte: sim", self.saida)
+
+    def test_recorte_invalido_nao_renderiza(self):
+        self.escrever_opcoes({"recorte": {"x": 0.9, "y": 0, "w": 0.5, "h": 0.5}})
+        self.assertFalse(self.rodar())
+        self.assertEqual(self.cmds, [])
 
     def test_ass_tem_legenda_e_capitulos(self):
         self.rodar()

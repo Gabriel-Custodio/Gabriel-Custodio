@@ -58,6 +58,16 @@ class TestTela(unittest.TestCase):
             self.assertIn(f".ed-alca.{lado} ", css)
         self.assertIn("espelhar", js)
 
+    def test_editor_do_longo_tem_o_recorte_livre(self):
+        for nome in ("ed-bloco-recorte", "ed-rec-usar", "ed-rec-quadro", "ed-rec-tudo", "ed-rec-quadro-area", "ed-rec-paisagem",
+                     "ed-rec-img", "ed-rec", "ed-rec-previa", "ed-rec-nitidez"):
+            self.assertIn(f'id="{nome}"', HTML)
+        self.assertRegex(HTML, r'id="ed-bloco-recorte"[^>]*data-so="longo"|data-so="longo"[^>]*id="ed-bloco-recorte"')
+        js = (ESTATICO / "editor.js").read_text(encoding="utf-8")
+        self.assertIn("lo.recorte = ED.rec", js)
+        self.assertIn('["cam", "game", "rec"]', js)
+        self.assertIn(".ed-caixa.rec", (ESTATICO / "estilo.css").read_text(encoding="utf-8"))
+
     def test_o_template_do_longo_tem_o_que_o_script_procura(self):
         molde = HTML[HTML.index('<template id="tpl-longo">'):HTML.index("</template>", HTML.index('<template id="tpl-longo">'))]
         codigo = (ESTATICO / "longos.js").read_text(encoding="utf-8")

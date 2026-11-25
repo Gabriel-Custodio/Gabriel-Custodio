@@ -57,6 +57,7 @@ SUGERIR_TIMEOUT_S = 75     # tempo máximo esperando as sugestões de título
 TRECHOS_TOTAL_MIN_S = 1.0
 LONGO_MIN_MIN, LONGO_MAX_MIN = 4, 12     # duração do vídeo longo, em minutos (igual ao pacote longos/)
 LONGO_TITULO_MAX = 100                   # caracteres do título do vídeo longo (igual ao pacote longos/)
+LONGO_RECORTE_MIN = 0.05                 # menor lado do recorte, em fração do quadro (igual ao pacote longos/)
 ONDA_PONTOS = 2400                       # picos da onda do áudio que a linha do tempo desenha
 ONDA_TIMEOUT_S = 600
 MAX_TRANSCRICAO = 8000                   # texto falado de um vídeo longo mostrado no card
@@ -549,6 +550,11 @@ class Estado:
         if not isinstance(espelhar, bool):
             raise ValueError("Opção inválida.")
         opcoes["espelhar"] = espelhar
+        if dados.get("recorte") is not None:                    # recorte livre do quadro (qualquer formato)
+            recorte = caixa_valida(dados["recorte"])
+            if recorte is None or recorte["w"] < LONGO_RECORTE_MIN or recorte["h"] < LONGO_RECORTE_MIN:
+                raise ValueError("Recorte inválido: a caixa precisa ficar dentro do quadro e ter pelo menos 5% de cada lado.")
+            opcoes["recorte"] = recorte
         trechos = Estado._trechos_limpos(dados.get("trechos"))
         if trechos:
             opcoes["trechos"] = trechos

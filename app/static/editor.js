@@ -15,6 +15,7 @@ const ED = {
   corte: null,                                     // o corte que está sendo editado (objeto da lista)
   cam: { x: 0.74, y: 0.35, w: 0.24, h: 0.2 },
   game: { x: 0.2, y: 0, w: 0.5, h: 1 },
+  rec: { x: 0.1, y: 0.1, w: 0.8, h: 0.8 },        // vídeo longo: recorte livre do quadro
   camAltura: 600,
   ordem: "cam_primeiro",
   tarja: true,
@@ -56,6 +57,7 @@ function edRazao(tipo) {
    vídeo, o recorte inteiro é encaixado no espaço, com o resto preenchido por um fundo desfocado (nada é cortado nem esticado).
    Dentro de 3% de diferença ele só preenche o espaço, igual ao servidor (ENCAIXE_TOLERANCIA). */
 const ED_ENCAIXE_TOLERANCIA = 0.03;
+const ED_LARGURA_LONGO = 1920, ED_ALTURA_LONGO = 1080;
 function edProporcaoDiferente(tipo) {
   const c = ED[tipo];
   if (!edImgOk() || c.w <= 0 || c.h <= 0) return false;
@@ -92,24 +94,24 @@ function edBlocos() {
 
 /* Desenha o recorte `c` no bloco (dx, dy, dw, dh) da prévia: preenchendo o bloco, ou (encaixe) inteiro sobre um fundo desfocado.
    Com "Espelhar" ligado o conteúdo sai invertido, como no vídeo final (tarja e legenda não). */
-function edDesenharBloco(c, W, H, dx, dy, dw, dh, encaixe) {
+function edDesenharBloco(c, W, H, dx, dy, dw, dh, encaixe, ctx = edCtx, img = edImg) {
   const sx = c.x * W, sy = c.y * H, sw = c.w * W, sh = c.h * H;
-  edCtx.save();
-  edCtx.beginPath(); edCtx.rect(dx, dy, dw, dh); edCtx.clip();
-  if ($("ed-espelhar").checked) { edCtx.translate(dx + dw, 0); edCtx.scale(-1, 1); edCtx.translate(-dx, 0); }
+  ctx.save();
+  ctx.beginPath(); ctx.rect(dx, dy, dw, dh); ctx.clip();
+  if ($("ed-espelhar").checked) { ctx.translate(dx + dw, 0); ctx.scale(-1, 1); ctx.translate(-dx, 0); }
   if (!encaixe) {
-    edCtx.drawImage(edImg, sx, sy, sw, sh, dx, dy, dw, dh);
+    ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
   } else {
     const cobre = Math.max(dw / sw, dh / sh);                // fundo: o mesmo recorte esticado até cobrir o bloco, desfocado
-    try { edCtx.filter = "blur(6px)"; } catch (_) { /* sem filtro: fica só mais escuro */ }
-    edCtx.drawImage(edImg, sx, sy, sw, sh, dx + (dw - sw * cobre) / 2, dy + (dh - sh * cobre) / 2, sw * cobre, sh * cobre);
-    edCtx.filter = "none";
-    edCtx.fillStyle = "rgba(0,0,0,.25)";
-    edCtx.fillRect(dx, dy, dw, dh);
+    try { ctx.filter = "blur(6px)"; } catch (_) { /* sem filtro: fica só mais escuro */ }
+    ctx.drawImage(img, sx, sy, sw, sh, dx + (dw - sw * cobre) / 2, dy + (dh - sh * cobre) / 2, sw * cobre, sh * cobre);
+    ctx.filter = "none";
+    ctx.fillStyle = "rgba(0,0,0,.25)";
+    ctx.fillRect(dx, dy, dw, dh);
     const cabe = Math.min(dw / sw, dh / sh);                 // frente: o recorte inteiro, centralizado
-    edCtx.drawImage(edImg, sx, sy, sw, sh, dx + (dw - sw * cabe) / 2, dy + (dh - sh * cabe) / 2, sw * cabe, sh * cabe);
+    ctx.drawImage(img, sx, sy, sw, sh, dx + (dw - sw * cabe) / 2, dy + (dh - sh * cabe) / 2, sw * cabe, sh * cabe);
   }
-  edCtx.restore();
+  ctx.restore();
 }
 
 function edDesenharRetrato() {
@@ -193,7 +195,7 @@ function edAtualizar() {
 }
 
 // ---------------------------------------------------------------- mover e redimensionar caixas
-for (const tipo of ["cam", "game"]) {
+for (const tipo of ["cam", "game", "rec"]) {
   const el = $(`ed-${tipo}`);
   for (const canto of ["nw", "ne", "sw", "se", "n", "s", "e", "w"]) {
     const h = document.createElement("span");
@@ -204,21 +206,21 @@ for (const tipo of ["cam", "game"]) {
   el.addEventListener("pointerdown", (ev) => edIniciarArraste(ev, tipo, el));
 }
 
-function edPonto(ev) {
-  const r = $("ed-paisagem").getBoundingClientRect();
+function edPonto(ev, tipo) {
+  const r = $(tipo === "rec" ? "ed-rec-paisagem" : "ed-paisagem").getBoundingClientRect();
   return { x: (ev.clientX - r.left) / r.width, y: (ev.clientY - r.top) / r.height };
 }
 
 function edIniciarArraste(ev, tipo, el) {
-  if (!edImgOk()) return;
+  if (tipo === "rec" ? !edRecImgOk() : !edImgOk()) return;
   ev.preventDefault();
   const canto = ev.target.dataset ? ev.target.dataset.canto : undefined;
-  const p0 = edPonto(ev), c0 = { ...ED[tipo] };
+  const p0 = edPonto(ev, tipo), c0 = { ...ED[tipo] };
   ED_Z += 1;
   el.style.zIndex = String(ED_Z);                     // a caixa mexida fica por cima (sem mexer no DOM: isso pode interromper o arraste)
   try { el.setPointerCapture(ev.pointerId); } catch (_) { /* sem captura: os eventos seguem no próprio elemento */ }
   const mover = (e) => {
-    const p = edPonto(e), c = ED[tipo];
+    const p = edPonto(e, tipo), c = ED[tipo];
     if (!canto) {
       c.x = c0.x + (p.x - p0.x);
       c.y = c0.y + (p.y - p0.y);
@@ -238,7 +240,7 @@ function edIniciarArraste(ev, tipo, el) {
       c.x = dx > 0 ? ax : dx < 0 ? ax - w : c0.x;
       c.y = dy > 0 ? ay : dy < 0 ? ay - h : c0.y;
     }
-    edAtualizar();
+    if (tipo === "rec") edAtualizarRecorte(); else edAtualizar();
   };
   const soltar = () => {
     el.removeEventListener("pointermove", mover);
@@ -285,7 +287,7 @@ document.querySelectorAll('input[name="ed-ordem"]').forEach((el) => el.addEventL
 }));
 $("ed-tarja").addEventListener("change", () => { ED.tarja = $("ed-tarja").checked; edAtualizar(); });
 $("ed-legenda").addEventListener("change", edAtualizar);
-$("ed-espelhar").addEventListener("change", edAtualizar);
+$("ed-espelhar").addEventListener("change", () => { edAtualizar(); edAtualizarRecorte(); });
 
 /* Deixa o bloco da câmera com a MESMA proporção da caixa: o recorte preenche o bloco inteiro, sem fundo desfocado nas laterais */
 $("ed-ajustar-bloco").addEventListener("click", () => {
@@ -346,6 +348,75 @@ function edPegarQuadro(manter) {
 }
 $("ed-pegar-quadro").addEventListener("click", () => edPegarQuadro(true));
 
+// ---------------------------------------------------------------- vídeo longo: recorte livre do quadro
+/* Uma única caixa, de qualquer formato, vale para o vídeo inteiro. 16:9 (ou quase) preenche o quadro; outro formato aparece
+   inteiro, centralizado sobre uma cópia desfocada dele mesmo (igual ao servidor e aos blocos dos cortes). */
+const edRecImg = $("ed-rec-img");
+const edRecCanvas = $("ed-rec-previa");
+const edRecCtx = edRecCanvas.getContext("2d");
+const edRecImgOk = () => edRecImg.naturalWidth > 0 && edRecImg.naturalHeight > 0;
+const ED_REC_PADRAO = { x: 0.1, y: 0.1, w: 0.8, h: 0.8 };
+
+function edRecProporcaoDiferente() {
+  const c = ED.rec;
+  if (!edRecImgOk() || c.w <= 0 || c.h <= 0) return false;
+  const caixa = (c.w * edRecImg.naturalWidth) / (c.h * edRecImg.naturalHeight);
+  return Math.abs(caixa / (ED_LARGURA_LONGO / ED_ALTURA_LONGO) - 1) > ED_ENCAIXE_TOLERANCIA;
+}
+
+function edRecNitidez() {
+  const cw = ED.rec.w * edRecImg.naturalWidth, ch = ED.rec.h * edRecImg.naturalHeight;
+  const fator = edRecProporcaoDiferente() ? Math.min(ED_LARGURA_LONGO / cw, ED_ALTURA_LONGO / ch)
+                                           : Math.max(ED_LARGURA_LONGO / cw, ED_ALTURA_LONGO / ch);
+  let nivel = "ok", texto = `Recorte ampliado ${fator.toFixed(1)}x: nítido.`;
+  if (fator > 3.2) { nivel = "erro"; texto = `Recorte ampliado ${fator.toFixed(1)}x: vai ficar borrado. Puxe os cantos da caixa para pegar uma área maior.`; }
+  else if (fator > 2.2) { nivel = "aviso"; texto = `Recorte ampliado ${fator.toFixed(1)}x: pode ficar um pouco macio. Uma caixa maior fica mais nítida.`; }
+  else if (fator > 1.6) texto = `Recorte ampliado ${fator.toFixed(1)}x: bom.`;
+  return { nivel, texto: `${texto} (origem ${edRecImg.naturalWidth}x${edRecImg.naturalHeight})` };
+}
+
+function edAtualizarRecorte() {
+  if (!edLongo() || !$("ed-rec-usar").checked || !edRecImgOk()) return;
+  edAjustar("rec");
+  const el = $("ed-rec"), c = ED.rec;
+  el.style.left = `${c.x * 100}%`; el.style.top = `${c.y * 100}%`;
+  el.style.width = `${c.w * 100}%`; el.style.height = `${c.h * 100}%`;
+  edRecCtx.fillStyle = "#000";
+  edRecCtx.fillRect(0, 0, edRecCanvas.width, edRecCanvas.height);
+  edDesenharBloco(c, edRecImg.naturalWidth, edRecImg.naturalHeight, 0, 0, edRecCanvas.width, edRecCanvas.height,
+                  edRecProporcaoDiferente(), edRecCtx, edRecImg);
+  const n = edRecNitidez();
+  $("ed-rec-nitidez").className = `ed-nitidez ${n.nivel}`;
+  $("ed-rec-nitidez").textContent = n.texto;
+}
+
+/* Congela o quadro que o vídeo está mostrando (o navegador desenha o quadro; nada é baixado) */
+function edRecPegarQuadro(manter) {
+  const w = edVideo.videoWidth, h = edVideo.videoHeight;
+  if (!w || !h) { edErro("O vídeo ainda está carregando."); return false; }
+  edErro("");
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  c.getContext("2d").drawImage(edVideo, 0, 0, w, h);
+  edRecImg.onload = () => {
+    if (!manter) ED.rec = { ...ED_REC_PADRAO };
+    $("ed-rec-quadro-area").hidden = false;
+    edAtualizarRecorte();
+  };
+  edRecImg.src = c.toDataURL("image/jpeg", 0.92);
+  return true;
+}
+
+function edRecMostrar() {
+  const ligado = $("ed-rec-usar").checked;
+  $("ed-rec-area").hidden = !ligado;
+  if (ligado && !edRecImgOk()) edRecPegarQuadro(false);
+  else edAtualizarRecorte();
+}
+$("ed-rec-usar").addEventListener("change", edRecMostrar);
+$("ed-rec-quadro").addEventListener("click", () => edRecPegarQuadro(true));
+$("ed-rec-tudo").addEventListener("click", () => { ED.rec = { x: 0, y: 0, w: 1, h: 1 }; edAtualizarRecorte(); });
+
 // ---------------------------------------------------------------- abrir e fechar
 function edMarcar(nome, valor) {
   const el = document.querySelector(`input[name="${nome}"][value="${valor}"]`);
@@ -402,11 +473,20 @@ function edAbrirLongo(v) {
   $("ed-cta").checked = op ? op.cta : true;
   $("ed-espelhar").checked = !!(op && op.espelhar);
   $("ed-renderizar").disabled = false;
+  edRecImg.removeAttribute("src");
+  ED.rec = op && op.recorte ? { ...op.recorte } : { ...ED_REC_PADRAO };
+  $("ed-rec-usar").checked = !!(op && op.recorte);
+  $("ed-rec-area").hidden = !$("ed-rec-usar").checked;
+  $("ed-rec-quadro-area").hidden = true;
   ED.momentos = (v.momentos || []).filter((m) => typeof m.inicio === "number" && typeof m.fim === "number");
   const nome = encodeURIComponent(v.nome);
   const src = `/video?nome=${nome}&lib=longos&bruto=1&t=${Date.now()}`;
   edVideo.onloadedmetadata = null;
   edVideo.onseeked = null;
+  if (op && op.recorte) {                                   // reabre o recorte da última edição: pega um quadro do meio do vídeo
+    edVideo.onloadedmetadata = () => { edVideo.currentTime = Math.max(0.1, edVideo.duration * 0.4); };
+    edVideo.onseeked = () => { edVideo.onseeked = null; edRecPegarQuadro(true); };
+  }
   TLUI.abrir(src, op && op.trechos, {
     ondaUrl: `/api/longos/onda?nome=${nome}`, zoomMax: 40,
     marcas: ED.momentos.map((m) => ({ n: m.n, a: m.inicio, b: m.fim, titulo: m.titulo })),
@@ -527,6 +607,7 @@ function edOpcoes() {
   if (edLongo()) {
     const lo = { legenda: $("ed-legenda").checked, capitulos: $("ed-capitulos").checked,
                  resumo: $("ed-resumo").checked, cta: $("ed-cta").checked, espelhar: $("ed-espelhar").checked };
+    if ($("ed-rec-usar").checked) lo.recorte = ED.rec;         // sem a opção ligada, o quadro inteiro
     const aparado = TLUI.trechos();                           // null = vídeo inteiro
     if (aparado) lo.trechos = aparado;
     const t = $("ed-titulo").value.trim();
@@ -550,6 +631,7 @@ $("ed-renderizar").addEventListener("click", async () => {
   edErro("");
   if (!TLUI.pronto()) { edErro("Espere o vídeo carregar."); return; }
   if (!edLongo() && edLayout() === "empilhado" && !edImgOk()) { edErro("Espere o quadro carregar."); return; }
+  if (edLongo() && $("ed-rec-usar").checked && !edRecImgOk()) { edErro("Espere o quadro do recorte carregar (ou clique em Usar este quadro)."); return; }
   $("ed-renderizar").disabled = true;
   try {
     await post(edApi("editar"), { nome: ED.corte.nome, opcoes: edOpcoes() });

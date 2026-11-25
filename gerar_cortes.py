@@ -5657,7 +5657,7 @@ def render_edit_longo(name):
     sim = lambda v: "sim" if v else "não"
     print(f"🎞️  Renderizando o vídeo longo de novo: {name}")
     print(f"   Formato: horizontal 1920x1080 | legenda: {sim(opts['legenda'])} | títulos dos momentos: {sim(opts['capitulos'])} | "
-          f"resumo: {sim(opts['resumo'])} | chamada final: {sim(opts['cta'])} | espelhado: {sim(opts['espelhar'])}")
+          f"resumo: {sim(opts['resumo'])} | chamada final: {sim(opts['cta'])} | espelhado: {sim(opts['espelhar'])} | recorte: {sim(opts.get('recorte'))}")
     load_env_file()
     groq_api_key = get_groq_key()
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -5699,8 +5699,10 @@ def render_edit_longo(name):
 
         tmp_out = TEMP_DIR / f"longo_{stem}.mp4"
         temporarios.append(tmp_out)
-        ok, erro = run_ffmpeg_progress(longos.comando_final(FFMPEG.as_posix(), source, ass_path, duration, tmp_out, espelhar=opts["espelhar"]),
-                                       duration, "Renderizando")
+        origem = get_video_dimensions(source) if opts.get("recorte") else None
+        comando = longos.comando_final(FFMPEG.as_posix(), source, ass_path, duration, tmp_out, espelhar=opts["espelhar"],
+                                       recorte=opts.get("recorte"), origem=origem if origem and all(origem) else None)
+        ok, erro = run_ffmpeg_progress(comando, duration, "Renderizando")
         if not ok or not tmp_out.is_file() or tmp_out.stat().st_size < 1024:
             print(f"❌ Falha ao renderizar: o vídeo longo continua como estava. {erro[-400:]}")
             return False

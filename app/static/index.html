@@ -378,6 +378,32 @@
       </div>
     </div>
 
+    <div id="ed-bloco-recorte" class="dlg-bloco" data-so="longo" hidden>
+      <h3>1. Recorte do quadro (opcional)</h3>
+      <label class="inline caixa"><input type="checkbox" id="ed-rec-usar"> Recortar o vídeo (vale para o vídeo inteiro)</label>
+      <div id="ed-rec-area" hidden>
+        <p class="ajuda">Pause o vídeo lá em cima num momento típico e clique em <strong>Usar este quadro</strong>. Arraste a caixa para movê-la e puxe um canto ou um lado para mudar o tamanho (Shift num canto mantém a proporção). A caixa pode ter <strong>qualquer formato</strong>: se não for 16:9, o recorte aparece inteiro sobre um fundo desfocado, sem cortar nem esticar.</p>
+        <div class="acoes-form">
+          <button type="button" id="ed-rec-quadro" class="btn">Usar este quadro</button>
+          <button type="button" id="ed-rec-tudo" class="btn" title="Caixa do tamanho do quadro inteiro">Quadro inteiro</button>
+        </div>
+        <div id="ed-rec-quadro-area" class="ed-grade ed-grade-rec" hidden>
+          <div class="ed-col">
+            <h3>Quadro do vídeo</h3>
+            <div id="ed-rec-paisagem" class="ed-paisagem">
+              <img id="ed-rec-img" alt="Quadro do vídeo longo" draggable="false">
+              <div id="ed-rec" class="ed-caixa rec" title="Recorte: arraste para mover; cantos e lados mudam o tamanho (Shift mantém a proporção)"><span class="ed-rotulo">Recorte</span></div>
+            </div>
+          </div>
+          <div class="ed-col">
+            <h3>Resultado (16:9)</h3>
+            <canvas id="ed-rec-previa" width="320" height="180" aria-label="Prévia do vídeo recortado"></canvas>
+            <p id="ed-rec-nitidez" class="ed-nitidez" role="status"></p>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="dlg-bloco">
       <h3>2. O que colocar no corte</h3>
       <label class="inline caixa" data-so="curto"><input type="checkbox" id="ed-tarja" checked> <span id="ed-tarja-rotulo">Tarja vermelha</span></label>

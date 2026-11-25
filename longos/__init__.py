@@ -13,7 +13,7 @@ from .selecao import (DISTANCIA_MIN_S, DURACAO_MAX_MIN, DURACAO_MIN_MIN, DURACAO
                       duracao_valida, selecionar)
 from .montagem import (ALTURA, FPS, LARGURA, PASTA, PASTA_BRUTOS, legenda_dos_momentos, metadados,  # noqa: F401
                        montar_bruto, nome_do_video)
-from .edicao import (CAPITULO_DURACAO_S, TITULO_MAX, capitulos, comando_aparar, comando_final, duracao_dos_trechos,  # noqa: F401
+from .edicao import (CAPITULO_DURACAO_S, TITULO_MAX, normalizar_recorte, precisa_encaixe, capitulos, comando_aparar, comando_final, duracao_dos_trechos,  # noqa: F401
                      limpar_titulo, mapear_tempo, normalizar_opcoes, texto_para_resumo)
 from .legenda import montar_ass  # noqa: F401
 from .live import listar_cortes_da_live  # noqa: F401

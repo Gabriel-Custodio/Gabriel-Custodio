@@ -136,6 +136,10 @@ input[type="text"], input[type="number"], input[type="date"], select {
 .ed-caixa { position: absolute; border: 2px solid; cursor: move; touch-action: none; }
 .ed-caixa.cam { border-color: #ff3cac; background: rgba(255, 60, 172, .10); }
 .ed-caixa.game { border-color: #19d3da; background: rgba(25, 211, 218, .08); }
+.ed-caixa.rec { border-color: #ffb020; background: rgba(255, 176, 32, .10); }
+.ed-caixa.rec .ed-alca { color: #ffb020; }
+.ed-grade-rec { grid-template-columns: minmax(0, 1fr) 340px; margin-top: 10px; }
+#ed-rec-previa { width: 100%; max-width: 340px; background: #000; border-radius: 6px; }
 .ed-rotulo { position: absolute; left: 4px; top: 2px; font: 600 11px/1.2 system-ui, sans-serif; color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000; pointer-events: none; }
 .ed-alca { position: absolute; width: 14px; height: 14px; background: #fff; border: 2px solid currentColor; border-radius: 2px; }
 .ed-caixa.cam .ed-alca { color: #ff3cac; }
