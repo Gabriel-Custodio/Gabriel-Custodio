@@ -126,9 +126,43 @@ function cnMonitor(c) {
   const pre = document.createElement("pre"); pre.className = "lv-pre";
   logd.append(sum, pre);
   logd.addEventListener("toggle", () => { if (logd.open) lvLog(c.id); });
-  box.append(topo, resumo, numeros, msg, momentos, logd);
+  box.append(topo, resumo, numeros, msg, momentos, logd, lvLongoCaixa(c));
   lvPintar(box, CN.lives[c.id]);
   return box;
+}
+
+/* Vídeo longo com os cortes que o monitor já fez deste canal (não precisa do monitor rodando) */
+function lvLongoCaixa(c) {
+  const caixa = document.createElement("div");
+  caixa.className = "lv-longo";
+  const rot = document.createElement("span");
+  rot.className = "cn-detalhe";
+  rot.textContent = "Vídeo longo com os melhores cortes desta live:";
+  const minutos = document.createElement("select");
+  minutos.className = "lv-longo-min"; minutos.setAttribute("aria-label", "Duração do vídeo longo");
+  for (const m of [4, 5, 6, 8, 10, 12]) minutos.append(new Option(`${m} min`, String(m), false, m === 8));
+  const horas = document.createElement("select");
+  horas.className = "lv-longo-horas"; horas.setAttribute("aria-label", "Período dos cortes");
+  for (const [h, texto] of [[3, "últimas 3 h"], [6, "últimas 6 h"], [12, "últimas 12 h"], [24, "últimas 24 h"], [72, "últimos 3 dias"], [0, "todos os cortes"]]) {
+    horas.append(new Option(texto, String(h), false, h === 6));
+  }
+  const botao = cnBotao("Montar vídeo longo", "", () => lvMontarLongo(c, Number(minutos.value), Number(horas.value) || null));
+  botao.classList.add("lv-longo-btn");
+  caixa.append(rot, minutos, horas, botao);
+  return caixa;
+}
+
+async function lvMontarLongo(c, minutos, horas) {
+  lvMsg(c.id, "");
+  try {
+    await post("/api/lives/longo", { id: c.id, minutos, horas });
+  } catch (e) {
+    lvMsg(c.id, e.message);
+    return;
+  }
+  mostrarAba("gerar");                                  // o andamento aparece no log da aba "Gerar cortes"
+  proximoLog = 0; linhasNaTela = []; $("log").textContent = "";
+  iniciarConsulta();
 }
 
 function lvPintar(box, v) {
@@ -164,6 +198,8 @@ function lvPintar(box, v) {
   const ativo = c.situacao === "ativo";
   const cheio = Object.values(CN.lives).filter((x) => x.rodando).length >= CN.maxLives;
   const ini = q(".lv-iniciar"), pau = q(".lv-pausar"), par = q(".lv-parar");
+  const longo = q(".lv-longo-btn");
+  longo.disabled = !ativo; longo.title = ativo ? "" : "Canal suspenso: reative-o para usar os cortes dele";
   ini.hidden = !!v.rodando; ini.disabled = !ativo || cheio;
   ini.title = !ativo ? "Canal suspenso: reative-o para monitorar" : (cheio ? `Já há ${CN.maxLives} lives sendo monitoradas` : "");
   pau.hidden = !v.rodando; pau.textContent = v.pausado ? "Retomar" : "Pausar";

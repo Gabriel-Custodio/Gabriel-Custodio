@@ -10,10 +10,13 @@ const TLUI = (() => {
     quadros: [],                    // canvases pequenos, um por posição
     ficha: 0,                       // muda a cada abertura: tarefas antigas (ondas, quadros) se descartam sozinhas
     src: "", pendente: null, rAF: 0,
+    ondaUrl: "",                    // vídeo longo: a onda do áudio vem pronta do servidor (o arquivo é grande demais para o navegador)
+    marcas: [],                     // vídeo longo: um marcador por momento [{n, a, b, titulo}]
+    aoMudar: null,                  // chamado quando as peças mudam (o editor atualiza a lista de momentos)
   };
   const video = $("ed-video"), rolagem = $("tl-rolagem"), conteudo = $("tl-conteudo");
   const cReg = $("tl-regua"), cOnda = $("tl-ondas"), cQuad = $("tl-quadros");
-  const MAX_LARGURA = 16000;
+  const MAX_LARGURA = 30000;
 
   const pronto = () => S.dur > 0 && S.pecas.length > 0;
   const tempoEm = (ev) => {
@@ -92,7 +95,29 @@ const TLUI = (() => {
     const W = larguraAtual();
     conteudo.style.width = `${W}px`;
     desenharRegua(W); desenharOndas(W); desenharQuadros(W);
+    desenharMarcas();
     atualizarPecas();
+  }
+
+  /* marcadores dos momentos (vídeo longo), em porcentagem: acompanham o zoom sem redesenhar */
+  function desenharMarcas() {
+    const box = $("tl-marcas");
+    box.replaceChildren();
+    if (!S.dur) return;
+    for (const m of S.marcas) {
+      const a = Math.min(Math.max(m.a, 0), S.dur), b = Math.min(Math.max(m.b, 0), S.dur);
+      if (b <= a) continue;
+      const d = document.createElement("div");
+      d.className = "tl-marca";
+      d.style.left = `${(a / S.dur) * 100}%`;
+      d.style.width = `${((b - a) / S.dur) * 100}%`;
+      const r = document.createElement("span");
+      r.className = "tl-marca-rot";
+      r.textContent = `${m.n}`;
+      d.title = `${m.n} · ${m.titulo || "momento"}`;
+      d.appendChild(r);
+      box.appendChild(d);
+    }
   }
 
   /* peças, alças e cursor em porcentagem: acompanham o zoom sem redesenhar */
@@ -114,6 +139,7 @@ const TLUI = (() => {
     $("tl-desfazer").disabled = !tlHistPodeDesfazer(S.hist);
     $("tl-refazer").disabled = !tlHistPodeRefazer(S.hist);
     atualizarInfo();
+    if (S.aoMudar) S.aoMudar();
   }
 
   function tempoAtual() { return Math.min(Math.max(video.currentTime || 0, 0), S.dur || 0); }
@@ -254,6 +280,15 @@ const TLUI = (() => {
   async function carregarOnda(ficha) {
     let ctx = null;
     try {
+      if (S.ondaUrl) {                                  // vídeo longo: picos calculados pelo servidor (baixar 600 MB aqui travaria)
+        const resp = await fetch(S.ondaUrl, { credentials: "same-origin" });
+        const dados = await resp.json().catch(() => ({}));
+        if (!resp.ok || !Array.isArray(dados.picos) || !dados.picos.length) throw new Error(dados.erro || `HTTP ${resp.status}`);
+        if (ficha !== S.ficha) return;
+        S.picos = Float32Array.from(dados.picos); S.picosFalhou = false;
+        desenharTudo();
+        return;
+      }
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) throw new Error("sem AudioContext");
       const resp = await fetch(S.src);
@@ -317,10 +352,15 @@ const TLUI = (() => {
 
   // ------------------------------------------------------------ API para o editor
   return {
-    abrir(src, trechos) {
+    /* `extra` (vídeo longo): { ondaUrl, marcas: [{n, a, b, titulo}], zoomMax } */
+    abrir(src, trechos, extra) {
       S.ficha += 1;
+      extra = extra || {};
       Object.assign(S, { dur: 0, pecas: [], hist: tlHistNovo([{ a: 0, b: 1, keep: true }]), zoom: 1, picos: null, picosFalhou: false,
-                         quadros: [], totalQuadros: 0, src, pendente: trechos || null });
+                         quadros: [], totalQuadros: 0, src, pendente: trechos || null,
+                         ondaUrl: extra.ondaUrl || "", marcas: extra.marcas || [] });
+      $("tl-zoom").max = String(extra.zoomMax || 8);
+      $("tl-marcas").replaceChildren();
       $("tl-zoom").value = "1";
       $("tl-info").dataset.aviso = "";
       rolagem.scrollLeft = 0;
@@ -331,8 +371,21 @@ const TLUI = (() => {
       $("tl-desfazer").disabled = true; $("tl-refazer").disabled = true;
       atualizarInfo();
     },
-    fechar() { S.ficha += 1; S.src = ""; if (S.rAF) { cancelAnimationFrame(S.rAF); S.rAF = 0; } },
+    fechar() { S.ficha += 1; S.src = ""; S.aoMudar = null; if (S.rAF) { cancelAnimationFrame(S.rAF); S.rAF = 0; } },
     pronto,
+    duracao() { return S.dur; },
+    aoMudar(fn) { S.aoMudar = fn; },
+    irPara(t) { if (!pronto()) return; video.currentTime = Math.min(Math.max(t, 0), S.dur); atualizarCursor(); atualizarPecas();
+                const x = (video.currentTime / S.dur) * conteudo.clientWidth;               // traz o cursor para a parte visível
+                if (x < rolagem.scrollLeft || x > rolagem.scrollLeft + rolagem.clientWidth) rolagem.scrollLeft = Math.max(0, x - rolagem.clientWidth / 2); },
+    /* fração (0 a 1) do intervalo que continua no vídeo */
+    fracaoMantida(a, b) { return pronto() ? tlFracaoMantida(S.pecas, a, b) : 1; },
+    /* exclui o intervalo (se estiver mais mantido que excluído) ou o restaura; false se não puder (mínimo de 1 s, limite de trechos) */
+    alternarIntervalo(a, b) {
+      if (!pronto()) return false;
+      const novo = tlMarcarIntervalo(S.pecas, a, b, tlFracaoMantida(S.pecas, a, b) < 0.5);
+      return aplicar(novo);
+    },
     /* trechos mantidos para o servidor (null = corte inteiro) */
     trechos() { return pronto() ? tlTrechos(S.pecas) : null; },
   };

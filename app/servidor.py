@@ -46,7 +46,7 @@ PORTA_PADRAO = 8765
 MODOS = {"ia": "Narração por IA", "gameplay": "Gameplay / Streamer", "original": "Áudio original"}
 LAYOUTS = {"cam", "fit", "clipflow"}
 FUNDOS = {"blur", "black"}
-RECURSOS = ["edicao", "linha_do_tempo", "canais", "monitor_lives", "titulo_editavel", "video_longo"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
+RECURSOS = ["edicao", "linha_do_tempo", "canais", "monitor_lives", "titulo_editavel", "video_longo", "videos_longos"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
 RE_SLUG = re.compile(r"^[a-z0-9_-]{1,40}$")
 CAM_ALTURA_MIN, CAM_ALTURA_MAX, CAM_ALTURA_PADRAO = 300, 1100, 600
 ORDENS = ("cam_primeiro", "game_primeiro")
@@ -56,6 +56,10 @@ TITULO_MAX = 60            # caracteres do título/pergunta da tarja (igual ao g
 SUGERIR_TIMEOUT_S = 75     # tempo máximo esperando as sugestões de título
 TRECHOS_TOTAL_MIN_S = 1.0
 LONGO_MIN_MIN, LONGO_MAX_MIN = 4, 12     # duração do vídeo longo, em minutos (igual ao pacote longos/)
+LONGO_TITULO_MAX = 100                   # caracteres do título do vídeo longo (igual ao pacote longos/)
+ONDA_PONTOS = 2400                       # picos da onda do áudio que a linha do tempo desenha
+ONDA_TIMEOUT_S = 600
+MAX_TRANSCRICAO = 8000                   # texto falado de um vídeo longo mostrado no card
 MAX_LINHAS_LOG = 20000
 MAX_CORPO = 64 * 1024
 RE_URL = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
@@ -192,6 +196,11 @@ class Estado:
         self.saida = self.raiz / "cortes_prontos"
         self.descartados = self.saida / "_descartados"
         self.saida_longos = self.raiz / "videos_longos"       # vídeos longos (horizontais) gerados com a opção "vídeo longo"
+        self.brutos_longos = self.saida_longos / "_brutos"    # o bruto de cada vídeo longo (cada edição parte dele)
+        self.edicoes_longos = self.saida_longos / "_edicoes"
+        self.descartados_longos = self.saida_longos / "_descartados"
+        self.arquivo_status_longos = self.saida_longos / "_status.json"
+        self.cache_longos = self.saida_longos / "_cache"      # onda do áudio já calculada
         self.arquivo_status = self.saida / "_status.json"
         self.logs = APP_DIR / "logs"
         self.layouts = self.raiz / "layouts_salvos"
@@ -205,14 +214,15 @@ class Estado:
         self.trava = threading.Lock()          # protege self.job e o arquivo de status
 
     # ---- cortes
-    def _status(self):
-        return ler_json(self.arquivo_status)
+    def _status(self, arquivo=None):
+        return ler_json(arquivo or self.arquivo_status)
 
-    def _gravar_status(self, dados):
-        self.saida.mkdir(parents=True, exist_ok=True)
-        tmp = self.arquivo_status.with_suffix(".tmp")
+    def _gravar_status(self, dados, arquivo=None):
+        arquivo = arquivo or self.arquivo_status
+        arquivo.parent.mkdir(parents=True, exist_ok=True)
+        tmp = arquivo.with_suffix(".tmp")
         tmp.write_text(json.dumps(dados, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self.arquivo_status)
+        tmp.replace(arquivo)
 
     def listar_cortes(self):
         if not self.saida.is_dir():
@@ -385,13 +395,20 @@ class Estado:
         params = {"modo": "edicao", "url": nome}
         return self._lancar(comando, {}, params, f"▶ Renderizando de novo: {nome}")
 
-    def sugerir_titulos(self, nome):
-        """Pede à IA (gerar_cortes.py --sugerir-titulos) alternativas de título para o corte. Levanta ValueError com a mensagem."""
+    def sugerir_titulos(self, nome, biblioteca="cortes"):
+        """Pede à IA (gerar_cortes.py --sugerir-titulos) alternativas de título para o corte. Levanta ValueError com a mensagem.
+
+        `biblioteca="longos"`: títulos para um vídeo longo (a IA lê os momentos dele).
+        """
+        longos = biblioteca == "longos"
         nome = so_nome_de_arquivo(nome)
-        if nome is None or self.caminho_corte(nome) is None:
-            raise ValueError("Corte não encontrado.")
-        meta = ler_json((self.saida / nome).with_suffix(".json"))
-        if not str(meta.get("transcricao") or "").strip():
+        if nome is None or (self.caminho_longo(nome, bruto=True) if longos else self.caminho_corte(nome)) is None:
+            raise ValueError("Vídeo longo não encontrado." if longos else "Corte não encontrado.")
+        meta = ler_json(((self.saida_longos if longos else self.saida) / nome).with_suffix(".json"))
+        if longos:
+            if not meta.get("momentos"):
+                raise ValueError("Este vídeo longo não tem os momentos guardados, então não dá para sugerir títulos.")
+        elif not str(meta.get("transcricao") or "").strip():
             raise ValueError("Este corte não tem a transcrição guardada, então não dá para sugerir títulos.")
         if not chave_groq_configurada(self.raiz):
             raise ValueError("Falta a chave do Groq: coloque GROQ_API_KEY no arquivo .env para a IA sugerir títulos.")
@@ -401,7 +418,8 @@ class Estado:
         env.update({"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"})
         kwargs = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform.startswith("win") else {}
         try:
-            r = subprocess.run([self.python, str(self.raiz / "gerar_cortes.py"), "--sugerir-titulos", nome], cwd=str(self.raiz),
+            r = subprocess.run([self.python, str(self.raiz / "gerar_cortes.py"), "--sugerir-titulos", nome,
+                                "--biblioteca", "longos" if longos else "cortes"], cwd=str(self.raiz),
                                env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
                                errors="replace", timeout=SUGERIR_TIMEOUT_S, **kwargs)
         except subprocess.TimeoutExpired:
@@ -417,12 +435,216 @@ class Estado:
                 limpos = []
                 for i in itens if isinstance(itens, list) else []:
                     if isinstance(i, dict) and isinstance(i.get("titulo"), str) and i["titulo"].strip():
-                        limpos.append({"titulo": i["titulo"].strip()[:TITULO_MAX],
+                        limpos.append({"titulo": i["titulo"].strip()[:LONGO_TITULO_MAX if longos else TITULO_MAX],
                                        "pergunta": str(i.get("pergunta") or "").strip()[:TITULO_MAX]})
                 if limpos:
                     return limpos
         motivo = next((l.strip().lstrip("❌ ").strip() for l in reversed((r.stdout or "").splitlines()) if "❌" in l), "")
         raise ValueError(motivo or "A IA não devolveu sugestões agora. Tente de novo em instantes.")
+
+    # ---- vídeos longos (biblioteca própria: videos_longos/, com o mesmo fluxo de edição dos cortes)
+    def listar_longos(self):
+        if not self.saida_longos.is_dir():
+            return []
+        with self.trava:
+            status = self._status(self.arquivo_status_longos)
+        itens = []
+        for arq in self.saida_longos.glob("*.json"):
+            nome = arq.stem + ".mp4"
+            if arq.name.startswith((".", "_")) or so_nome_de_arquivo(nome) is None:
+                continue
+            bruto = self.brutos_longos / nome
+            meta = ler_json(arq)
+            if not bruto.is_file() or meta.get("origem") != "longo":
+                continue
+            visivel = self.saida_longos / nome
+            video = visivel if visivel.is_file() else bruto
+            info = video.stat()
+            edicao = meta.get("edicao") if isinstance(meta.get("edicao"), dict) else {}
+            momentos = []
+            for m in meta.get("momentos") if isinstance(meta.get("momentos"), list) else []:
+                if isinstance(m, dict) and isinstance(m.get("inicio"), (int, float)) and isinstance(m.get("fim"), (int, float)):
+                    momentos.append({"n": m.get("n"), "inicio": m["inicio"], "fim": m["fim"],
+                                     "inicio_video": m.get("inicio_video"), "titulo": str(m.get("titulo") or "")[:80],
+                                     "nota": m.get("nota"), "motivo": str(m.get("motivo") or "")[:80]})
+            resumo = meta.get("resumo_intro")
+            itens.append({
+                "nome": nome, "titulo": str(meta.get("titulo") or "")[:LONGO_TITULO_MAX],
+                "estado": (status.get(nome) or {}).get("estado", "novo"),
+                "bruto": bool(meta.get("bruto")), "editado": edicao.get("estado") == "renderizado",
+                "tem_video_editado": visivel.is_file(),
+                "tamanho_mb": round(info.st_size / 1_048_576, 1),
+                "modificado": datetime.fromtimestamp(max(info.st_mtime, arq.stat().st_mtime)).isoformat(timespec="seconds"),
+                "duracao_s": meta.get("duracao_final_s"), "duracao_bruto_s": meta.get("clip_duration"),
+                "alvo_s": meta.get("alvo_s"), "momentos": momentos, "streamer": str(meta.get("streamer") or "")[:60],
+                "video_url": str(meta.get("video_url") or "")[:300],
+                "resumo": str(resumo.get("texto") or "") if isinstance(resumo, dict) else "",
+                "resumo_motivo": str(meta.get("resumo_motivo") or ""),
+                "cta": isinstance(meta.get("cta_final"), dict), "cta_motivo": str(meta.get("cta_motivo") or ""),
+                "selecao": meta.get("selecao") if isinstance(meta.get("selecao"), dict) else None,
+                "transcricao": str(meta.get("transcricao") or "")[:MAX_TRANSCRICAO],
+                "edicao": edicao or None, "ordem": max(info.st_mtime, arq.stat().st_mtime),
+            })
+        itens.sort(key=lambda c: c.pop("ordem"), reverse=True)
+        return itens
+
+    def caminho_longo(self, nome, bruto=False):
+        """Arquivo de vídeo de um vídeo longo: o editado (se já houve edição) ou o bruto; `bruto=True` só o bruto."""
+        nome = so_nome_de_arquivo(nome)
+        if nome is None:
+            return None
+        candidatos = [self.brutos_longos / nome] if bruto else [self.saida_longos / nome, self.brutos_longos / nome]
+        for caminho in candidatos:
+            caminho = caminho.resolve()
+            if caminho.parent in (self.saida_longos.resolve(), self.brutos_longos.resolve()) and caminho.is_file():
+                return caminho
+        return None
+
+    @staticmethod
+    def _mover_sem_sobrescrever(origem, pasta):
+        pasta.mkdir(parents=True, exist_ok=True)
+        destino = pasta / origem.name
+        if destino.exists():
+            destino = pasta / f"{origem.stem}_{int(time.time())}{origem.suffix}"
+        shutil.move(str(origem), str(destino))
+
+    def acao_longo(self, nome, acao):
+        """Aprovar, desfazer a aprovação ou descartar (move para _descartados; nada é apagado)."""
+        nome = so_nome_de_arquivo(nome)
+        if nome is None or self.caminho_longo(nome, bruto=True) is None:
+            return False, "Vídeo longo não encontrado."
+        with self.trava:
+            status = self._status(self.arquivo_status_longos)
+            if acao == "aprovar":
+                status[nome] = {"estado": "aprovado", "quando": agora()}
+            elif acao == "desfazer":
+                status.pop(nome, None)
+            elif acao == "descartar":
+                for origem in (self.saida_longos / nome, (self.saida_longos / nome).with_suffix(".json")):
+                    if origem.is_file():
+                        self._mover_sem_sobrescrever(origem, self.descartados_longos)
+                self._mover_sem_sobrescrever(self.brutos_longos / nome, self.descartados_longos / "_brutos")
+                status.pop(nome, None)
+            else:
+                return False, "Ação inválida."
+            self._gravar_status(status, self.arquivo_status_longos)
+        return True, "ok"
+
+    @staticmethod
+    def validar_opcoes_longo(dados):
+        """Opções de edição de um vídeo longo vindas da tela -> dict limpo (o gerar_cortes.py valida de novo)."""
+        if not isinstance(dados, dict):
+            raise ValueError("Opções inválidas.")
+        opcoes = {}
+        for chave in ("legenda", "capitulos", "resumo", "cta"):
+            valor = dados.get(chave, True)
+            if not isinstance(valor, bool):
+                raise ValueError("Opção inválida.")
+            opcoes[chave] = valor
+        trechos = Estado._trechos_limpos(dados.get("trechos"))
+        if trechos:
+            opcoes["trechos"] = trechos
+        titulo = dados.get("titulo")
+        if titulo is not None:
+            if not isinstance(titulo, str):
+                raise ValueError("Título inválido.")
+            titulo = " ".join("".join(c for c in titulo if ord(c) >= 32 and ord(c) != 127).split())[:LONGO_TITULO_MAX].strip()
+            if titulo:
+                opcoes["titulo"] = titulo
+        return opcoes
+
+    def iniciar_edicao_longo(self, dados):
+        """Renderiza de novo um vídeo longo a partir do bruto (gerar_cortes.py --renderizar --biblioteca longos). (job, erro)."""
+        nome = so_nome_de_arquivo(dados.get("nome"))
+        if nome is None or self.caminho_longo(nome, bruto=True) is None:
+            raise ValueError("Vídeo longo não encontrado.")
+        if ler_json((self.saida_longos / nome).with_suffix(".json")).get("origem") != "longo":
+            raise ValueError("Os dados deste vídeo longo não foram encontrados (.json).")
+        opcoes = self.validar_opcoes_longo(dados.get("opcoes"))
+        if not (self.raiz / "gerar_cortes.py").is_file():
+            raise ValueError("gerar_cortes.py não encontrado na pasta do projeto.")
+        with self.trava:
+            if self.job and self.job.estado == "rodando":
+                return None, "Já existe uma execução em andamento."
+        self.edicoes_longos.mkdir(parents=True, exist_ok=True)
+        arquivo = self.edicoes_longos / f"{Path(nome).stem}.json"
+        tmp = arquivo.with_suffix(".tmp")
+        tmp.write_text(json.dumps(opcoes, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(arquivo)
+        comando = [self.python, str(self.raiz / "gerar_cortes.py"), "--renderizar", nome, "--biblioteca", "longos"]
+        return self._lancar(comando, {}, {"modo": "edicao", "url": nome}, f"▶ Renderizando de novo o vídeo longo: {nome}")
+
+    def iniciar_longo_da_live(self, dados):
+        """Junta num vídeo longo os melhores cortes que o monitor já fez de um canal da lista. Levanta ValueError; devolve (job, erro)."""
+        canal = next((c for c in self.canais.listar() if c["id"] == str(dados.get("id") or "")), None)
+        if canal is None:
+            raise ValueError("Esse canal não está na lista de canais permitidos.")
+        if canal.get("situacao") != "ativo":
+            raise ValueError("Esse canal está suspenso: a permissão para usar os cortes dele acabou. Reative-o na lista.")
+        minutos = dados.get("minutos")
+        if isinstance(minutos, bool) or not isinstance(minutos, int) or not LONGO_MIN_MIN <= minutos <= LONGO_MAX_MIN:
+            raise ValueError(f"O vídeo longo deve ter de {LONGO_MIN_MIN} a {LONGO_MAX_MIN} minutos.")
+        horas = dados.get("horas")
+        if horas is not None and (isinstance(horas, bool) or not isinstance(horas, int) or not 1 <= horas <= 24 * 30):
+            raise ValueError("Período inválido: use de 1 hora a 30 dias, ou todos os cortes.")
+        if not (self.raiz / "gerar_cortes.py").is_file():
+            raise ValueError("gerar_cortes.py não encontrado na pasta do projeto.")
+        comando = [self.python, "-u", str(self.raiz / "gerar_cortes.py"), "--longo-da-live", f"{canal['plataforma']}:{canal['canal']}",
+                   "--video-longo", str(minutos)]
+        if horas:
+            comando += ["--live-horas", str(horas)]
+        params = {"modo": "longo_live", "url": canal.get("url_live") or canal["canal"], "video_longo": minutos}
+        return self._lancar(comando, {}, params, f"▶ Montando o vídeo longo ({minutos} min) com os cortes de {canal.get('nome') or canal['canal']}")
+
+    def caminho_ffmpeg(self):
+        """ffmpeg para o que o servidor mesmo precisa fazer (a onda do áudio): bin/ffmpeg.exe ou o do PATH; None se não houver."""
+        local = self.raiz / "bin" / "ffmpeg.exe"
+        return str(local) if local.is_file() else shutil.which("ffmpeg")
+
+    def onda_longo(self, nome):
+        """Picos (0 a 1) do áudio do bruto, para a linha do tempo desenhar a onda sem baixar o arquivo inteiro no navegador."""
+        import array
+        bruto = self.caminho_longo(nome, bruto=True)
+        if bruto is None:
+            raise ValueError("Vídeo longo não encontrado.")
+        estado = bruto.stat()
+        cache = self.cache_longos / f"{bruto.stem}.onda.json"
+        guardado = ler_json(cache)
+        if guardado.get("tamanho") == estado.st_size and guardado.get("mtime") == int(estado.st_mtime) \
+                and isinstance(guardado.get("picos"), list) and guardado["picos"]:
+            return guardado["picos"]
+        ffmpeg = self.caminho_ffmpeg()
+        if not ffmpeg:
+            raise ValueError("ffmpeg não encontrado: não dá para desenhar a onda do áudio (o vídeo continua editável).")
+        kwargs = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform.startswith("win") else {}
+        try:
+            r = subprocess.run([ffmpeg, "-v", "error", "-i", str(bruto), "-vn", "-ac", "1", "-ar", "2000", "-f", "s16le", "-"],
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=ONDA_TIMEOUT_S, **kwargs)
+        except subprocess.TimeoutExpired:
+            raise ValueError("Ler o áudio demorou demais.")
+        except OSError as e:
+            raise ValueError(f"Não foi possível ler o áudio: {e}")
+        amostras = array.array("h")
+        amostras.frombytes(r.stdout[: len(r.stdout) // 2 * 2])
+        if sys.byteorder == "big":
+            amostras.byteswap()
+        if r.returncode != 0 or not len(amostras):
+            raise ValueError("Não foi possível ler o áudio deste vídeo.")
+        por = max(1, len(amostras) // ONDA_PONTOS)
+        brutos = []
+        for i in range(ONDA_PONTOS):
+            parte = amostras[i * por:(i + 1) * por]
+            brutos.append(max(map(abs, parte)) if len(parte) else 0)
+        maximo = max(brutos) or 1
+        picos = [round(math.sqrt(p / maximo), 3) for p in brutos]              # raiz: mostra melhor o que é baixo
+        try:
+            self.cache_longos.mkdir(parents=True, exist_ok=True)
+            tmp = cache.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"tamanho": estado.st_size, "mtime": int(estado.st_mtime), "picos": picos}), encoding="utf-8")
+            tmp.replace(cache)
+        except OSError:
+            pass                                                                # sem cache só recalcula na próxima
+        return picos
 
     # ---- layouts salvos (editor de layout)
     def listar_layouts(self):
@@ -794,6 +1016,13 @@ class Manipulador(BaseHTTPRequestHandler):
             return self._json({"cortes": self.estado.listar_cortes()})
         if caminho == "/api/layouts":
             return self._json({"layouts": self.estado.listar_layouts()})
+        if caminho == "/api/longos":
+            return self._json({"longos": self.estado.listar_longos()})
+        if caminho == "/api/longos/onda":
+            try:
+                return self._json({"picos": self.estado.onda_longo((consulta.get("nome") or [""])[0])})
+            except ValueError as e:
+                return self._erro(400, str(e))
         if caminho == "/api/canais":
             return self._json({"canais": self.estado.canais.listar(), "plataformas": list(PLATAFORMAS), "maximo": modulo_canais.MAX_CANAIS,
                                "layouts": [{"slug": l["slug"], "nome": l["nome"]} for l in self.estado.listar_layouts()]})
@@ -809,7 +1038,8 @@ class Manipulador(BaseHTTPRequestHandler):
         if caminho == "/api/log":
             return self._log(consulta)
         if caminho == "/video":
-            return self._video((consulta.get("nome") or [""])[0], bruto=(consulta.get("bruto") or [""])[0] == "1")
+            return self._video((consulta.get("nome") or [""])[0], bruto=(consulta.get("bruto") or [""])[0] == "1",
+                               longo=(consulta.get("lib") or [""])[0] == "longos")
         return self._erro(404, "Não encontrado.")
 
     def do_POST(self):
@@ -831,9 +1061,10 @@ class Manipulador(BaseHTTPRequestHandler):
                 return self._json({"canal": self.estado.salvar_canal(dados)}, 201)
             except ValueError as e:
                 return self._erro(400, str(e))
-        if caminho == "/api/cortes/titulos":
+        if caminho in ("/api/cortes/titulos", "/api/longos/titulos"):
             try:
-                return self._json({"titulos": self.estado.sugerir_titulos(dados.get("nome"))})
+                return self._json({"titulos": self.estado.sugerir_titulos(
+                    dados.get("nome"), "longos" if caminho.startswith("/api/longos") else "cortes")})
             except ValueError as e:
                 return self._erro(400, str(e))
         if caminho == "/api/canais/ativo":
@@ -856,6 +1087,14 @@ class Manipulador(BaseHTTPRequestHandler):
                 return self._json({"live": self.estado.lives.iniciar(dados.get("id"))}, 201)
             except ValueError as e:
                 return self._erro(409, str(e))
+        if caminho == "/api/lives/longo":
+            try:
+                job, erro = self.estado.iniciar_longo_da_live(dados)
+            except ValueError as e:
+                return self._erro(400, str(e))
+            if erro:
+                return self._erro(409, erro)
+            return self._json({"job": job.publico()}, 201)
         if caminho == "/api/lives/parar":
             return self._json({"parando": True}) if self.estado.lives.parar(dados.get("id")) else self._erro(404, "Esse canal não está sendo monitorado agora.")
         if caminho == "/api/lives/pausar":
@@ -867,9 +1106,9 @@ class Manipulador(BaseHTTPRequestHandler):
                 return self._erro(409, str(e))
         if caminho == "/api/layouts/apagar":
             return self._json({"ok": True}) if self.estado.apagar_layout(dados.get("slug")) else self._erro(404, "Layout não encontrado.")
-        if caminho == "/api/cortes/editar":
+        if caminho in ("/api/cortes/editar", "/api/longos/editar"):
             try:
-                job, erro = self.estado.iniciar_edicao(dados)
+                job, erro = (self.estado.iniciar_edicao_longo if caminho.startswith("/api/longos") else self.estado.iniciar_edicao)(dados)
             except ValueError as e:
                 return self._erro(400, str(e))
             if erro:
@@ -885,6 +1124,9 @@ class Manipulador(BaseHTTPRequestHandler):
             return self._json({"job": job.publico()}, 201)
         if caminho == "/api/parar":
             return self._json({"parando": self.estado.parar()})
+        if caminho == "/api/longos/acao":
+            ok, msg = self.estado.acao_longo(dados.get("nome"), dados.get("acao"))
+            return self._json({"ok": True}) if ok else self._erro(400, msg)
         if caminho == "/api/cortes/acao":
             ok, msg = self.estado.acao_corte(dados.get("nome"), dados.get("acao"))
             return self._json({"ok": True}) if ok else self._erro(400, msg)
@@ -941,8 +1183,11 @@ class Manipulador(BaseHTTPRequestHandler):
         linhas, proximo = job.desde(indice)
         self._json({"linhas": linhas, "proximo": proximo, "job": job.publico()})
 
-    def _video(self, nome, bruto=False):
-        caminho = self.estado.caminho_bruto(nome) if bruto else self.estado.caminho_corte(nome)
+    def _video(self, nome, bruto=False, longo=False):
+        if longo:
+            caminho = self.estado.caminho_longo(nome, bruto=bruto)
+        else:
+            caminho = self.estado.caminho_bruto(nome) if bruto else self.estado.caminho_corte(nome)
         if caminho is None:
             return self._erro(404, "Vídeo não encontrado.")
         tamanho = caminho.stat().st_size

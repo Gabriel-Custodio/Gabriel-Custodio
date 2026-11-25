@@ -59,6 +59,9 @@ def _apagar(*caminhos):
 def montar_bruto(origem, escolhidos, destino, pasta_temp, ffmpeg, executar, medir_duracao, log=print):
     """Corta os `escolhidos` de `origem` e junta em `destino` (o bruto). Devolve um dict ou None se falhar.
 
+    Um escolhido com `arquivo` (cortes de uma live) vem inteiro desse arquivo, não de `origem`: o `start`/`end` dele são
+    só a posição na live (usada na escolha), e a legenda dele (`segmentos`) já é relativa ao começo do arquivo.
+
     O dict traz `momentos` (cada um com seu início/fim no vídeo base E na linha do tempo do vídeo longo,
     medidos nos arquivos de verdade) e `duracao_s`. Um momento que falhar é pulado; com menos de 2 sobrando, falha.
     O destino só aparece quando o arquivo está completo.
@@ -74,11 +77,17 @@ def montar_bruto(origem, escolhidos, destino, pasta_temp, ffmpeg, executar, medi
     pedacos, momentos, cursor = [], [], 0.0
     total = len(escolhidos)
     for numero, cand in enumerate(escolhidos, 1):
-        inicio, fim = float(cand["start"]), float(cand["end"])
-        duracao = fim - inicio
+        fonte = cand.get("arquivo")
+        if fonte:
+            inicio, duracao = 0.0, float(cand.get("duration") or (float(cand["end"]) - float(cand["start"])))
+        else:
+            inicio = float(cand["start"])
+            duracao = float(cand["end"]) - inicio
+        fim = inicio + duracao
         arquivo = pasta_temp / f"longo_momento_{numero:03d}.mp4"
-        log(f"   ✂️  Momento {numero}/{total}: {inicio:.1f}s - {fim:.1f}s ({duracao:.1f}s)")
-        ok, _, erro = executar(comando_momento(ffmpeg, origem, inicio, duracao, arquivo), timeout=TIMEOUT_MOMENTO_S)
+        log(f"   ✂️  Momento {numero}/{total}: {inicio:.1f}s - {fim:.1f}s ({duracao:.1f}s)"
+            + (f" de {Path(fonte).name}" if fonte else ""))
+        ok, _, erro = executar(comando_momento(ffmpeg, fonte or origem, inicio, duracao, arquivo), timeout=TIMEOUT_MOMENTO_S)
         if not ok or not arquivo.is_file() or arquivo.stat().st_size < 1024:
             log(f"   ⚠️  Momento {numero} pulado (falha ao cortar): {str(erro)[:200]}")
             _apagar(arquivo)
@@ -93,6 +102,9 @@ def montar_bruto(origem, escolhidos, destino, pasta_temp, ffmpeg, executar, medi
             "titulo": cand.get("hook_title") or "", "faixa_do_video": cand.get("band"),
             "fonte_nota": cand.get("fonte"),
         })
+        if fonte:                                                # corte de live: guarda de onde veio (e a legenda dele, tirada depois)
+            momentos[-1].update({"arquivo": Path(fonte).name, "detectado_em": cand.get("detectado_em"),
+                                 "segmentos": cand.get("segmentos") or []})
         cursor += real
 
     lista = pasta_temp / "longo_lista.txt"
@@ -139,7 +151,7 @@ def legenda_dos_momentos(segmentos, momentos):
         a, b = momento["inicio_video"], momento["fim_video"]
         deslocamento = momento["inicio"] - a
         comprimento = momento["duracao"]
-        for seg in segmentos or []:
+        for seg in momento["segmentos"] if momento.get("segmentos") is not None else (segmentos or []):
             if seg["end"] <= a or seg["start"] >= b:
                 continue
             inicio = max(seg["start"], a) + deslocamento
@@ -159,15 +171,21 @@ def legenda_dos_momentos(segmentos, momentos):
 
 
 def metadados(momentos, segmentos, duracao_s, alvo_s, resumo, url=None, video_id=None, streamer=None,
-              fonte_resolucao=None, agora=None):
-    """O .json do vídeo longo (ao lado do bruto, em videos_longos/NOME.json). O editor lê `bruto` e `legenda_segmentos`."""
+              fonte_resolucao=None, agora=None, extra=None):
+    """O .json do vídeo longo (ao lado do bruto, em videos_longos/NOME.json). O editor lê `bruto` e `legenda_segmentos`.
+
+    `extra`: campos a mais (ex.: de onde vieram os momentos). Momentos com `segmentos` próprios (cortes de live) usam a legenda deles.
+    """
     textos = []
     for momento in momentos:
-        trecho = " ".join(s["text"].strip() for s in segmentos or []
+        proprios = momento["segmentos"] if momento.get("segmentos") is not None else segmentos
+        trecho = " ".join(s["text"].strip() for s in proprios or []
                           if s["end"] > momento["inicio_video"] and s["start"] < momento["fim_video"] and s.get("text"))
         textos.append(trecho)
+    legenda = legenda_dos_momentos(segmentos, momentos)
+    momentos = [{k: v for k, v in m.items() if k != "segmentos"} for m in momentos]
     nome = f"Melhores momentos de {streamer}" if streamer else "Melhores momentos"
-    return {
+    dados = {
         "origem": "longo", "formato": FORMATO, "bruto": True, "edicao": {"estado": "bruto"},
         "titulo": nome, "streamer": streamer or None,
         "largura": LARGURA, "altura": ALTURA, "fps": FPS,
@@ -177,6 +195,8 @@ def metadados(momentos, segmentos, duracao_s, alvo_s, resumo, url=None, video_id
         "selecao": {k: resumo.get(k) for k in ("elegiveis", "escolhidos", "curto", "motivo")},
         "transcricao": " ".join(t for t in textos if t),
         "transcricao_fonte": "transcrição real dos momentos escolhidos",
-        "legenda_segmentos": legenda_dos_momentos(segmentos, momentos),
+        "legenda_segmentos": legenda,
         "timestamp": (agora or datetime.now()).isoformat(),
     }
+    dados.update(extra or {})
+    return dados

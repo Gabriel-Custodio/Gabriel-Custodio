@@ -96,6 +96,43 @@ function tlAparar(base, lado, t) {
   return tlLimparPontas(novo);
 }
 
+/* junta peças vizinhas que estão no mesmo estado (mantidas ou excluídas) */
+function tlJuntar(pecas) {
+  const out = [];
+  for (const p of tlCopiar(pecas)) {
+    const ult = out[out.length - 1];
+    if (ult && ult.keep === p.keep) ult.b = p.b;
+    else out.push(p);
+  }
+  return out;
+}
+
+/* Marca o intervalo [a, b] inteiro como mantido (keep=true) ou excluído (keep=false) -- é o "excluir/restaurar momento" dos
+   vídeos longos. null se o resultado ficasse curto demais ou com trechos demais. */
+function tlMarcarIntervalo(pecas, a, b, keep) {
+  const dur = pecas[pecas.length - 1].b;
+  a = Math.max(0, a); b = Math.min(dur, b);
+  if (b - a < TL_EPS) return null;
+  let novo = tlCortarEm(tlCortarEm(pecas, a), b);
+  for (const p of novo) if (p.a >= a - TL_EPS && p.b <= b + TL_EPS) p.keep = keep;
+  novo = tlJuntar(novo);
+  if (tlDuracao(novo) < TL_MIN_TOTAL - TL_EPS) return null;
+  const trechos = tlTrechos(novo);
+  if (trechos && trechos.length > TL_MAX_TRECHOS) return null;
+  return novo;
+}
+
+/* Fração (0 a 1) do intervalo [a, b] que está mantida */
+function tlFracaoMantida(pecas, a, b) {
+  if (b - a <= TL_EPS) return 0;
+  let mantido = 0;
+  for (const p of pecas) {
+    if (!p.keep) continue;
+    mantido += Math.max(0, Math.min(p.b, b) - Math.max(p.a, a));
+  }
+  return mantido / (b - a);
+}
+
 /* Se t cair numa peça excluída, devolve onde o vídeo deve continuar (início da próxima peça mantida); null = fim */
 function tlProximoMantido(pecas, t) {
   const i = tlPecaEm(pecas, t);

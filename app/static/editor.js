@@ -9,6 +9,8 @@ const ED_MIN_LARGURA = 0.05;                       // caixa nunca menor que 5% d
 let ED_Z = 10;
 
 const ED = {
+  lib: "cortes",                                   // "cortes" (vertical, caixas) ou "longos" (vídeo longo horizontal)
+  momentos: [],                                    // vídeo longo: os momentos (para a lista ao lado da linha do tempo)
   corte: null,                                     // o corte que está sendo editado (objeto da lista)
   cam: { x: 0.74, y: 0.35, w: 0.24, h: 0.2 },
   game: { x: 0.2, y: 0, w: 0.5, h: 1 },
@@ -24,6 +26,15 @@ const edCanvas = $("ed-retrato");
 const edCtx = edCanvas.getContext("2d");
 const edDlg = $("dlg-editar");
 const edVideo = $("ed-video");
+
+const edLongo = () => ED.lib === "longos";
+const edApi = (acao) => `/api/${edLongo() ? "longos" : "cortes"}/${acao}`;
+
+/* Mostra só o que vale para o tipo de vídeo: data-so="curto" (cortes verticais) ou data-so="longo" (vídeo longo horizontal) */
+function edModo(lib) {
+  ED.lib = lib;
+  for (const el of document.querySelectorAll("[data-so]")) el.hidden = el.dataset.so !== (lib === "longos" ? "longo" : "curto");
+}
 
 function edErro(msg) { $("ed-erro").textContent = msg || ""; $("ed-erro").hidden = !msg; }
 function edEstado(msg) { $("ed-estado").textContent = msg || ""; $("ed-estado").hidden = !msg; }
@@ -241,6 +252,7 @@ $("ed-legenda").addEventListener("change", edAtualizar);
 const edLayout = () => document.querySelector('input[name="ed-layout"]:checked').value;
 
 function edMostrarLayout() {
+  if (edLongo()) return;                                    // o vídeo longo não tem layout: é sempre a tela inteira, na horizontal
   const empilhado = edLayout() === "empilhado";
   $("ed-caixas").hidden = !empilhado;
   $("ed-inteiro-info").hidden = empilhado;
@@ -291,11 +303,13 @@ function edMarcar(nome, valor) {
   if (el) el.checked = true;
 }
 
-function edAbrir(corte) {
+function edAbrir(corte, lib = "cortes") {
+  edModo(lib);
   ED.corte = corte;
   edErro(""); edEstado("");
   $("ed-log").hidden = true;
   $("ed-log").textContent = "";
+  if (edLongo()) { edAbrirLongo(corte); return; }
   $("dlg-titulo").textContent = `Editar: ${corte.titulo || corte.nome}`;
   const op = corte.edicao && corte.edicao.opcoes;           // opções da última edição (se houve)
   edTituloAbrir(corte);
@@ -327,6 +341,65 @@ function edAbrir(corte) {
   if (typeof edDlg.showModal === "function") edDlg.showModal(); else edDlg.setAttribute("open", "");
 }
 
+/* Vídeo longo: sem quadro nem caixas; a linha do tempo mostra um marcador por momento e a onda do áudio vem do servidor */
+function edAbrirLongo(v) {
+  const op = v.edicao && v.edicao.opcoes;
+  $("dlg-titulo").textContent = `Editar vídeo longo: ${v.titulo || v.nome}`;
+  edTituloAbrir(v);
+  $("ed-legenda").checked = op ? op.legenda : true;
+  $("ed-capitulos").checked = op ? op.capitulos : true;
+  $("ed-resumo").checked = op ? op.resumo : true;
+  $("ed-cta").checked = op ? op.cta : true;
+  $("ed-renderizar").disabled = false;
+  ED.momentos = (v.momentos || []).filter((m) => typeof m.inicio === "number" && typeof m.fim === "number");
+  const nome = encodeURIComponent(v.nome);
+  const src = `/video?nome=${nome}&lib=longos&bruto=1&t=${Date.now()}`;
+  edVideo.onloadedmetadata = null;
+  edVideo.onseeked = null;
+  TLUI.abrir(src, op && op.trechos, {
+    ondaUrl: `/api/longos/onda?nome=${nome}`, zoomMax: 40,
+    marcas: ED.momentos.map((m) => ({ n: m.n, a: m.inicio, b: m.fim, titulo: m.titulo })),
+  });
+  TLUI.aoMudar(edAtualizarMomentos);
+  edVideo.src = src;
+  edDesenharMomentos();
+  if (typeof edDlg.showModal === "function") edDlg.showModal(); else edDlg.setAttribute("open", "");
+}
+
+/* lista de momentos ao lado da linha do tempo: ir até ele, excluir ou restaurar o momento inteiro */
+function edDesenharMomentos() {
+  $("ed-bloco-momentos").hidden = !ED.momentos.length;
+  $("ed-momentos").replaceChildren(...ED.momentos.map((m, i) => {
+    const li = document.createElement("li");
+    const ir = document.createElement("button");
+    ir.type = "button"; ir.className = "btn"; ir.textContent = `Ir · ${tlFormatar(m.inicio)}`;
+    ir.addEventListener("click", () => TLUI.irPara(m.inicio));
+    const txt = document.createElement("span");
+    txt.className = "ed-mom-txt";
+    const nota = typeof m.nota === "number" ? ` (nota ${m.nota.toFixed(1)})` : "";
+    txt.textContent = `${m.n || i + 1}. ${m.titulo || "Momento"}${nota}`;      // texto vindo do servidor: só textContent
+    if (m.motivo) txt.title = m.motivo;
+    const alt = document.createElement("button");
+    alt.type = "button"; alt.className = "btn alternar";
+    alt.addEventListener("click", () => {
+      edErro("");
+      if (!TLUI.alternarIntervalo(m.inicio, m.fim)) edErro("O vídeo precisa ficar com pelo menos 1 segundo (e há um limite de trechos).");
+    });
+    li.append(ir, txt, alt);
+    return li;
+  }));
+  edAtualizarMomentos();
+}
+
+function edAtualizarMomentos() {
+  const itens = $("ed-momentos").children;
+  for (let i = 0; i < itens.length; i++) {
+    const m = ED.momentos[i], fora = TLUI.pronto() && TLUI.fracaoMantida(m.inicio, m.fim) < 0.5;
+    itens[i].classList.toggle("excluido", fora);
+    itens[i].querySelector(".alternar").textContent = fora ? "Restaurar momento" : "Excluir momento";
+  }
+}
+
 function edFechar() {
   edVideo.pause();
   TLUI.fechar();
@@ -338,7 +411,14 @@ edDlg.addEventListener("close", () => { edVideo.pause(); TLUI.fechar(); });
 
 // ---------------------------------------------------------------- título do corte (campo e sugestões da IA)
 function edTituloAbrir(corte) {
-  ED.tituloInicial = corte.titulo || ""; ED.perguntaInicial = corte.pergunta || "";
+  const longo = edLongo();
+  $("ed-titulo-h3").textContent = longo ? "Título do vídeo" : "Título do corte";
+  $("ed-titulo-rotulo").textContent = longo ? "Título (até 100 caracteres)" : "Título (até 60 caracteres)";
+  $("ed-titulo").maxLength = longo ? 100 : 60;
+  $("ed-titulo-ajuda").textContent = longo
+    ? "O título aparece no card do vídeo (e no botão “Copiar título”, para colar ao postar). Escreva o seu ou peça sugestões à IA, que lê só os títulos e os motivos dos momentos. Vale ao clicar em Renderizar de novo."
+    : "O título e a pergunta aparecem na tarja do vídeo (se a tarja estiver ligada) e no card do corte. Escreva o seu ou peça sugestões à IA, que lê só a fala do corte. Vale ao clicar em Renderizar de novo.";
+  ED.tituloInicial = corte.titulo || ""; ED.perguntaInicial = longo ? "" : (corte.pergunta || "");
   $("ed-titulo").value = ED.tituloInicial; $("ed-pergunta").value = ED.perguntaInicial;
   $("ed-sugestoes").replaceChildren();
   $("ed-sug-erro").hidden = true; $("ed-sug-estado").hidden = true;
@@ -378,9 +458,9 @@ $("ed-sugerir").addEventListener("click", async () => {
   if (!nome) return;
   $("ed-sug-erro").hidden = true;
   $("ed-sugerir").disabled = true; $("ed-sugerir").textContent = "Pedindo à IA…";
-  $("ed-sug-estado").textContent = "A IA está lendo a fala do corte"; $("ed-sug-estado").hidden = false;
+  $("ed-sug-estado").textContent = edLongo() ? "A IA está lendo os momentos do vídeo" : "A IA está lendo a fala do corte"; $("ed-sug-estado").hidden = false;
   try {
-    const d = await post("/api/cortes/titulos", { nome });
+    const d = await post(edApi("titulos"), { nome });
     if (!ED.corte || ED.corte.nome !== nome) return;                          // trocou de corte enquanto esperava
     edMostrarSugestoes(d.titulos || []);
   } catch (e) {
@@ -393,6 +473,15 @@ $("ed-sugerir").addEventListener("click", async () => {
 
 // ---------------------------------------------------------------- renderizar de novo
 function edOpcoes() {
+  if (edLongo()) {
+    const lo = { legenda: $("ed-legenda").checked, capitulos: $("ed-capitulos").checked,
+                 resumo: $("ed-resumo").checked, cta: $("ed-cta").checked };
+    const aparado = TLUI.trechos();                           // null = vídeo inteiro
+    if (aparado) lo.trechos = aparado;
+    const t = $("ed-titulo").value.trim();
+    if (t && t !== ED.tituloInicial) lo.titulo = t;
+    return lo;
+  }
   const o = { layout: edLayout(), tarja: $("ed-tarja").checked, legenda: $("ed-legenda").checked,
               resumo: $("ed-resumo").checked, cta: $("ed-cta").checked };
   if (o.layout === "empilhado") {
@@ -409,16 +498,18 @@ function edOpcoes() {
 $("ed-renderizar").addEventListener("click", async () => {
   edErro("");
   if (!TLUI.pronto()) { edErro("Espere o vídeo carregar."); return; }
-  if (edLayout() === "empilhado" && !edImgOk()) { edErro("Espere o quadro carregar."); return; }
+  if (!edLongo() && edLayout() === "empilhado" && !edImgOk()) { edErro("Espere o quadro carregar."); return; }
   $("ed-renderizar").disabled = true;
   try {
-    await post("/api/cortes/editar", { nome: ED.corte.nome, opcoes: edOpcoes() });
+    await post(edApi("editar"), { nome: ED.corte.nome, opcoes: edOpcoes() });
   } catch (e) {
     edErro(e.message);
     $("ed-renderizar").disabled = false;
     return;
   }
-  edEstado("Renderizando… pode levar alguns minutos (o resumo e a chamada final usam voz da IA)");
+  edEstado(edLongo()
+    ? "Renderizando… um vídeo longo leva vários minutos (o andamento aparece abaixo; o resumo e a chamada final usam voz da IA)"
+    : "Renderizando… pode levar alguns minutos (o resumo e a chamada final usam voz da IA)");
   $("ed-log").hidden = false;
   $("ed-log").textContent = "";
   edAcompanhar();
@@ -435,12 +526,19 @@ function edAcompanhar() {
       $("ed-log").textContent = linhas.join("\n");
       $("ed-log").scrollTop = $("ed-log").scrollHeight;
       const job = d.job;
+      if (job && job.estado === "rodando") {                        // "⏳ Renderizando: 35% (4:12 de 12:00)": mostra a porcentagem no selo
+        for (let i = linhas.length - 1; i >= 0; i--) {
+          const m = /⏳ ([^:]+): (\d+)%/.exec(linhas[i]);
+          if (m) { edEstado(`${m[1]}… ${m[2]}%`); break; }
+        }
+      }
       if (!job || job.estado === "rodando") return;
       clearInterval(ED.timer); ED.timer = null;
       $("ed-renderizar").disabled = false;
       if (job.estado === "concluido") {
-        edEstado("Pronto! O corte foi renderizado de novo. Confira e aprove na lista.");
-        await carregarCortes();
+        edEstado(edLongo() ? "Pronto! O vídeo longo foi renderizado de novo. Confira e aprove na lista."
+                           : "Pronto! O corte foi renderizado de novo. Confira e aprove na lista.");
+        await (edLongo() ? carregarLongos() : carregarCortes());
       } else {
         edEstado("");
         edErro(job.estado === "cancelado" ? "A renderização foi cancelada." : "A renderização falhou: o corte continua como estava. Veja o texto abaixo.");

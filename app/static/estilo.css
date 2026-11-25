@@ -239,3 +239,26 @@ input[type="text"], input[type="number"], input[type="date"], select {
 .ed-sugestoes { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
 .ed-sugestoes .btn { width: 100%; text-align: left; font-size: 13px; overflow-wrap: anywhere; }
 .ed-sugestoes .btn.escolhido { border-color: var(--ok); color: var(--ok); }
+
+/* ---- vídeos longos (horizontais) */
+.lista.longos { grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr)); }
+.corte.longo video { aspect-ratio: 16 / 9; max-height: 420px; }
+.corte .aviso-selecao { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.lista-momentos { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.lista-momentos li { display: flex; gap: 8px; align-items: baseline; }
+.lista-momentos .btn { padding: 2px 9px; font-size: 12px; flex: none; }
+.lista-momentos span { overflow-wrap: anywhere; }
+
+/* marcadores dos momentos na linha do tempo e lista no editor */
+.tl-marcas { position: absolute; left: 0; right: 0; top: var(--tl-h-regua); bottom: 0; pointer-events: none; }
+.tl-marca { position: absolute; top: 0; bottom: 0; border-left: 2px solid rgba(255, 214, 10, .95); background: rgba(255, 214, 10, .07); }
+.tl-marca-rot { position: absolute; left: 3px; bottom: 2px; font: 700 10px/1.4 system-ui, sans-serif; color: #ffd60a; background: rgba(0, 0, 0, .7); padding: 0 4px; border-radius: 3px; }
+.ed-momentos { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; max-height: 280px; overflow-y: auto; }
+.ed-momentos li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border: 1px solid var(--borda); border-radius: 6px; padding: 6px 10px; }
+.ed-momentos li.excluido { opacity: .6; background: repeating-linear-gradient(45deg, transparent, transparent 8px, rgba(217, 30, 24, .08) 8px, rgba(217, 30, 24, .08) 16px); }
+.ed-momentos .btn { padding: 4px 10px; font-size: 13px; }
+.ed-mom-txt { flex: 1; min-width: 160px; overflow-wrap: anywhere; font-size: 13px; }
+.ed-momentos li.excluido .ed-mom-txt { text-decoration: line-through; }
+.lv-longo { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border-top: 1px dashed var(--borda); padding-top: 8px; }
+.lv-longo select { padding: 4px 8px; font-size: 13px; }
+.lv-longo .btn { padding: 5px 11px; font-size: 13px; }

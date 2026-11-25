@@ -2243,6 +2243,49 @@ def analyze_gameplay_video(segments, video_duration, api_key, num_clips, want_lo
     return clips, scored
 
 
+def _gravar_longo(video_path, escolhidos, resumo, segments, alvo_s, url=None, video_id=None, streamer=None, extra=None):
+    """Monta o bruto do vídeo longo com os `escolhidos` e grava o .json ao lado. Devolve o caminho do .json ou None."""
+    import longos
+    nome = longos.nome_do_video()
+    pasta = Path(longos.PASTA)
+    bruto = pasta / longos.PASTA_BRUTOS / nome
+    montado = longos.montar_bruto(video_path, escolhidos, bruto, TEMP_DIR, FFMPEG.as_posix(), run_cmd,
+                                  get_video_duration, log=print)
+    if not montado:
+        return None
+    meta = longos.metadados(montado["momentos"], segments, montado["duracao_s"], alvo_s, resumo, url=url,
+                            video_id=video_id, streamer=streamer, fonte_resolucao=FONTE_RESOLUCAO, extra=extra)
+    json_path = pasta / (Path(nome).stem + ".json")
+    try:
+        tmp = json_path.with_name(json_path.name + ".tmp")
+        tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(str(tmp), str(json_path))
+    except OSError as erro:
+        print(f"   ❌ Não foi possível salvar os dados do vídeo longo: {erro}")
+        try:
+            bruto.unlink()
+        except OSError:
+            pass
+        return None
+    print(f"✅ Vídeo longo bruto salvo: {bruto} ({montado['duracao_s'] / 60:.1f} min, {len(montado['momentos'])} momentos)")
+    return json_path
+
+
+def _escolher_longo(candidatos, alvo_min, **opcoes):
+    """Escolhe os momentos e conta o que aconteceu (mesmo texto para o vídeo e para a live). (escolhidos, resumo) ou (None, resumo)."""
+    import longos
+    escolhidos, resumo = longos.selecionar(candidatos, alvo_min * 60, **opcoes)
+    print(f"   🧮 {resumo['elegiveis']} momento(s) com nota {longos.NOTA_MINIMA:g} ou mais; "
+          f"{resumo['escolhidos']} escolhido(s), {resumo['total_s'] / 60:.1f} min")
+    if resumo["motivo"]:
+        print(f"   ⚠️  {resumo['motivo']}")
+    if not resumo["viavel"]:
+        return None, resumo
+    for i, c in enumerate(escolhidos, 1):
+        print(f"  {i}. {c['start']:.1f}s - {c['end']:.1f}s ({c['duration']:.1f}s) | Nota: {float(c['score']):.1f} | {c.get('reason', '')}")
+    return escolhidos, resumo
+
+
 def build_long_video(video_path, scored, segments, alvo_min, url=None):
     """Escolhe os momentos, monta o bruto horizontal e grava o .json em videos_longos/. Devolve o .json ou None.
 
@@ -2250,45 +2293,50 @@ def build_long_video(video_path, scored, segments, alvo_min, url=None):
     """
     try:
         import longos
-        alvo_s = alvo_min * 60
         print("\n" + "=" * 60)
         print(f"🎞️  VÍDEO LONGO (horizontal 1920x1080, alvo {alvo_min} min, nota mínima {longos.NOTA_MINIMA:g})")
         print("=" * 60)
-        escolhidos, resumo = longos.selecionar(scored, alvo_s)
-        print(f"   🧮 {resumo['elegiveis']} momento(s) com nota {longos.NOTA_MINIMA:g} ou mais; "
-              f"{resumo['escolhidos']} escolhido(s), {resumo['total_s'] / 60:.1f} min")
-        if resumo["motivo"]:
-            print(f"   ⚠️  {resumo['motivo']}")
-        if not resumo["viavel"]:
+        escolhidos, resumo = _escolher_longo(scored, alvo_min)
+        if escolhidos is None:
             return None
-        for i, c in enumerate(escolhidos, 1):
-            print(f"  {i}. {c['start']:.1f}s - {c['end']:.1f}s ({c['duration']:.1f}s) | Nota: {float(c['score']):.1f} | {c.get('reason', '')}")
-        nome = longos.nome_do_video()
-        pasta = Path(longos.PASTA)
-        bruto = pasta / longos.PASTA_BRUTOS / nome
-        montado = longos.montar_bruto(video_path, escolhidos, bruto, TEMP_DIR, FFMPEG.as_posix(), run_cmd,
-                                      get_video_duration, log=print)
-        if not montado:
-            return None
-        meta = longos.metadados(montado["momentos"], segments, montado["duracao_s"], alvo_s, resumo, url=url,
-                                video_id=HISTORICO.video_key if HISTORICO else None, streamer=STREAMER_NOME,
-                                fonte_resolucao=FONTE_RESOLUCAO)
-        json_path = pasta / (Path(nome).stem + ".json")
-        try:
-            tmp = json_path.with_name(json_path.name + ".tmp")
-            tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(str(tmp), str(json_path))
-        except OSError as erro:
-            print(f"   ❌ Não foi possível salvar os dados do vídeo longo: {erro}")
-            try:
-                bruto.unlink()
-            except OSError:
-                pass
-            return None
-        print(f"✅ Vídeo longo bruto salvo: {bruto} ({montado['duracao_s'] / 60:.1f} min, {len(montado['momentos'])} momentos)")
-        return json_path
+        return _gravar_longo(video_path, escolhidos, resumo, segments, alvo_min * 60, url=url,
+                             video_id=HISTORICO.video_key if HISTORICO else None, streamer=STREAMER_NOME)
     except Exception as erro:                                       # noqa: BLE001 - não pode derrubar os cortes já feitos
         print(f"❌ Vídeo longo: erro inesperado: {erro}")
+        return None
+
+
+def build_long_from_live(canal_ref, alvo_min, horas=None):
+    """--longo-da-live PLATAFORMA:CANAL: junta os melhores cortes que o monitor já fez desse canal (últimas `horas`, ou todos).
+
+    Devolve o .json do vídeo longo ou None. Os cortes dos monitor continuam onde estavam (só são lidos).
+    """
+    try:
+        import longos
+        plataforma, _, canal = str(canal_ref).partition(":")
+        if not plataforma or not canal:
+            print("❌ Use --longo-da-live PLATAFORMA:CANAL (ex.: twitch:nome_do_canal).")
+            return None
+        print("=" * 60)
+        print(f"🎞️  VÍDEO LONGO DA LIVE ({plataforma}:{canal}, alvo {alvo_min} min, nota mínima {longos.NOTA_MINIMA:g})")
+        print("=" * 60)
+        cortes = longos.listar_cortes_da_live(OUTPUT_DIR, plataforma, canal, horas)
+        periodo = f"nas últimas {horas} h" if horas else "no total"
+        print(f"   📚 {len(cortes)} corte(s) deste canal em Cortes prontos {periodo}")
+        if not cortes:
+            print("❌ Não há cortes deste canal para juntar: deixe o monitor assistir à live e gerar cortes antes.")
+            return None
+        escolhidos, resumo = _escolher_longo(cortes, alvo_min, distancia_min_s=0)     # a sobreposição já é barrada pelo selecionar
+        if escolhidos is None:
+            return None
+        nome = next((c["streamer"] for c in escolhidos if c.get("streamer")), None)
+        extra = {"fonte": {"tipo": "live", "plataforma": plataforma, "canal": canal, "horas": horas,
+                           "cortes": [c["nome"] for c in escolhidos]}}
+        load_env_file()
+        return _gravar_longo(None, escolhidos, resumo, [], alvo_min * 60, url=next((c["url"] for c in escolhidos if c.get("url")), None),
+                             streamer=nome, extra=extra)
+    except Exception as erro:                                       # noqa: BLE001
+        print(f"❌ Vídeo longo da live: erro inesperado: {erro}")
         return None
 
 
@@ -4563,17 +4611,24 @@ def _clean_summary(raw):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def generate_summary_intro_text(clip_text, api_key, streamer=None):
+def generate_summary_intro_text(clip_text, api_key, streamer=None, longo=False):
     """Pede à IA 1-2 frases que apresentam o trecho, usando SOMENTE o que foi dito nele.
 
+    `longo=True`: o texto é a lista dos momentos de um vídeo de melhores momentos (título + fala de cada um).
     Devolve o texto ou None (sem fala, sem chave, resposta fora das regras ou inventada).
     """
     source = (clip_text or "").strip()
     if not source or not api_key:
         return None
-    prompt = (
+    abertura = (
+        "Você escreve a ABERTURA NARRADA de um vídeo de MELHORES MOMENTOS de uma live/gameplay, a partir da lista "
+        "dos momentos (o título de cada um e o que foi dito nele). O vídeo fica parado no primeiro quadro enquanto "
+        "um narrador apresenta o que vem aí; depois os momentos começam.\n\n"
+        if longo else
         "Você escreve a ABERTURA NARRADA de um Short a partir da transcrição de um trecho de live/gameplay. "
-        "O vídeo fica parado no primeiro quadro enquanto um narrador resume o assunto; depois o trecho começa.\n\n"
+        "O vídeo fica parado no primeiro quadro enquanto um narrador resume o assunto; depois o trecho começa.\n\n")
+    prompt = (
+        abertura +
         f"REGRAS OBRIGATÓRIAS:\n- 1 a 2 frases, de {SUMMARY_MIN_WORDS} a {SUMMARY_MAX_WORDS} palavras no total\n"
         "- use SOMENTE o que está dito na transcrição: não invente nomes, números, jogos, lugares ou fatos que não aparecem nela\n"
         + (f"- o streamer se chama {streamer}: use esse NOME na frase (nunca \"o streamer\"); não invente nenhum outro nome\n"
@@ -4638,8 +4693,14 @@ def intro_word_timings(events):
     return words
 
 
-def create_intro_ass(word_events, output_path, total_duration, per_chunk=3):
-    """Legenda da narração do resumo: blocos de poucas palavras, na mesma altura da legenda do corte."""
+def create_intro_ass(word_events, output_path, total_duration, per_chunk=3, formato=None):
+    """Legenda da narração do resumo: blocos de poucas palavras, na mesma altura da legenda do corte.
+
+    `formato="longo"`: para o vídeo longo horizontal (1920x1080, letra e margem do tamanho da legenda dele).
+    """
+    largura, altura, fonte, margem = VERTICAL_WIDTH, VERTICAL_HEIGHT, SUMMARY_SUBTITLE_FONT_SIZE, FIT_SUBTITLE_MARGIN_V
+    if formato == "longo":
+        largura, altura, fonte, margem, per_chunk = 1920, 1080, 64, 64, 4
     words = intro_word_timings(word_events)
     if not words:
         return False
@@ -4660,12 +4721,12 @@ def create_intro_ass(word_events, output_path, total_duration, per_chunk=3):
         lines.append(f"Dialogue: 0,{stamp(start)},{stamp(end)},Intro,,0,0,0,,{text}")
     header = (
         "[Script Info]\nTitle: Resumo narrado\nScriptType: v4.00+\n"
-        f"PlayResX: {VERTICAL_WIDTH}\nPlayResY: {VERTICAL_HEIGHT}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n"
+        f"PlayResX: {largura}\nPlayResY: {altura}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n"
         "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Intro,Impact,{SUMMARY_SUBTITLE_FONT_SIZE},&H00FFFFFF,&H00FFFF00,&H00000000,&H80000000,"
-        f"-1,0,0,0,100,100,0,0,1,4,1,2,40,40,{FIT_SUBTITLE_MARGIN_V},1\n\n"
+        f"Style: Intro,Impact,{fonte},&H00FFFFFF,&H00FFFF00,&H00000000,&H80000000,"
+        f"-1,0,0,0,100,100,0,0,1,4,1,2,40,40,{margem},1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
     try:
@@ -4745,16 +4806,16 @@ def build_concat_reencode_cmd(intro_path, main_path, output_path):
             "-movflags", "+faststart", str(output_path)]
 
 
-def _concat_with_fallback(first, second, joined_path, list_path, expected):
+def _concat_with_fallback(first, second, joined_path, list_path, expected, reencode_timeout=900):
     """Junta first + second em joined_path. Devolve ("copia" | "reencode", "") ou (None, erro)."""
     def quoted(p):
         return "file '" + Path(p).resolve().as_posix().replace("'", "'\\''") + "'"
     Path(list_path).write_text(quoted(first) + "\n" + quoted(second) + "\n", encoding="utf-8")
-    ok, _, err = run_cmd(build_concat_copy_cmd(list_path, joined_path), timeout=300)
+    ok, _, err = run_cmd(build_concat_copy_cmd(list_path, joined_path), timeout=max(300, int(expected)))
     if ok and Path(joined_path).exists() and _duration_matches(joined_path, expected):
         return "copia", ""
     print("   ⚠️  Junção sem recodificar não ficou boa; refazendo recodificando (qualidade um pouco menor).")
-    ok, _, err = run_cmd(build_concat_reencode_cmd(first, second, joined_path), timeout=900)
+    ok, _, err = run_cmd(build_concat_reencode_cmd(first, second, joined_path), timeout=reencode_timeout)
     if ok and Path(joined_path).exists() and _duration_matches(joined_path, expected):
         return "reencode", ""
     return None, err
@@ -4765,14 +4826,17 @@ def _duration_matches(path, expected, tolerance=0.6):
     return real > 0 and abs(real - expected) <= tolerance
 
 
-def add_summary_intro(output_path, clip_text, api_key, streamer=None):
+def add_summary_intro(output_path, clip_text, api_key, streamer=None, formato=None):
     """Coloca o resumo narrado no começo de um corte já pronto (1080x1920).
 
     Devolve um dict com o que foi feito (para o .json) ou None se não houve intro. NUNCA levanta
     erro nem estraga o corte: o arquivo só é trocado quando a versão com intro está completa.
+    `formato="longo"`: vídeo longo horizontal (1920x1080; sem o limite de 60 s no total; `clip_text` é a lista dos momentos).
+    A escolha de ligar ou não vem de quem chama no formato longo (a opção da edição), não do CORTES_RESUMO.
     """
+    longo = formato == "longo"
     EXTRAS_MOTIVO.pop("resumo", None)
-    if not summary_intro_enabled():
+    if not longo and not summary_intro_enabled():
         return None
     output_path = Path(output_path)
     if not api_key:
@@ -4788,7 +4852,7 @@ def add_summary_intro(output_path, clip_text, api_key, streamer=None):
     temporarios = [tts_path, ass_path, frame_path, intro_path, list_path, joined_path]
     try:
         print("   🎙️  Resumo narrado no início do corte...")
-        summary = generate_summary_intro_text(clip_text, api_key, streamer)
+        summary = generate_summary_intro_text(clip_text, api_key, streamer, longo=longo)
         if not summary:
             print("   ℹ️  Sem um resumo bom o bastante para este trecho: o corte sai sem intro.")
             return _skip("resumo", "a IA não deu um resumo fiel à fala do trecho")
@@ -4805,7 +4869,7 @@ def add_summary_intro(output_path, clip_text, api_key, streamer=None):
         main_seconds = get_video_duration(output_path)
         if main_seconds <= 0:
             return _skip("resumo", "não consegui ler a duração do corte")
-        if main_seconds + intro_seconds > SUMMARY_MAX_TOTAL_SECONDS:
+        if not longo and main_seconds + intro_seconds > SUMMARY_MAX_TOTAL_SECONDS:
             print(f"   ℹ️  Intro + corte passariam de {SUMMARY_MAX_TOTAL_SECONDS}s: o corte sai sem intro.")
             return _skip("resumo", "intro + corte passariam de 60 s")
         info = probe_stream_info(output_path)
@@ -4818,7 +4882,7 @@ def add_summary_intro(output_path, clip_text, api_key, streamer=None):
         if not ok or not frame_path.exists():
             print(f"   ⚠️  Resumo: não consegui pegar o primeiro quadro: {err[-300:]}")
             return _skip("resumo", "falha ao pegar o primeiro quadro")
-        if not create_intro_ass(events, ass_path, intro_seconds):
+        if not create_intro_ass(events, ass_path, intro_seconds, formato=formato):
             return _skip("resumo", "falha ao criar a legenda da narração")
         ok, _, err = run_cmd(build_intro_cmd(frame_path, tts_path, ass_path, intro_path, intro_seconds, info), timeout=300)
         if not ok or not intro_path.exists():
@@ -4827,7 +4891,8 @@ def add_summary_intro(output_path, clip_text, api_key, streamer=None):
         intro_real = get_video_duration(intro_path)
         expected = (intro_real or intro_seconds) + main_seconds
 
-        mode, err = _concat_with_fallback(intro_path, output_path, joined_path, list_path, expected)
+        mode, err = _concat_with_fallback(intro_path, output_path, joined_path, list_path, expected,
+                                          reencode_timeout=max(900, int(main_seconds * 4)))
         if not mode:
             print(f"   ⚠️  Resumo: a junção falhou ({err[-300:]}). O corte sai sem intro.")
             return _skip("resumo", "a junção da intro falhou")
@@ -4863,15 +4928,18 @@ def cta_text():
     return CTA_TEXT
 
 
-def add_cta_outro(output_path):
+def add_cta_outro(output_path, formato=None):
     """Acrescenta no FIM de um corte pronto uma chamada narrada (like, compartilhar, inscrever-se).
+
+    `formato="longo"`: vídeo longo horizontal (sem o limite de 60 s; quem chama decide se liga).
 
     O último quadro (de antes do fade final) fica parado, levemente escurecido, com a frase na legenda e na
     voz. Junção sem recodificar (plano B: recodificar). Devolve um dict para o .json ou None; nunca levanta
     erro nem estraga o corte (o arquivo só é trocado com o resultado completo).
     """
+    longo = formato == "longo"
     EXTRAS_MOTIVO.pop("cta", None)
-    if not cta_outro_enabled():
+    if not longo and not cta_outro_enabled():
         return None
     output_path = Path(output_path)
     stem = re.sub(r"[^A-Za-z0-9_-]+", "_", output_path.stem)[:60]
@@ -4896,7 +4964,7 @@ def add_cta_outro(output_path):
         main_seconds = get_video_duration(output_path)
         if main_seconds <= 0:
             return _skip("cta", "não consegui ler a duração do corte")
-        if main_seconds + outro_seconds > SUMMARY_MAX_TOTAL_SECONDS:
+        if not longo and main_seconds + outro_seconds > SUMMARY_MAX_TOTAL_SECONDS:
             print(f"   ℹ️  Corte + chamada final passariam de {SUMMARY_MAX_TOTAL_SECONDS}s: sai sem a chamada final.")
             return _skip("cta", "corte + chamada passariam de 60 s")
         info = probe_stream_info(output_path)
@@ -4910,7 +4978,7 @@ def add_cta_outro(output_path):
         if not ok or not frame_path.exists():
             print(f"   ⚠️  Chamada final: não consegui pegar o quadro: {err[-300:]}")
             return _skip("cta", "falha ao pegar o quadro")
-        if not create_intro_ass(events, ass_path, outro_seconds):
+        if not create_intro_ass(events, ass_path, outro_seconds, formato=formato):
             return _skip("cta", "falha ao criar a legenda da chamada")
         fade_out_at = max(0.0, outro_seconds - CTA_FADE_SECONDS)
         pre = (f"eq=brightness=-0.12,fade=t=in:st=0:d={CTA_FADE_SECONDS},"
@@ -4921,7 +4989,8 @@ def add_cta_outro(output_path):
             print(f"   ⚠️  Chamada final: erro ao montar o final: {err[-400:]}")
             return _skip("cta", "erro do ffmpeg ao montar o final")
         expected = main_seconds + (get_video_duration(outro_path) or outro_seconds)
-        mode, err = _concat_with_fallback(output_path, outro_path, joined_path, list_path, expected)
+        mode, err = _concat_with_fallback(output_path, outro_path, joined_path, list_path, expected,
+                                          reencode_timeout=max(900, int(main_seconds * 4)))
         if not mode:
             print(f"   ⚠️  Chamada final: a junção falhou ({err[-300:]}). O corte sai sem ela.")
             return _skip("cta", "a junção do final falhou")
@@ -5244,16 +5313,36 @@ def suggest_titles(text, current_title, api_key, count=SUGESTOES_TITULOS):
     return out
 
 
-def suggest_titles_for_clip(name):
-    """--sugerir-titulos: imprime 'TITULOS_JSON=[...]' com opções para o corte (lê a transcrição do .json). True se deu certo."""
+def suggest_titles_for_clip(name, biblioteca="cortes"):
+    """--sugerir-titulos: imprime 'TITULOS_JSON=[...]' com opções para o corte (lê a transcrição do .json). True se deu certo.
+
+    `biblioteca="longos"`: títulos de YouTube para um vídeo longo, escritos a partir dos momentos dele.
+    """
     name = Path(str(name)).name
     if not name.lower().endswith(".mp4") or name.startswith((".", "_")):
         print(f"❌ Nome de corte inválido: {name!r}")
         return False
+    pasta = Path("videos_longos") if biblioteca == "longos" else OUTPUT_DIR
     try:
-        meta = json.loads((OUTPUT_DIR / name).with_suffix(".json").read_text(encoding="utf-8"))
+        meta = json.loads((pasta / name).with_suffix(".json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         meta = None
+    if biblioteca == "longos":
+        momentos = meta.get("momentos") if isinstance(meta, dict) else None
+        if not momentos:
+            print("❌ Este vídeo longo não tem os momentos guardados; não dá para sugerir títulos.")
+            return False
+        load_env_file()
+        api_key = get_groq_key()
+        if not api_key:
+            print("❌ Sem GROQ_API_KEY no .env: não dá para sugerir títulos.")
+            return False
+        options = suggest_long_titles(momentos, str(meta.get("titulo") or ""), api_key)
+        if not options:
+            print("❌ A IA não devolveu sugestões agora (limite ou instabilidade). Tente de novo em instantes.")
+            return False
+        print("TITULOS_JSON=" + json.dumps(options, ensure_ascii=False))
+        return True
     if not isinstance(meta, dict) or not str(meta.get("transcricao") or "").strip():
         print("❌ Este corte não tem a transcrição guardada; não dá para sugerir títulos.")
         return False
@@ -5394,6 +5483,233 @@ def render_edit(name):
                 pass
     print(f"✅ Corte renderizado: {visible}")
     return True
+
+
+def run_ffmpeg_progress(cmd, total_s, rotulo="Renderizando", stall_s=300, passo=5):
+    """Roda o ffmpeg mostrando o andamento (a cada `passo` %) e só desiste se ele ficar PARADO por `stall_s` segundos.
+
+    Sem limite fixo de tempo: um vídeo de 12 minutos demora o quanto precisar, desde que continue andando.
+    `cmd[0]` é o ffmpeg. Devolve (ok, texto_do_erro).
+    """
+    import threading
+    from collections import deque
+    completo = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
+    try:
+        proc = subprocess.Popen(completo, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace")
+    except OSError as e:
+        return False, str(e)
+    estado = {"ultimo": time.monotonic(), "pct": -float(passo)}
+    erros = deque(maxlen=40)
+    total_s = max(float(total_s or 0), 0.001)
+
+    def mm_ss(seg):
+        return f"{int(seg // 60)}:{int(seg % 60):02d}"
+
+    def ler_saida():
+        for linha in proc.stdout:
+            estado["ultimo"] = time.monotonic()
+            chave, _, valor = linha.strip().partition("=")
+            if chave not in ("out_time_us", "out_time_ms"):          # os dois vêm em microssegundos
+                continue
+            try:
+                seg = int(valor) / 1_000_000
+            except ValueError:
+                continue                                              # "N/A" no começo
+            pct = min(100.0, max(0.0, seg / total_s * 100))
+            if pct >= estado["pct"] + passo or (pct >= 100 and estado["pct"] < 100):
+                estado["pct"] = pct
+                print(f"   ⏳ {rotulo}: {pct:.0f}% ({mm_ss(min(seg, total_s))} de {mm_ss(total_s)})", flush=True)
+
+    def ler_erros():
+        for linha in proc.stderr:
+            erros.append(linha.rstrip())
+
+    fios = [threading.Thread(target=ler_saida, daemon=True), threading.Thread(target=ler_erros, daemon=True)]
+    for fio in fios:
+        fio.start()
+    travou = False
+    while True:
+        try:
+            proc.wait(timeout=1)
+            break
+        except subprocess.TimeoutExpired:
+            if time.monotonic() - estado["ultimo"] > stall_s:
+                travou = True
+                proc.kill()
+                proc.wait()
+                break
+    for fio in fios:
+        fio.join(timeout=5)
+    if travou:
+        return False, f"o ffmpeg ficou {stall_s}s sem andar e foi interrompido"
+    return proc.returncode == 0, "\n".join(erros)
+
+
+def suggest_long_titles(momentos, current_title, api_key, count=SUGESTOES_TITULOS):
+    """Títulos para o vídeo longo (estilo YouTube), escritos SÓ com os títulos e motivos reais dos momentos. [] se falhar."""
+    linhas = []
+    for m in momentos or []:
+        titulo = str(m.get("titulo") or "").strip()
+        if titulo:
+            linhas.append(f"{m.get('n') or len(linhas) + 1}. {titulo}" + (f" ({m['motivo']})" if m.get("motivo") else ""))
+    if not linhas or not api_key:
+        return []
+    atual = f'Título atual (NÃO repita nem copie): "{current_title}"\n\n' if current_title else ""
+    prompt = (
+        "Você é um especialista em títulos para vídeos de MELHORES MOMENTOS de lives/gameplay no YouTube. Abaixo estão os "
+        f"momentos do vídeo, já resumidos. Escreva {count} títulos DIFERENTES entre si (curiosidade, humor, reação, "
+        "desafio, resultado), com no máximo 70 caracteres cada, em português do Brasil.\n\n"
+        f"{atual}MOMENTOS:\n" + "\n".join(linhas[:40]) + "\n\n"
+        "Responda APENAS com JSON válido, uma lista: "
+        '[{"titulo": "TÍTULO DO VÍDEO"}]\n\n'
+        "Regras:\n"
+        "- Baseie-se SOMENTE nos momentos listados. NÃO invente fatos, nomes, jogos nem acontecimentos.\n"
+        "- Sem emojis, hashtags nem aspas; não prometa o que os momentos não mostram."
+    )
+    answer = groq_chat_with_fallback([{"role": "user", "content": prompt}], api_key, get_text_models_to_try,
+                                     max_tokens=700, temperature=0.9)
+    data = extract_json(answer) if answer else None
+    if not isinstance(data, list):
+        return []
+    out, vistos = [], {(current_title or "").strip().lower()}
+    for item in data:
+        titulo = item.get("titulo") if isinstance(item, dict) else None
+        if not isinstance(titulo, str):
+            continue
+        titulo = re.sub(r"[^\w\s.,!?:;'\-%/()À-ÿ]", " ", titulo)
+        titulo = " ".join(titulo.split())[:70].strip(" .")
+        if not titulo or titulo.lower() in vistos:
+            continue
+        vistos.add(titulo.lower())
+        out.append({"titulo": titulo, "pergunta": ""})
+        if len(out) >= count:
+            break
+    return out
+
+
+def render_edit_longo(name):
+    """Renderiza de novo um vídeo longo (horizontal) a partir do BRUTO, com as opções de videos_longos/_edicoes/NOME.json.
+
+    O bruto nunca é alterado e o arquivo visível (videos_longos/NOME.mp4) só é trocado com o resultado completo.
+    """
+    import longos
+    global STREAMER_NOME
+    name = Path(str(name)).name
+    if not name.lower().endswith(".mp4") or name.startswith((".", "_")):
+        print(f"❌ Nome de vídeo inválido: {name!r}")
+        return False
+    pasta = Path(longos.PASTA)
+    visible = pasta / name
+    raw = pasta / longos.PASTA_BRUTOS / name
+    meta_path = visible.with_suffix(".json")
+    opts_path = pasta / EDICOES_DIR_NAME / f"{visible.stem}.json"
+    if not raw.is_file():
+        print(f"❌ O vídeo bruto não foi encontrado ({raw}).")
+        return False
+    try:
+        opts = longos.normalizar_opcoes(json.loads(opts_path.read_text(encoding="utf-8")), normalize_trechos)
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        opts, meta = None, None
+    if opts is None or not isinstance(meta, dict) or meta.get("origem") != "longo":
+        print("❌ Opções de edição ou metadados inválidos.")
+        return False
+    sim = lambda v: "sim" if v else "não"
+    print(f"🎞️  Renderizando o vídeo longo de novo: {name}")
+    print(f"   Formato: horizontal 1920x1080 | legenda: {sim(opts['legenda'])} | títulos dos momentos: {sim(opts['capitulos'])} | "
+          f"resumo: {sim(opts['resumo'])} | chamada final: {sim(opts['cta'])}")
+    load_env_file()
+    groq_api_key = get_groq_key()
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    STREAMER_NOME = meta.get("streamer") or None
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", visible.stem)[:60]
+
+    real = get_video_duration(raw) or float(meta.get("clip_duration") or 0)
+    if real <= 0:
+        print("❌ Não consegui ler a duração do vídeo bruto.")
+        return False
+    segs = meta.get("legenda_segmentos") or []
+    source, trimmed, duration = raw, None, real
+    trechos = clamp_trechos(opts.get("trechos"), real) if opts.get("trechos") else None
+    temporarios = []
+    try:
+        if trechos:
+            total = sum(b - a for a, b in trechos)
+            print(f"   ✂️  Linha do tempo: {len(trechos)} trecho(s) mantido(s) ({total:.1f}s de {real:.1f}s)")
+            trimmed = TEMP_DIR / f"longo_{stem}_aparado.mp4"
+            temporarios.append(trimmed)
+            ok, erro = run_ffmpeg_progress(longos.comando_aparar(FFMPEG.as_posix(), raw, trechos, trimmed), total, "Aparando")
+            if not ok or not trimmed.is_file() or trimmed.stat().st_size < 1024:
+                print(f"❌ Falha ao aparar o vídeo: o vídeo longo continua como estava. {erro[-300:]}")
+                return False
+            source, duration = trimmed, get_video_duration(trimmed) or total
+            segs = remap_segments(segs, trechos)
+
+        caps = longos.capitulos(meta.get("momentos"), trechos, duration)
+        ass_path = None
+        if opts["legenda"] or opts["capitulos"]:
+            falas = filter_portuguese_segments(segs) if opts["legenda"] and segs else []
+            texto_ass = longos.montar_ass(falas, duration, caps if opts["capitulos"] else [], censor_profanity)
+            if texto_ass:
+                ass_path = TEMP_DIR / f"longo_{stem}.ass"
+                temporarios.append(ass_path)
+                ass_path.write_text(texto_ass, encoding="utf-8")
+            else:
+                print("   ⚠️  Sem fala nem títulos de momento disponíveis: renderizando sem legenda.")
+
+        tmp_out = TEMP_DIR / f"longo_{stem}.mp4"
+        temporarios.append(tmp_out)
+        ok, erro = run_ffmpeg_progress(longos.comando_final(FFMPEG.as_posix(), source, ass_path, duration, tmp_out),
+                                       duration, "Renderizando")
+        if not ok or not tmp_out.is_file() or tmp_out.stat().st_size < 1024:
+            print(f"❌ Falha ao renderizar: o vídeo longo continua como estava. {erro[-400:]}")
+            return False
+
+        resumo_info = cta_info = None
+        resumo_motivo = cta_motivo = None
+        if opts["resumo"]:
+            texto = longos.texto_para_resumo(caps, segs, duration)
+            resumo_info = add_summary_intro(tmp_out, texto, groq_api_key, STREAMER_NOME, formato="longo")
+            resumo_motivo = None if resumo_info else EXTRAS_MOTIVO.get("resumo")
+        if opts["cta"]:
+            cta_info = add_cta_outro(tmp_out, formato="longo")
+            cta_motivo = None if cta_info else EXTRAS_MOTIVO.get("cta")
+        for etiqueta, info, motivo in (("resumo", resumo_info, resumo_motivo), ("chamada final", cta_info, cta_motivo)):
+            if motivo:
+                print(f"   ⚠️  O vídeo saiu SEM {etiqueta}: {motivo}")
+
+        try:
+            os.replace(str(tmp_out), str(visible))
+        except OSError as e:
+            print(f"❌ Não foi possível trocar o vídeo: {e}")
+            return False
+        if opts.get("titulo"):
+            meta.setdefault("titulo_original", meta.get("titulo"))
+            meta["titulo"] = opts["titulo"]
+        final_s = get_video_duration(visible) or (duration + (resumo_info["duracao_s"] if resumo_info else 0)
+                                                  + (cta_info["duracao_s"] if cta_info else 0))
+        meta.update({
+            "bruto": False, "trechos_mantidos": trechos,
+            "capitulos": caps if opts["capitulos"] else [],
+            "resumo_intro": resumo_info, "resumo_motivo": resumo_motivo, "cta_final": cta_info, "cta_motivo": cta_motivo,
+            "duracao_final_s": round(final_s, 2),
+            "edicao": {"estado": "renderizado", "opcoes": opts, "em": datetime.now().isoformat()},
+        })
+        try:
+            tmp_meta = meta_path.with_name(meta_path.name + ".tmp")
+            tmp_meta.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(str(tmp_meta), str(meta_path))
+        except OSError as e:
+            print(f"   ⚠️  Erro ao salvar JSON: {e}")
+        print(f"✅ Vídeo longo renderizado: {visible} ({final_s / 60:.1f} min)")
+        return True
+    finally:
+        for arquivo in temporarios:
+            try:
+                Path(arquivo).unlink()
+            except OSError:
+                pass
 
 
 def cut_and_export_gameplay(video_path, clip, segments, output_path, clip_num, webcam_pos, groq_api_key=None):
@@ -5767,6 +6083,8 @@ def main():
                              "ex.: 0.78,0.37,0.21,0.22. Tem prioridade sobre --webcam e a detecção por IA")
     parser.add_argument("--layout-salvo", metavar="NOME",
                         help="Modo gameplay: usa um layout criado no editor da interface (pasta layouts_salvos/)")
+    parser.add_argument("--biblioteca", choices=["cortes", "longos"], default="cortes",
+                        help="Com --renderizar e --sugerir-titulos: de qual biblioteca é o arquivo (cortes_prontos/ ou videos_longos/)")
     parser.add_argument("--sugerir-titulos", metavar="CORTE.mp4", dest="sugerir_titulos",
                         help="Sugere títulos para um corte pronto (a IA lê a transcrição guardada) e imprime TITULOS_JSON=[...]")
     parser.add_argument("--renderizar", metavar="CORTE.mp4",
@@ -5776,6 +6094,10 @@ def main():
     parser.add_argument("--video-longo", type=int, metavar="MIN", dest="video_longo",
                         help="Modo gameplay: além dos cortes, monta um vídeo longo horizontal (1920x1080) com os melhores "
                              "momentos do vídeo, de 4 a 12 minutos (salvo em videos_longos/). Com --cortes 0 gera só o longo")
+    parser.add_argument("--longo-da-live", metavar="PLATAFORMA:CANAL", dest="longo_da_live",
+                        help="Monta um vídeo longo (com --video-longo MIN) juntando os melhores cortes que o monitor de lives já fez desse canal")
+    parser.add_argument("--live-horas", type=int, metavar="H", dest="live_horas",
+                        help="Com --longo-da-live: só os cortes detectados nas últimas H horas (padrão: todos)")
     parser.add_argument("--repetir", action="store_true",
                         help="Permite repetir trechos que já viraram corte em execuções anteriores deste vídeo")
     parser.add_argument("--importar-existentes", action="store_true",
@@ -5793,7 +6115,7 @@ def main():
         if not duracao_valida(args.video_longo):
             print(f"❌ --video-longo deve ser um número de minutos de {DURACAO_MIN_MIN} a {DURACAO_MAX_MIN}.")
             sys.exit(1)
-        if args.audio != "gameplay":
+        if args.audio != "gameplay" and not args.longo_da_live:
             print("⚠️  --video-longo só vale no modo gameplay: ignorado.")
             args.video_longo = None
     if args.sem_resumo:
@@ -5806,14 +6128,24 @@ def main():
             sys.exit(1)
         print(f"🎨 Layout personalizado: {CUSTOM_LAYOUT.get('nome') or CUSTOM_LAYOUT['slug']}")
 
+    if args.longo_da_live:
+        if args.video_longo is None:
+            print("❌ Informe a duração com --video-longo MIN (de 4 a 12 minutos).")
+            sys.exit(1)
+        if not resolve_ffmpeg():
+            print(f"❌ ffmpeg não encontrado em {FFMPEG} nem no PATH")
+            sys.exit(1)
+        ensure_dirs()
+        sys.exit(0 if build_long_from_live(args.longo_da_live, args.video_longo, args.live_horas) else 1)
+
     if args.sugerir_titulos:
-        sys.exit(0 if suggest_titles_for_clip(args.sugerir_titulos) else 1)
+        sys.exit(0 if suggest_titles_for_clip(args.sugerir_titulos, args.biblioteca) else 1)
 
     if args.renderizar:
         if not resolve_ffmpeg():
             print(f"❌ ffmpeg não encontrado em {FFMPEG} nem no PATH")
             sys.exit(1)
-        sys.exit(0 if render_edit(args.renderizar) else 1)
+        sys.exit(0 if (render_edit_longo(args.renderizar) if args.biblioteca == "longos" else render_edit(args.renderizar)) else 1)
 
     if args.repair:
         print("=" * 60)

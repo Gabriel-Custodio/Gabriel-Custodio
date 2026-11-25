@@ -4,7 +4,7 @@ const [, bytes] = GLib.file_get_contents(ARGV[0]);
 const fonte = new TextDecoder().decode(bytes);
 const L = new Function(fonte + `; return {tlNovo, tlDuracao, tlPecaEm, tlDividir, tlAlternar, tlAparar, tlProximoMantido,
   tlTrechos, tlDeTrechos, tlFormatar, tlPassoRegua, tlHistNovo, tlHistAdicionar, tlHistDesfazer, tlHistRefazer,
-  tlHistPodeDesfazer, tlHistPodeRefazer, tlInicio, tlFim};`)();
+  tlHistPodeDesfazer, tlHistPodeRefazer, tlInicio, tlFim, tlMarcarIntervalo, tlFracaoMantida, tlJuntar};`)();
 
 function igual(a, b, msg) {
   const x = JSON.stringify(a), y = JSON.stringify(b);
@@ -87,4 +87,29 @@ igual(L.tlFormatar(65.7), "01:05", "65s");
 igual(L.tlFormatar(65.7, true), "01:05.7", "decimos");
 igual(L.tlFormatar(3725), "1:02:05", "horas");
 igual(L.tlPassoRegua(60 / 800, 70) >= 5, true, "passo da régua");
+// excluir e restaurar um momento (intervalo) inteiro
+const inteiro = L.tlNovo(120);
+const sem2 = L.tlMarcarIntervalo(inteiro, 40, 80, false);
+igual(L.tlTrechos(sem2), [[0, 40], [80, 120]], "excluir um momento");
+igual(L.tlFracaoMantida(sem2, 40, 80), 0, "momento excluído");
+igual(L.tlFracaoMantida(sem2, 0, 40), 1, "momento mantido");
+igual(L.tlFracaoMantida(sem2, 30, 50), 0.5, "momento pela metade");
+igual(L.tlTrechos(L.tlMarcarIntervalo(sem2, 40, 80, true)), null, "restaurar o momento volta ao vídeo inteiro");
+igual(inteiro.length, 1, "não altera o original");
+const sem13 = L.tlMarcarIntervalo(sem2, 0, 40, false);
+igual(L.tlTrechos(sem13), [[80, 120]], "excluir o primeiro também");
+igual(L.tlMarcarIntervalo(sem13, 80, 119.5, false), null, "não deixa o vídeo ficar com menos de 1 s");
+igual(L.tlMarcarIntervalo(inteiro, 50, 50, false), null, "intervalo vazio");
+igual(L.tlTrechos(L.tlMarcarIntervalo(inteiro, -10, 30, false)), [[30, 120]], "intervalo que passa do começo");
+igual(L.tlTrechos(L.tlMarcarIntervalo(inteiro, 100, 500, false)), [[0, 100]], "intervalo que passa do fim");
+// excluir um intervalo que cruza peças já divididas e excluídas
+let cruz = L.tlMarcarIntervalo(L.tlDividir(L.tlDividir(inteiro, 30), 90), 20, 100, false);
+igual(L.tlTrechos(cruz), [[0, 20], [100, 120]], "cruza peças divididas");
+igual(cruz.length, 3, "peças vizinhas iguais são juntadas");
+// muitos trechos: acima do limite devolve null
+let muitos = L.tlNovo(1000);
+for (let i = 0; i < 59; i++) muitos = L.tlMarcarIntervalo(muitos, i * 10 + 5, i * 10 + 8, false);
+igual(muitos !== null, true, "59 cortes ainda cabem");
+igual(L.tlTrechos(muitos).length, 60, "60 trechos mantidos");
+igual(L.tlMarcarIntervalo(muitos, 700, 703, false), null, "61 trechos passam do limite");
 print("OK");

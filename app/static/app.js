@@ -30,7 +30,7 @@ function formatarTempo(segundos) {
 }
 
 // ------------------------------------------------------------- abas
-const ABAS = ["gerar", "cortes", "lives"];
+const ABAS = ["gerar", "cortes", "longos", "lives"];
 function mostrarAba(nome) {
   for (const a of ABAS) {
     const ativa = a === nome;
@@ -39,10 +39,12 @@ function mostrarAba(nome) {
     $(`painel-${a}`).hidden = !ativa;
   }
   if (nome === "cortes") carregarCortes();
+  if (nome === "longos" && typeof carregarLongos === "function") carregarLongos();
   if (nome === "lives" && typeof carregarCanais === "function") carregarCanais();
 }
 for (const a of ABAS) $(`aba-${a}`).addEventListener("click", () => mostrarAba(a));
 $("ver-cortes").addEventListener("click", () => mostrarAba("cortes"));
+$("ver-longos").addEventListener("click", () => mostrarAba("longos"));
 
 // ------------------------------------------------------------- pré-requisitos
 function pilula(texto, nivel, dica) {
@@ -108,6 +110,7 @@ function atualizarEstadoJob(job) {
     $("fim-texto").textContent = ok
       ? "Execução concluída. Confira o resultado abaixo e veja os cortes."
       : job.estado === "cancelado" ? "Execução cancelada." : "A execução terminou com erro. Veja as últimas linhas do andamento.";
+    $("ver-longos").hidden = !(job.parametros && job.parametros.video_longo);     // a execução pediu um vídeo longo
     $("fim-job").hidden = false;
   } else {
     $("fim-job").hidden = true;
@@ -302,6 +305,7 @@ async function carregarCortes() {
 
 async function atualizarContador() {
   try { $("contador").textContent = String((await api("/api/cortes")).cortes.length); } catch (_) { /* ignora */ }
+  if (typeof atualizarContadorLongos === "function") atualizarContadorLongos();
 }
 
 $("filtro").addEventListener("change", desenharCortes);
@@ -316,7 +320,7 @@ $("btn-pasta").addEventListener("click", async () => {
   try {
     const estado = await api("/api/estado");
     mostrarPrerequisitos(estado.prerequisitos);
-    $("aviso-versao").hidden = Array.isArray(estado.recursos) && estado.recursos.includes("edicao") && estado.recursos.includes("linha_do_tempo") && estado.recursos.includes("canais") && estado.recursos.includes("monitor_lives") && estado.recursos.includes("titulo_editavel") && estado.recursos.includes("video_longo");
+    $("aviso-versao").hidden = Array.isArray(estado.recursos) && estado.recursos.includes("edicao") && estado.recursos.includes("linha_do_tempo") && estado.recursos.includes("canais") && estado.recursos.includes("monitor_lives") && estado.recursos.includes("titulo_editavel") && estado.recursos.includes("video_longo") && estado.recursos.includes("videos_longos");
     atualizarEstadoJob(estado.job);
     if (estado.job && estado.job.estado === "rodando") iniciarConsulta();
     else if (estado.job) consultarLog();
@@ -326,4 +330,5 @@ $("btn-pasta").addEventListener("click", async () => {
   atualizarContador();
   if (location.hash === "#cortes") mostrarAba("cortes");   // link direto para a aba de cortes
   if (location.hash === "#lives") mostrarAba("lives");
+  if (location.hash === "#longos") mostrarAba("longos");
 })();

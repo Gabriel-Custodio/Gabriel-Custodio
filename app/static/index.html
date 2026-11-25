@@ -22,6 +22,9 @@
     <button type="button" role="tab" id="aba-cortes" aria-selected="false" aria-controls="painel-cortes" tabindex="-1">
       Cortes prontos <span id="contador" class="contador">0</span>
     </button>
+    <button type="button" role="tab" id="aba-longos" aria-selected="false" aria-controls="painel-longos" tabindex="-1">
+      Vídeos longos <span id="contador-longos" class="contador">0</span>
+    </button>
     <button type="button" role="tab" id="aba-lives" aria-selected="false" aria-controls="painel-lives" tabindex="-1">Monitor de lives</button>
   </nav>
 
@@ -59,7 +62,7 @@
             <input id="longo-min" name="longo_min" type="number" min="4" max="12" value="8">
           </div>
         </div>
-        <p id="aviso-longo" class="ajuda" hidden>O <strong>vídeo longo</strong> usa a mesma análise dos cortes: a IA junta, em ordem, os momentos com nota <strong>6,5 ou mais</strong> até fechar a duração escolhida (se não houver momentos bons o bastante, ele sai mais curto). Sai <strong>bruto</strong>, horizontal 1920x1080, na pasta <strong>videos_longos</strong>. Com <strong>0 cortes</strong>, gera só o vídeo longo. A edição dele chega na próxima etapa.
+        <p id="aviso-longo" class="ajuda" hidden>O <strong>vídeo longo</strong> usa a mesma análise dos cortes: a IA junta, em ordem, os momentos com nota <strong>6,5 ou mais</strong> até fechar a duração escolhida (se não houver momentos bons o bastante, ele sai mais curto). Sai <strong>bruto</strong>, horizontal 1920x1080, na pasta <strong>videos_longos</strong>. Com <strong>0 cortes</strong>, gera só o vídeo longo. Para editar (legenda, títulos dos momentos, resumo, chamada final e a linha do tempo), use a aba <strong>Vídeos longos</strong>.
           <button type="button" id="btn-pasta-longos" class="btn">Abrir pasta dos vídeos longos</button></p>
         <p id="aviso-bruto" class="ajuda">No modo Gameplay / Streamer o corte sai <strong>bruto</strong> (tela completa do streamer, sem fundo desfocado, tarja nem legenda). Em <strong>Cortes prontos &gt; Editar</strong> você escolhe as caixas da câmera e do gameplay, a tarja vermelha, a legenda, o resumo e a chamada final, e renderiza de novo.</p>
 
@@ -113,6 +116,7 @@
         <p id="fim-job" class="aviso-fim" hidden>
           <span id="fim-texto"></span>
           <button type="button" id="ver-cortes" class="btn">Ver cortes prontos</button>
+          <button type="button" id="ver-longos" class="btn" hidden>Ver vídeos longos</button>
         </p>
       </section>
     </section>
@@ -175,7 +179,56 @@
       <p id="vazio" class="vazio" hidden>Nenhum corte por aqui ainda. Gere um na aba “Gerar cortes”.</p>
       <div id="lista" class="lista"></div>
     </section>
+
+    <!-- ======================= VÍDEOS LONGOS ======================= -->
+    <section id="painel-longos" role="tabpanel" aria-labelledby="aba-longos" hidden>
+      <div class="barra">
+        <label class="inline" for="filtro-longos">Mostrar
+          <select id="filtro-longos">
+            <option value="todos">Todos</option>
+            <option value="novo">Novos</option>
+            <option value="aprovado">Aprovados</option>
+          </select>
+        </label>
+        <span class="espaco"></span>
+        <button type="button" id="btn-atualizar-longos" class="btn">Atualizar</button>
+        <button type="button" id="btn-pasta-longos-aba" class="btn">Abrir pasta</button>
+      </div>
+      <p id="vazio-longos" class="vazio" hidden>Nenhum vídeo longo por aqui ainda. Na aba “Gerar cortes”, marque “Também criar um vídeo longo”.</p>
+      <div id="lista-longos" class="lista longos"></div>
+    </section>
   </main>
+
+  <template id="tpl-longo">
+    <article class="corte longo">
+      <video controls preload="metadata" playsinline></video>
+      <div class="info">
+        <h3 class="titulo"></h3>
+        <div class="selos"></div>
+        <p class="meta"></p>
+        <p class="aviso-selecao erro" hidden></p>
+        <details class="momentos">
+          <summary>Momentos do vídeo</summary>
+          <ol class="lista-momentos"></ol>
+        </details>
+        <details class="fala">
+          <summary>Texto falado neste vídeo</summary>
+          <p class="transcricao"></p>
+        </details>
+        <details class="resumo-intro">
+          <summary>Resumo narrado no início</summary>
+          <p class="texto-resumo"></p>
+        </details>
+        <div class="acoes">
+          <button type="button" class="btn primario editar">Editar</button>
+          <button type="button" class="btn aprovar">Aprovar</button>
+          <button type="button" class="btn copiar">Copiar título</button>
+          <a class="btn baixar" download>Baixar</a>
+          <button type="button" class="btn perigo descartar">Descartar</button>
+        </div>
+      </div>
+    </article>
+  </template>
 
   <template id="tpl-corte">
     <article class="corte">
@@ -216,7 +269,7 @@
       <h3>Vídeo e linha do tempo</h3>
       <div class="ed-fonte">
         <video id="ed-video" controls muted playsinline preload="auto"></video>
-        <button type="button" id="ed-pegar-quadro" class="btn">Usar este quadro</button>
+        <button type="button" id="ed-pegar-quadro" class="btn" data-so="curto">Usar este quadro</button>
       </div>
       <div id="tl" class="tl" aria-label="Linha do tempo do corte">
         <div class="tl-barra">
@@ -237,6 +290,7 @@
               <canvas id="tl-regua" class="tl-regua"></canvas>
               <canvas id="tl-ondas" class="tl-ondas"></canvas>
               <canvas id="tl-quadros" class="tl-quadros"></canvas>
+              <div id="tl-marcas" class="tl-marcas"></div>
               <div id="tl-pecas" class="tl-pecas"></div>
               <div id="tl-ini" class="tl-alca ini" title="Arraste para aparar o início" role="slider" aria-label="Início do corte"></div>
               <div id="tl-fim" class="tl-alca fim" title="Arraste para aparar o fim" role="slider" aria-label="Fim do corte"></div>
@@ -249,15 +303,21 @@
       <p class="ajuda">Clique na linha do tempo para ir a um ponto. Puxe as alças amarelas para <strong>aparar o início e o fim</strong>, ou use <strong>Dividir no cursor</strong> e <strong>Excluir trecho</strong> para tirar um pedaço do meio. A legenda acompanha o que sobrar. Os cortes só valem depois de <strong>Renderizar de novo</strong>; o vídeo bruto nunca é alterado.</p>
     </div>
 
+    <div class="dlg-bloco" id="ed-bloco-momentos" data-so="longo" hidden>
+      <h3>Momentos do vídeo</h3>
+      <p class="ajuda">Cada momento está marcado em amarelo na linha do tempo. <strong>Ir</strong> leva o vídeo até ele; <strong>Excluir momento</strong> tira o momento inteiro do vídeo final (dá para restaurar). Vale ao clicar em <strong>Renderizar de novo</strong>.</p>
+      <ol id="ed-momentos" class="ed-momentos"></ol>
+    </div>
+
     <div class="dlg-bloco" id="ed-bloco-titulo">
-      <h3>Título do corte</h3>
-      <p class="ajuda">O título e a pergunta aparecem na tarja do vídeo (se a tarja estiver ligada) e no card do corte. Escreva o seu ou peça sugestões à IA, que lê só a fala do corte. Vale ao clicar em <strong>Renderizar de novo</strong>.</p>
+      <h3 id="ed-titulo-h3">Título do corte</h3>
+      <p id="ed-titulo-ajuda" class="ajuda">O título e a pergunta aparecem na tarja do vídeo (se a tarja estiver ligada) e no card do corte. Escreva o seu ou peça sugestões à IA, que lê só a fala do corte. Vale ao clicar em <strong>Renderizar de novo</strong>.</p>
       <div class="grade-campos">
         <div class="campo">
-          <label for="ed-titulo">Título (até 60 caracteres)</label>
+          <label id="ed-titulo-rotulo" for="ed-titulo">Título (até 60 caracteres)</label>
           <input id="ed-titulo" type="text" maxlength="60" autocomplete="off">
         </div>
-        <div class="campo">
+        <div class="campo" id="ed-campo-pergunta" data-so="curto">
           <label for="ed-pergunta">Pergunta (opcional)</label>
           <input id="ed-pergunta" type="text" maxlength="60" autocomplete="off">
         </div>
@@ -271,7 +331,7 @@
       <ul id="ed-sugestoes" class="ed-sugestoes" aria-label="Títulos sugeridos"></ul>
     </div>
 
-    <div class="dlg-bloco">
+    <div class="dlg-bloco" data-so="curto">
       <h3>1. Layout</h3>
       <label class="opcao"><input type="radio" name="ed-layout" value="empilhado" checked>
         <span><strong>Câmera + gameplay (caixas)</strong><small>Você escolhe o recorte da câmera e o do gameplay e como eles ficam empilhados.</small></span></label>
@@ -280,7 +340,7 @@
       <p id="ed-inteiro-info" class="ajuda" hidden>Sem recorte: o corte inteiro (16:9) fica no meio, com o fundo desfocado. A legenda vai embaixo do vídeo.</p>
     </div>
 
-    <div id="ed-caixas" class="dlg-bloco">
+    <div id="ed-caixas" class="dlg-bloco" data-so="curto">
       <p class="ajuda">Pause o vídeo lá em cima num momento em que a câmera e o gameplay aparecem e clique em <strong>Usar este quadro</strong>. Depois <strong>arraste uma caixa para movê-la</strong> e puxe um canto para mudar o tamanho (a proporção fica travada, então nada é esticado).</p>
       <div id="ed-area-caixas" hidden>
         <div class="ed-grade">
@@ -319,8 +379,9 @@
 
     <div class="dlg-bloco">
       <h3>2. O que colocar no corte</h3>
-      <label class="inline caixa"><input type="checkbox" id="ed-tarja" checked> <span id="ed-tarja-rotulo">Tarja vermelha</span></label>
+      <label class="inline caixa" data-so="curto"><input type="checkbox" id="ed-tarja" checked> <span id="ed-tarja-rotulo">Tarja vermelha</span></label>
       <label class="inline caixa"><input type="checkbox" id="ed-legenda" checked> Legenda (karaokê, palavra por palavra)</label>
+      <label class="inline caixa" data-so="longo" hidden><input type="checkbox" id="ed-capitulos" checked> Título de cada momento no começo dele (ex.: “3 · SUSTO NO BAÚ”, canto de cima)</label>
       <label class="inline caixa"><input type="checkbox" id="ed-resumo" checked> Resumo narrado no início (usa IA; o vídeo para no primeiro quadro enquanto a voz resume)</label>
       <label class="inline caixa"><input type="checkbox" id="ed-cta" checked> Chamada final (a voz pede like, compartilhamento e inscrição)</label>
     </div>
@@ -341,5 +402,6 @@
   <script src="/static/timeline.js"></script>
   <script src="/static/editor.js"></script>
   <script src="/static/lives.js"></script>
+  <script src="/static/longos.js"></script>
 </body>
 </html>
