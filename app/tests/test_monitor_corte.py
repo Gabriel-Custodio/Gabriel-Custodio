@@ -16,6 +16,7 @@ sys.path.insert(0, str(RAIZ))
 sys.path.insert(0, str(RAIZ / "app"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from monitor import corte, processo  # noqa: E402
+from monitor import sinais  # noqa: E402
 from monitor.sinais import Momento, Sinal  # noqa: E402
 from test_servidor import Base  # noqa: E402
 
@@ -87,31 +88,32 @@ class TestProdutorCortes(BaseCorte):
 
     def test_faixas_de_nota(self):
         c = corte.ProdutorCortes.classificar
-        for nota, esperado in ((0, "descartado"), (5.4, "descartado"), (6.4, "descartado"), (6.44, "descartado"),
-                               (6.5, "medio"), (6.6, "medio"), (7.0, "medio"), (7.5, "medio"), (7.54, "medio"), (7.56, "alto"),
+        self.assertEqual(sinais.NOTA_DESCARTE, 7.6)                                   # régua: 7,6 ou mais entra; 7,5 e abaixo é descartado
+        for nota, esperado in ((0, "descartado"), (5.4, "descartado"), (6.4, "descartado"), (6.5, "descartado"),
+                               (7.0, "descartado"), (7.5, "descartado"), (7.54, "descartado"), (7.56, "alto"),
                                (7.6, "alto"), (9.9, "alto"), (10, "alto"), (None, "descartado")):
             self.assertEqual(c(nota)[1], esperado, nota)
         self.assertEqual(c(7.66), (7.7, "alto"))                                      # a nota arredondada é a do nome e do painel
 
     def test_o_nome_e_a_marcacao_seguem_a_nota(self):
         p = self.produtor()
-        medio = p(momento(7.0), self.candidato)
-        self.assertEqual((medio["potencial"], medio["arquivo"]), ("medio", "CorteLive_20261124_213005_nota7.0.mp4"))
-        self.assertEqual(self.meta(medio["arquivo"])["potencial"], "medio")
-        self.candidato.write_bytes(b"corte" * 500)
-        self.assertEqual(p(momento(6.5), self.candidato)["potencial"], "medio")
+        alto = p(momento(8.3), self.candidato)
+        self.assertEqual((alto["potencial"], alto["arquivo"]), ("alto", "CorteLive_20261124_213005_nota8.3.mp4"))
+        self.assertEqual(self.meta(alto["arquivo"])["potencial"], "alto")
         self.candidato.write_bytes(b"corte" * 500)
         self.assertEqual(p(momento(7.6), self.candidato)["arquivo"], "CorteLive_20261124_213005_nota7.6.mp4")
 
-    def test_abaixo_de_6_5_e_descartado_sem_gastar_transcricao_nem_ia(self):
-        chamadas = []
-        p = self.produtor(transcrever=lambda a: chamadas.append("whisper") or FALA, julgar=lambda t, s, d: chamadas.append("ia"))
-        r = p(momento(6.4), self.candidato)
-        self.assertEqual((r["resultado"], r["nota"]), ("descartado", 6.4))
-        self.assertIn("6.5", r["motivo"])
-        self.assertEqual(chamadas, [])
-        self.assertFalse((self.raiz / "cortes_prontos").exists())
-        self.assertFalse(self.candidato.exists())                                    # descartado de vez
+    def test_abaixo_de_7_6_e_descartado_sem_gastar_transcricao_nem_ia(self):
+        for nota in (6.4, 6.5, 7.0, 7.5):                                           # 7,5 também: só 7,6 ou mais fica
+            chamadas = []
+            p = self.produtor(transcrever=lambda a: chamadas.append("whisper") or FALA, julgar=lambda t, s, d: chamadas.append("ia"))
+            self.candidato.write_bytes(b"corte" * 500)
+            r = p(momento(nota), self.candidato)
+            self.assertEqual((r["resultado"], r["nota"]), ("descartado", nota))
+            self.assertIn("7.6", r["motivo"])
+            self.assertEqual(chamadas, [], nota)
+            self.assertFalse((self.raiz / "cortes_prontos").exists(), nota)
+            self.assertFalse(self.candidato.exists(), nota)                          # descartado de vez
 
     def test_a_ia_recebe_a_transcricao_e_os_sinais(self):
         self.produtor()(momento(), self.candidato)
@@ -144,7 +146,7 @@ class TestProdutorCortes(BaseCorte):
 
         def quebra(t, s, d):
             raise RuntimeError("rede")
-        self.assertEqual(self.produtor(julgar=quebra)(momento(7.0), self.candidato)["resultado"], "enviado")
+        self.assertEqual(self.produtor(julgar=quebra)(momento(8.0), self.candidato)["resultado"], "enviado")
         self.assertTrue(any(n == "WARN" and "IA falhou" in m for n, m in self.logs))
 
     def test_sem_chave_nao_transcreve_nem_chama_a_ia(self):

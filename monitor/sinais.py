@@ -18,7 +18,7 @@ SENSIBILIDADES = {
     "alta":  {"audio_db": 4.0, "chat_fator": 1.7, "gatilho": 3.5, "max_hora": 30},
 }
 SENSIBILIDADE_PADRAO = "media"
-NOTA_DESCARTE = 6.5            # momento com nota abaixo disso (arredondada em 1 casa) vira descarte: não conta no limite por hora
+NOTA_DESCARTE = 7.6            # momento com nota abaixo disso (arredondada em 1 casa) vira descarte: não conta no limite por hora (régua subida de 6,5 para "7,6 ou mais", 26/11)
 
 PISO_LUFS = -45.0              # abaixo disso é silêncio: não entra na linha de base nem dispara
 AQUECIMENTO_AUDIO = 12         # medições (segmentos) antes de poder disparar: a live precisa "mostrar o normal" antes

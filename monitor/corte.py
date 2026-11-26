@@ -1,7 +1,8 @@
 """Do momento detectado ao corte BRUTO em "Cortes prontos" (a mesma coisa que o modo Gameplay faz com um vídeo).
 
-Quem decide é a NOTA do momento (0-10, a que o painel mostra): abaixo de 6,5 o corte é descartado; de 6,5 a 7,5 entra com
-a marcação "Potencial Médio"; acima de 7,5 (7,6 a 10) entra com "Potencial Alto". A IA NÃO veta: para os momentos que
+Quem decide é a NOTA do momento (0-10, a que o painel mostra): abaixo de 7,6 (7,5 inclusive) o corte é descartado; de 7,6 a 10
+entra com "Potencial Alto". (Até 25/11 a régua era 6,5, com a faixa "Potencial Médio" de 6,5 a 7,5; com a régua em 7,6 essa
+faixa não ocorre mais, mas a classificação continua pronta caso a régua volte a baixar.) A IA NÃO veta: para os momentos que
 entram, ela lê a transcrição e escreve o título, a pergunta e o motivo (e dá a própria nota, guardada à parte).
 O corte é o candidato que o monitor extraiu (a janela ancorada no pico) e vai para cortes_prontos/_brutos + uma cópia
 visível em cortes_prontos, com o .json no formato do modo Gameplay (legenda_segmentos, bruto, edicao) e a origem (live,
@@ -17,9 +18,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from .sinais import NOTA_DESCARTE      # 6,5: nota (0-10) abaixo disso o corte é descartado (a mesma conta do limite por hora)
+from .sinais import NOTA_DESCARTE      # 7,6: nota (0-10) abaixo disso o corte é descartado (a mesma conta do limite por hora)
 
-NOTA_ALTO = 7.5               # acima disso (7,6 a 10): Potencial Alto; de 6,5 a 7,5: Potencial Médio
+NOTA_ALTO = 7.5               # acima disso (7,6 a 10): Potencial Alto; entre NOTA_DESCARTE e isso: Potencial Médio (hoje vazio: o descarte é 7,6)
 PALAVRAS_MINIMAS = 6          # menos palavras que isso = "sem fala": a IA nem é chamada
 TEXTO_MAX_CHARS = 2400        # quanto da transcrição vai para a IA
 BRUTOS = "_brutos"
