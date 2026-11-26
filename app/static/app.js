@@ -82,6 +82,8 @@ function alternarLongo() {
   const gameplay = document.querySelector('input[name="modo"]:checked').value === "gameplay";
   const ligado = gameplay && $("longo").checked;
   $("campo-longo-min").hidden = !ligado;
+  $("campo-segundo-link").hidden = !ligado;
+  $("campo-streamer2").hidden = !ligado;
   $("aviso-longo").hidden = !ligado;
   $("cortes").min = ligado ? "0" : "1";
   $("cortes-faixa").textContent = ligado ? "0 a 10" : "1 a 10";
@@ -164,7 +166,14 @@ $("form-gerar").addEventListener("submit", async (ev) => {
   if (modo === "gameplay") {
     const cortes = String(f.get("cortes") ?? "").trim();
     corpo.cortes = cortes === "" ? 5 : Number(cortes);            // 0 vale (só o vídeo longo)
-    if (f.get("longo") === "on") corpo.video_longo = Number(f.get("longo_min") || 8);
+    if (f.get("longo") === "on") {
+      corpo.video_longo = Number(f.get("longo_min") || 8);
+      const segundo = String(f.get("segundo_link") || "").trim();
+      if (segundo) {                                              // dois streamers: os momentos dos dois vídeos se intercalam
+        corpo.segundo_link = segundo;
+        corpo.streamer2 = String(f.get("streamer2") || "").trim();
+      }
+    }
     corpo.streamer = String(f.get("streamer") || "").trim();
   }
   try {
@@ -237,7 +246,12 @@ function montarCorte(c) {
   resumo.hidden = !c.resumo;
   no.querySelector(".texto-resumo").textContent = c.resumo || "";
 
+  descricaoMontar(no, c, "cortes");
   const editar = no.querySelector(".editar");
+  if (c.edicao && c.edicao.estado === "renderizado" && c.editavel) {          // já editado: o mesmo botão reabre o editor com as opções da última edição
+    editar.textContent = "Reeditar";
+    editar.title = "Reabre o editor com as opções da última edição (dá para recomeçar do bruto lá dentro)";
+  }
   if (!c.editavel) selos.append(selo("sem versão bruta", "cancelado"));
   editar.addEventListener("click", () => {
     if (c.editavel) { edAbrir(c); return; }
@@ -320,7 +334,7 @@ $("btn-pasta").addEventListener("click", async () => {
   try {
     const estado = await api("/api/estado");
     mostrarPrerequisitos(estado.prerequisitos);
-    $("aviso-versao").hidden = Array.isArray(estado.recursos) && estado.recursos.includes("edicao") && estado.recursos.includes("linha_do_tempo") && estado.recursos.includes("canais") && estado.recursos.includes("monitor_lives") && estado.recursos.includes("titulo_editavel") && estado.recursos.includes("video_longo") && estado.recursos.includes("videos_longos");
+    $("aviso-versao").hidden = Array.isArray(estado.recursos) && estado.recursos.includes("edicao") && estado.recursos.includes("linha_do_tempo") && estado.recursos.includes("canais") && estado.recursos.includes("monitor_lives") && estado.recursos.includes("titulo_editavel") && estado.recursos.includes("video_longo") && estado.recursos.includes("videos_longos") && estado.recursos.includes("segundo_link") && estado.recursos.includes("descricao") && estado.recursos.includes("reedicao");
     atualizarEstadoJob(estado.job);
     if (estado.job && estado.job.estado === "rodando") iniciarConsulta();
     else if (estado.job) consultarLog();

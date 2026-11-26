@@ -140,6 +140,33 @@ def capitulos(momentos, trechos, duracao):
     return [c for c in itens if c["fim"] - c["inicio"] >= 0.8]
 
 
+def _marca_de_tempo(segundos):
+    """0:00 (ou 1:02:03 a partir de uma hora): o formato que o YouTube reconhece nos capítulos da descrição."""
+    total = max(0, int(segundos))
+    h, resto = divmod(total, 3600)
+    m, s = divmod(resto, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def capitulos_para_descricao(caps, deslocamento=0.0, minimo=3):
+    """Linhas "m:ss Título" para colar na descrição do YouTube (que vira capítulos), ou "" se não der.
+
+    `caps`: os capítulos de `capitulos()` (linha do tempo aparada, sem o resumo do início); `deslocamento`: a duração do
+    resumo narrado colocado antes do vídeo (os tempos andam esse tanto). O YouTube exige o primeiro capítulo em 0:00 e pelo
+    menos 3 capítulos, então entra uma linha inicial quando o primeiro momento não começa em 0:00. As marcas vêm só da
+    linha do tempo real do vídeo: a IA nunca escreve tempo nenhum.
+    """
+    linhas = [(float(c["inicio"]) + deslocamento, limpar_titulo(c.get("titulo") or "", 60)) for c in caps or []]
+    linhas = [(t, nome) for t, nome in linhas if nome]
+    if not linhas:
+        return ""
+    if linhas[0][0] >= 1:
+        linhas.insert(0, (0.0, "Abertura" if deslocamento > 0 else "Início"))
+    if len(linhas) < minimo:
+        return ""
+    return "\n".join(f"{_marca_de_tempo(t)} {nome}" for t, nome in linhas)
+
+
 def comando_aparar(ffmpeg, bruto, trechos, saida, crf=CRF_FINAL):
     """Junta só os trechos mantidos do bruto num arquivo intermediário (recodifica; o resultado final é codificado de novo)."""
     partes, rotulos = [], []

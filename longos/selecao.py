@@ -9,8 +9,14 @@ Regras:
     nunca ficar abaixo do que foi pedido só porque o próximo momento não coube);
   * os INÍCIOS de dois momentos ficam a pelo menos DISTANCIA_MIN_S um do outro (sem sobreposição, variedade);
   * se não houver momento bom o bastante para fechar o alvo, o vídeo sai mais curto (e o resumo avisa).
+
+Com DUAS fontes (dois vídeos de streamers diferentes), cada candidato traz `fonte_n` (1 ou 2) e `selecionar(alternar=True)`
+escolhe um da fonte 1, um da fonte 2, e assim por diante (cada um com o melhor que ainda sobra dela), então os dois
+streamers aparecem em partes iguais; se uma fonte acabar, a outra completa. A regra de distância vale DENTRO de cada
+fonte (os tempos de vídeos diferentes não se comparam) e a ordem final intercala as fontes (cada uma em ordem cronológica).
 """
 import math
+from itertools import zip_longest
 
 DURACAO_MIN_MIN = 4              # menor duração-alvo aceita (minutos)
 DURACAO_MAX_MIN = 12             # maior duração-alvo aceita (minutos)
@@ -44,8 +50,10 @@ def _intervalo(candidato):
     return inicio, fim, nota
 
 
-def selecionar(candidatos, alvo_s, nota_minima=NOTA_MINIMA, distancia_min_s=DISTANCIA_MIN_S):
+def selecionar(candidatos, alvo_s, nota_minima=NOTA_MINIMA, distancia_min_s=DISTANCIA_MIN_S, alternar=False):
     """Escolhe os momentos do vídeo longo. Devolve (escolhidos em ordem cronológica, resumo).
+
+    `alternar=True` (duas fontes): intercala os momentos das fontes (`fonte_n` de cada candidato); ver o topo do módulo.
 
     `resumo`: alvo_s, total_s, elegiveis (quantos passaram na nota), escolhidos, curto (ficou abaixo do alvo),
     viavel (dá para montar: pelo menos MIN_MOMENTOS e MIN_TOTAL_S) e motivo (texto para o log quando não é viável
@@ -59,6 +67,12 @@ def selecionar(candidatos, alvo_s, nota_minima=NOTA_MINIMA, distancia_min_s=DIST
         if dados is not None and round(dados[2], 1) >= nota_minima:
             elegiveis.append((dados, cand))
     elegiveis.sort(key=lambda item: (-item[0][2], item[0][0]))      # melhor nota primeiro; empate: o mais cedo
+    if alternar:                                                    # um de cada fonte por vez, sempre o melhor que sobrou dela
+        grupos = {}
+        for item in elegiveis:
+            grupos.setdefault(item[1].get("fonte_n"), []).append(item)
+        elegiveis = [item for rodada in zip_longest(*(grupos[k] for k in sorted(grupos, key=str))) for item in rodada
+                     if item is not None]
 
     escolhidos, total = [], 0.0
     for (inicio, fim, _), cand in elegiveis:
@@ -67,7 +81,8 @@ def selecionar(candidatos, alvo_s, nota_minima=NOTA_MINIMA, distancia_min_s=DIST
         duracao = fim - inicio
         if total + duracao > maximo:
             continue                                                # não cabe: tenta um menor
-        if any(abs(inicio - o["start"]) < distancia_min_s or (inicio < o["end"] and o["start"] < fim)
+        if any(o.get("fonte_n") == cand.get("fonte_n")
+               and (abs(inicio - o["start"]) < distancia_min_s or (inicio < o["end"] and o["start"] < fim))
                for o in escolhidos):
             continue
         item = dict(cand)
@@ -75,6 +90,12 @@ def selecionar(candidatos, alvo_s, nota_minima=NOTA_MINIMA, distancia_min_s=DIST
         escolhidos.append(item)
         total += duracao
     escolhidos.sort(key=lambda c: c["start"])
+    if alternar:                                                    # fonte 1, fonte 2, fonte 1... (cada uma em ordem cronológica)
+        porfonte = {}
+        for c in escolhidos:
+            porfonte.setdefault(c.get("fonte_n"), []).append(c)
+        escolhidos = [c for rodada in zip_longest(*(porfonte[k] for k in sorted(porfonte, key=str))) for c in rodada
+                      if c is not None]
 
     viavel = len(escolhidos) >= MIN_MOMENTOS and total >= MIN_TOTAL_S
     curto = total < alvo_s * 0.9

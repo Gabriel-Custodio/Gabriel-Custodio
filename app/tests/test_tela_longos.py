@@ -11,7 +11,7 @@ from pathlib import Path
 
 ESTATICO = Path(__file__).resolve().parents[1] / "static"
 HTML = (ESTATICO / "index.html").read_text(encoding="utf-8")
-SCRIPTS = ["app.js", "timeline-logica.js", "timeline.js", "editor.js", "lives.js", "longos.js"]
+SCRIPTS = ["descricao.js", "app.js", "timeline-logica.js", "timeline.js", "editor.js", "lives.js", "longos.js"]
 
 
 def ids_do_html():

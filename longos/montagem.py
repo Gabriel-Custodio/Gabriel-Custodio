@@ -61,6 +61,8 @@ def montar_bruto(origem, escolhidos, destino, pasta_temp, ffmpeg, executar, medi
 
     Um escolhido com `arquivo` (cortes de uma live) vem inteiro desse arquivo, não de `origem`: o `start`/`end` dele são
     só a posição na live (usada na escolha), e a legenda dele (`segmentos`) já é relativa ao começo do arquivo.
+    Um escolhido com `video` (vídeo longo com DUAS fontes) é cortado desse vídeo, em `start`/`end` dele, e traz a própria
+    transcrição (`segmentos`), o `streamer` e o `url` da sua fonte.
 
     O dict traz `momentos` (cada um com seu início/fim no vídeo base E na linha do tempo do vídeo longo,
     medidos nos arquivos de verdade) e `duracao_s`. Um momento que falhar é pulado; com menos de 2 sobrando, falha.
@@ -78,6 +80,7 @@ def montar_bruto(origem, escolhidos, destino, pasta_temp, ffmpeg, executar, medi
     total = len(escolhidos)
     for numero, cand in enumerate(escolhidos, 1):
         fonte = cand.get("arquivo")
+        video = None if fonte else cand.get("video")
         if fonte:
             inicio, duracao = 0.0, float(cand.get("duration") or (float(cand["end"]) - float(cand["start"])))
         else:
@@ -86,8 +89,9 @@ def montar_bruto(origem, escolhidos, destino, pasta_temp, ffmpeg, executar, medi
         fim = inicio + duracao
         arquivo = pasta_temp / f"longo_momento_{numero:03d}.mp4"
         log(f"   ✂️  Momento {numero}/{total}: {inicio:.1f}s - {fim:.1f}s ({duracao:.1f}s)"
-            + (f" de {Path(fonte).name}" if fonte else ""))
-        ok, _, erro = executar(comando_momento(ffmpeg, fonte or origem, inicio, duracao, arquivo), timeout=TIMEOUT_MOMENTO_S)
+            + (f" de {Path(fonte).name}" if fonte else "")
+            + (f" · fonte {cand.get('fonte_n')}" + (f" ({cand['streamer']})" if cand.get("streamer") else "") if video else ""))
+        ok, _, erro = executar(comando_momento(ffmpeg, fonte or video or origem, inicio, duracao, arquivo), timeout=TIMEOUT_MOMENTO_S)
         if not ok or not arquivo.is_file() or arquivo.stat().st_size < 1024:
             log(f"   ⚠️  Momento {numero} pulado (falha ao cortar): {str(erro)[:200]}")
             _apagar(arquivo)
@@ -105,6 +109,9 @@ def montar_bruto(origem, escolhidos, destino, pasta_temp, ffmpeg, executar, medi
         if fonte:                                                # corte de live: guarda de onde veio (e a legenda dele, tirada depois)
             momentos[-1].update({"arquivo": Path(fonte).name, "detectado_em": cand.get("detectado_em"),
                                  "segmentos": cand.get("segmentos") or []})
+        elif video:                                              # duas fontes: cada momento sabe de qual vídeo/streamer veio
+            momentos[-1].update({"fonte_n": cand.get("fonte_n"), "streamer": cand.get("streamer") or None,
+                                 "video_url": cand.get("url") or None, "segmentos": cand.get("segmentos") or []})
         cursor += real
 
     lista = pasta_temp / "longo_lista.txt"

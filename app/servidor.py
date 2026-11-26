@@ -46,7 +46,7 @@ PORTA_PADRAO = 8765
 MODOS = {"ia": "Narração por IA", "gameplay": "Gameplay / Streamer", "original": "Áudio original"}
 LAYOUTS = {"cam", "fit", "clipflow"}
 FUNDOS = {"blur", "black"}
-RECURSOS = ["edicao", "linha_do_tempo", "canais", "monitor_lives", "titulo_editavel", "video_longo", "videos_longos"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
+RECURSOS = ["edicao", "linha_do_tempo", "canais", "monitor_lives", "titulo_editavel", "video_longo", "videos_longos", "segundo_link", "descricao", "reedicao"]      # o que este servidor sabe fazer; a página confere (servidor antigo + página nova = aviso)
 RE_SLUG = re.compile(r"^[a-z0-9_-]{1,40}$")
 CAM_ALTURA_MIN, CAM_ALTURA_MAX, CAM_ALTURA_PADRAO = 300, 1100, 600
 ORDENS = ("cam_primeiro", "game_primeiro")
@@ -57,6 +57,8 @@ SUGERIR_TIMEOUT_S = 75     # tempo máximo esperando as sugestões de título
 TRECHOS_TOTAL_MIN_S = 1.0
 LONGO_MIN_MIN, LONGO_MAX_MIN = 4, 12     # duração do vídeo longo, em minutos (igual ao pacote longos/)
 LONGO_TITULO_MAX = 100                   # caracteres do título do vídeo longo (igual ao pacote longos/)
+DESCRICAO_MAX_CORTE = 900                # caracteres da descrição de um corte (igual ao gerar_cortes.py)
+DESCRICAO_MAX_LONGO = 4000               # e a de um vídeo longo (as sugestões já trazem os capítulos; o YouTube aceita 5000)
 LONGO_RECORTE_MIN = 0.05                 # menor lado do recorte, em fração do quadro (igual ao pacote longos/)
 ONDA_PONTOS = 2400                       # picos da onda do áudio que a linha do tempo desenha
 ONDA_TIMEOUT_S = 600
@@ -261,6 +263,7 @@ class Estado:
                 "canal": str((meta.get("live") or {}).get("nome") or "")[:60] if isinstance(meta.get("live"), dict) else "",
                 "bruto": bool(meta.get("bruto")),                                  # ainda sem edição (tela completa)
                 "editavel": (self.brutos / arq.name).is_file(),
+                "descricao": str(meta.get("descricao") or "")[:DESCRICAO_MAX_CORTE],
                 "layout": meta.get("layout"),
                 "edicao": meta.get("edicao") if isinstance(meta.get("edicao"), dict) else None,
             })
@@ -400,6 +403,37 @@ class Estado:
         params = {"modo": "edicao", "url": nome}
         return self._lancar(comando, {}, params, f"▶ Renderizando de novo: {nome}")
 
+    def _consultar_ia(self, flag, nome, longos, prefixo, nome_pedido):
+        """Roda `gerar_cortes.py <flag> NOME --biblioteca ...` e devolve a lista que ele imprime depois de `prefixo`.
+
+        Levanta ValueError com a mensagem para a tela (sem chave, demora demais, IA sem resposta...).
+        """
+        if not chave_groq_configurada(self.raiz):
+            raise ValueError(f"Falta a chave do Groq: coloque GROQ_API_KEY no arquivo .env para a IA sugerir {nome_pedido}.")
+        if not (self.raiz / "gerar_cortes.py").is_file():
+            raise ValueError("gerar_cortes.py não encontrado na pasta do projeto.")
+        env = os.environ.copy()
+        env.update({"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"})
+        kwargs = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform.startswith("win") else {}
+        try:
+            r = subprocess.run([self.python, str(self.raiz / "gerar_cortes.py"), flag, nome,
+                                "--biblioteca", "longos" if longos else "cortes"], cwd=str(self.raiz),
+                               env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=SUGERIR_TIMEOUT_S, **kwargs)
+        except subprocess.TimeoutExpired:
+            raise ValueError("A IA demorou demais para responder. Tente de novo.")
+        except OSError as e:
+            raise ValueError(f"Não foi possível consultar a IA: {e}")
+        for linha in (r.stdout or "").splitlines():
+            if linha.startswith(prefixo):
+                try:
+                    itens = json.loads(linha[len(prefixo):])
+                except ValueError:
+                    break
+                return itens if isinstance(itens, list) else []
+        motivo = next((l.strip().lstrip("❌ ").strip() for l in reversed((r.stdout or "").splitlines()) if "❌" in l), "")
+        raise ValueError(motivo or "A IA não devolveu sugestões agora. Tente de novo em instantes.")
+
     def sugerir_titulos(self, nome, biblioteca="cortes"):
         """Pede à IA (gerar_cortes.py --sugerir-titulos) alternativas de título para o corte. Levanta ValueError com a mensagem.
 
@@ -415,37 +449,82 @@ class Estado:
                 raise ValueError("Este vídeo longo não tem os momentos guardados, então não dá para sugerir títulos.")
         elif not str(meta.get("transcricao") or "").strip():
             raise ValueError("Este corte não tem a transcrição guardada, então não dá para sugerir títulos.")
-        if not chave_groq_configurada(self.raiz):
-            raise ValueError("Falta a chave do Groq: coloque GROQ_API_KEY no arquivo .env para a IA sugerir títulos.")
-        if not (self.raiz / "gerar_cortes.py").is_file():
-            raise ValueError("gerar_cortes.py não encontrado na pasta do projeto.")
-        env = os.environ.copy()
-        env.update({"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"})
-        kwargs = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform.startswith("win") else {}
-        try:
-            r = subprocess.run([self.python, str(self.raiz / "gerar_cortes.py"), "--sugerir-titulos", nome,
-                                "--biblioteca", "longos" if longos else "cortes"], cwd=str(self.raiz),
-                               env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=SUGERIR_TIMEOUT_S, **kwargs)
-        except subprocess.TimeoutExpired:
-            raise ValueError("A IA demorou demais para responder. Tente de novo.")
-        except OSError as e:
-            raise ValueError(f"Não foi possível consultar a IA: {e}")
-        for linha in (r.stdout or "").splitlines():
-            if linha.startswith("TITULOS_JSON="):
-                try:
-                    itens = json.loads(linha[len("TITULOS_JSON="):])
-                except ValueError:
-                    break
-                limpos = []
-                for i in itens if isinstance(itens, list) else []:
-                    if isinstance(i, dict) and isinstance(i.get("titulo"), str) and i["titulo"].strip():
-                        limpos.append({"titulo": i["titulo"].strip()[:LONGO_TITULO_MAX if longos else TITULO_MAX],
-                                       "pergunta": str(i.get("pergunta") or "").strip()[:TITULO_MAX]})
-                if limpos:
-                    return limpos
-        motivo = next((l.strip().lstrip("❌ ").strip() for l in reversed((r.stdout or "").splitlines()) if "❌" in l), "")
-        raise ValueError(motivo or "A IA não devolveu sugestões agora. Tente de novo em instantes.")
+        itens = self._consultar_ia("--sugerir-titulos", nome, longos, "TITULOS_JSON=", "títulos")
+        limpos = []
+        for i in itens:
+            if isinstance(i, dict) and isinstance(i.get("titulo"), str) and i["titulo"].strip():
+                limpos.append({"titulo": i["titulo"].strip()[:LONGO_TITULO_MAX if longos else TITULO_MAX],
+                               "pergunta": str(i.get("pergunta") or "").strip()[:TITULO_MAX]})
+        if limpos:
+            return limpos
+        raise ValueError("A IA não devolveu sugestões agora. Tente de novo em instantes.")
+
+    # ---- descrição (texto para colar ao postar; não entra no vídeo, então vale sem renderizar)
+    @staticmethod
+    def _descricao_limpa(valor, longos):
+        """Texto da descrição: sem caracteres de controle, linhas sem espaços repetidos, no máximo uma linha em branco seguida."""
+        if not isinstance(valor, str):
+            raise ValueError("Descrição inválida.")
+        texto = "".join(c for c in valor if c == "\n" or (ord(c) >= 32 and ord(c) != 127))
+        linhas, vazias = [], 0
+        for linha in texto.split("\n"):
+            linha = " ".join(linha.split())
+            vazias = 0 if linha else vazias + 1
+            if linha or (vazias == 1 and linhas):
+                linhas.append(linha)
+        return "\n".join(linhas)[:DESCRICAO_MAX_LONGO if longos else DESCRICAO_MAX_CORTE].strip()
+
+    def _json_do_item(self, nome, biblioteca):
+        """(caminho do .json, ValueError se o corte/vídeo não existe) de um item da biblioteca."""
+        longos = biblioteca == "longos"
+        nome = so_nome_de_arquivo(nome)
+        if nome is None or (self.caminho_longo(nome, bruto=True) if longos else self.caminho_corte(nome)) is None:
+            raise ValueError("Vídeo longo não encontrado." if longos else "Corte não encontrado.")
+        return ((self.saida_longos if longos else self.saida) / nome).with_suffix(".json"), nome
+
+    def sugerir_descricoes(self, nome, biblioteca="cortes"):
+        """Pede à IA (gerar_cortes.py --sugerir-descricoes) opções de descrição. Levanta ValueError com a mensagem."""
+        longos = biblioteca == "longos"
+        caminho, nome = self._json_do_item(nome, biblioteca)
+        meta = ler_json(caminho)
+        if longos:
+            if not meta.get("momentos"):
+                raise ValueError("Este vídeo longo não tem os momentos guardados, então não dá para sugerir descrições.")
+        elif not str(meta.get("transcricao") or "").strip():
+            raise ValueError("Este corte não tem a transcrição guardada, então não dá para sugerir descrições.")
+        itens = self._consultar_ia("--sugerir-descricoes", nome, longos, "DESCRICOES_JSON=", "descrições")
+        limpos = []
+        for i in itens:
+            try:
+                texto = self._descricao_limpa(i.get("descricao"), longos) if isinstance(i, dict) else ""
+            except ValueError:
+                continue
+            if texto:
+                limpos.append({"descricao": texto})
+        if limpos:
+            return limpos
+        raise ValueError("A IA não devolveu sugestões agora. Tente de novo em instantes.")
+
+    def salvar_descricao(self, nome, texto, biblioteca="cortes"):
+        """Guarda a descrição no .json do corte/vídeo (texto vazio apaga). Devolve o texto salvo. Levanta ValueError."""
+        longos = biblioteca == "longos"
+        caminho, nome = self._json_do_item(nome, biblioteca)
+        texto = self._descricao_limpa(texto if texto is not None else "", longos)
+        with self.trava:
+            meta = ler_json(caminho)
+            if not meta:                                 # sem .json (ou ilegível): gravar só a descrição apagaria o resto
+                raise ValueError("Os dados deste vídeo (.json) não foram encontrados ou estão ilegíveis, então não dá para guardar a descrição.")
+            if texto:
+                meta["descricao"] = texto
+            else:
+                meta.pop("descricao", None)
+            tmp = caminho.with_name(caminho.name + ".tmp")
+            try:
+                tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+                tmp.replace(caminho)
+            except OSError as e:
+                raise ValueError(f"Não foi possível guardar a descrição: {e}")
+        return texto
 
     # ---- vídeos longos (biblioteca própria: videos_longos/, com o mesmo fluxo de edição dos cortes)
     def listar_longos(self):
@@ -471,7 +550,8 @@ class Estado:
                 if isinstance(m, dict) and isinstance(m.get("inicio"), (int, float)) and isinstance(m.get("fim"), (int, float)):
                     momentos.append({"n": m.get("n"), "inicio": m["inicio"], "fim": m["fim"],
                                      "inicio_video": m.get("inicio_video"), "titulo": str(m.get("titulo") or "")[:80],
-                                     "nota": m.get("nota"), "motivo": str(m.get("motivo") or "")[:80]})
+                                     "nota": m.get("nota"), "motivo": str(m.get("motivo") or "")[:80],
+                                     "streamer": str(m.get("streamer") or "")[:60]})
             resumo = meta.get("resumo_intro")
             itens.append({
                 "nome": nome, "titulo": str(meta.get("titulo") or "")[:LONGO_TITULO_MAX],
@@ -483,6 +563,10 @@ class Estado:
                 "duracao_s": meta.get("duracao_final_s"), "duracao_bruto_s": meta.get("clip_duration"),
                 "alvo_s": meta.get("alvo_s"), "momentos": momentos, "streamer": str(meta.get("streamer") or "")[:60],
                 "video_url": str(meta.get("video_url") or "")[:300],
+                "fontes": [{"n": f.get("n"), "streamer": str(f.get("streamer") or "")[:60], "url": str(f.get("url") or "")[:300],
+                            "momentos": f.get("momentos")}
+                           for f in (meta.get("fontes") if isinstance(meta.get("fontes"), list) else []) if isinstance(f, dict)][:2],
+                "descricao": str(meta.get("descricao") or "")[:DESCRICAO_MAX_LONGO],
                 "resumo": str(resumo.get("texto") or "") if isinstance(resumo, dict) else "",
                 "resumo_motivo": str(meta.get("resumo_motivo") or ""),
                 "cta": isinstance(meta.get("cta_final"), dict), "cta_motivo": str(meta.get("cta_motivo") or ""),
@@ -780,6 +864,28 @@ class Estado:
             if longo:
                 comando += ["--video-longo", str(longo)]
                 params["video_longo"] = longo
+            segundo = dados.get("segundo_link")                    # outro streamer: os momentos dos dois vídeos se intercalam
+            if segundo is not None and not isinstance(segundo, str):
+                raise ValueError("Segundo link inválido.")
+            segundo = re.sub(r"^(?:https?://)+(?=https?://)", "", (segundo or "").strip(), flags=re.IGNORECASE)
+            if segundo:
+                if not longo:
+                    raise ValueError("O segundo link só vale junto com o vídeo longo: marque “Também criar um vídeo longo”.")
+                if not RE_URL.match(segundo) or len(segundo) > 2000 or segundo.startswith("-"):
+                    raise ValueError("O segundo link precisa começar com http:// ou https://")
+                if segundo.rstrip("/") == url.rstrip("/"):
+                    raise ValueError("O segundo link é o mesmo do primeiro: use o link de outro streamer.")
+                comando.append(f"--segundo-link={segundo}")      # com "=": nunca vira outra opção
+                params["segundo_link"] = segundo
+                streamer2 = dados.get("streamer2")
+                if streamer2 is not None and not isinstance(streamer2, str):
+                    raise ValueError("Nome do segundo streamer inválido.")
+                streamer2 = re.sub(r"\s+", " ", (streamer2 or "")).strip()
+                if streamer2:
+                    if len(streamer2) > 60 or any(ord(c) < 32 for c in streamer2):
+                        raise ValueError("Nome do segundo streamer inválido (até 60 caracteres, só texto).")
+                    comando.append(f"--streamer2={streamer2}")
+                    params["streamer2"] = streamer2
             webcam = str(dados.get("webcam") or "").strip()
             if webcam:
                 if webcam not in {"1", "2", "3", "4", "5", "6", "7"}:
@@ -1079,6 +1185,18 @@ class Manipulador(BaseHTTPRequestHandler):
             try:
                 return self._json({"titulos": self.estado.sugerir_titulos(
                     dados.get("nome"), "longos" if caminho.startswith("/api/longos") else "cortes")})
+            except ValueError as e:
+                return self._erro(400, str(e))
+        if caminho in ("/api/cortes/descricoes", "/api/longos/descricoes"):
+            try:
+                return self._json({"descricoes": self.estado.sugerir_descricoes(
+                    dados.get("nome"), "longos" if caminho.startswith("/api/longos") else "cortes")})
+            except ValueError as e:
+                return self._erro(400, str(e))
+        if caminho in ("/api/cortes/descricao", "/api/longos/descricao"):
+            try:
+                return self._json({"descricao": self.estado.salvar_descricao(
+                    dados.get("nome"), dados.get("descricao"), "longos" if caminho.startswith("/api/longos") else "cortes")})
             except ValueError as e:
                 return self._erro(400, str(e))
         if caminho == "/api/canais/ativo":

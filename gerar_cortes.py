@@ -2288,21 +2288,81 @@ def _escolher_longo(candidatos, alvo_min, **opcoes):
     return escolhidos, resumo
 
 
-def build_long_video(video_path, scored, segments, alvo_min, url=None):
+def analyze_second_source(url, api_key, streamer=None):
+    """Segundo vídeo do vídeo longo (outro streamer): baixa, transcreve e dá nota aos momentos, como no primeiro.
+
+    Devolve {video, url, streamer, segmentos, scored, duracao} ou None (com o motivo no log). NUNCA levanta erro: o vídeo
+    longo cai de volta para a primeira fonte e os cortes já feitos não se perdem.
+    """
+    global FONTE_RESOLUCAO
+    try:
+        url_limpa = clean_youtube_url(url)
+        print("\n" + "=" * 60)
+        print("🎞️  SEGUNDO VÍDEO do vídeo longo (outro streamer)")
+        print("=" * 60)
+        resolucao = FONTE_RESOLUCAO                      # o .json guarda a resolução do PRIMEIRO vídeo
+        video, legenda = download_video(url, "f2_" + hashlib.md5(url.encode()).hexdigest()[:10])
+        FONTE_RESOLUCAO = resolucao
+        if not video:
+            print("   ⚠️  Não consegui baixar o segundo vídeo: o vídeo longo usa só o primeiro.")
+            return None
+        duracao = get_video_duration(video)
+        if duracao <= 90:
+            print(f"   ⚠️  O segundo vídeo tem só {duracao:.0f}s (precisa de mais de 90s): o vídeo longo usa só o primeiro.")
+            return None
+        pasta = TEMP_DIR / "segunda_fonte"               # a busca de legendas/áudio dele não se mistura com a do primeiro
+        pasta.mkdir(parents=True, exist_ok=True)
+        segmentos, _, _ = load_subtitles_with_fallback(legenda, video, pasta, api_key)
+        if not segmentos:
+            print("   ⚠️  Sem transcrição do segundo vídeo: o vídeo longo usa só o primeiro.")
+            return None
+        pool = build_gameplay_candidates(segmentos, duracao)
+        print(f"   🧩 {len(pool)} trechos candidatos com fala suficiente no segundo vídeo")
+        scored = score_bands(pool, duracao, api_key, per_band=LONGO_CANDIDATOS_POR_FAIXA, limit=LONGO_CANDIDATOS_POR_FAIXA)
+        if not scored:
+            print("   ⚠️  A IA não deu nota aos momentos do segundo vídeo: o vídeo longo usa só o primeiro.")
+            return None
+        nome = resolve_streamer_name(fetch_video_info(url_limpa), streamer)
+        print(f"   🎙️  Segundo streamer: {nome or 'não identificado (informe o nome no campo da interface)'}")
+        return {"video": video, "url": url_limpa, "streamer": nome, "segmentos": segmentos, "scored": scored, "duracao": duracao}
+    except Exception as erro:                            # noqa: BLE001 - o segundo vídeo nunca derruba o resto
+        print(f"   ⚠️  Erro no segundo vídeo ({erro}): o vídeo longo usa só o primeiro.")
+        return None
+
+
+def build_long_video(video_path, scored, segments, alvo_min, url=None, segunda=None):
     """Escolhe os momentos, monta o bruto horizontal e grava o .json em videos_longos/. Devolve o .json ou None.
 
+    `segunda` (de analyze_second_source): os momentos dos DOIS vídeos se alternam (um de cada streamer por vez, cada um
+    com o melhor que ainda sobra dele), a legenda de cada momento vem da transcrição do vídeo dele.
     NUNCA levanta erro: os cortes curtos já foram salvos e não podem se perder por causa disto.
     """
     try:
         import longos
         print("\n" + "=" * 60)
-        print(f"🎞️  VÍDEO LONGO (horizontal 1920x1080, alvo {alvo_min} min, nota mínima {longos.NOTA_MINIMA:g})")
+        print(f"🎞️  VÍDEO LONGO (horizontal 1920x1080, alvo {alvo_min} min, nota mínima {longos.NOTA_MINIMA:g}"
+              + (", dois streamers" if segunda else "") + ")")
         print("=" * 60)
-        escolhidos, resumo = _escolher_longo(scored, alvo_min)
-        if escolhidos is None:
-            return None
+        streamer, extra = STREAMER_NOME, None
+        if segunda:
+            candidatos = ([dict(c, fonte_n=1, video=video_path, segmentos=segments, streamer=STREAMER_NOME, url=url) for c in scored or []]
+                          + [dict(c, fonte_n=2, video=segunda["video"], segmentos=segunda["segmentos"],
+                                  streamer=segunda["streamer"], url=segunda["url"]) for c in segunda["scored"]])
+            escolhidos, resumo = _escolher_longo(candidatos, alvo_min, alternar=True)
+            if escolhidos is None:
+                return None
+            por_fonte = [sum(1 for c in escolhidos if c.get("fonte_n") == n) for n in (1, 2)]
+            print(f"   🔀 {por_fonte[0]} momento(s) do primeiro vídeo e {por_fonte[1]} do segundo, intercalados")
+            nomes = list(dict.fromkeys(n for n in (STREAMER_NOME, segunda["streamer"]) if n))
+            streamer = " e ".join(nomes) or None
+            extra = {"fontes": [{"n": 1, "url": url, "streamer": STREAMER_NOME, "momentos": por_fonte[0]},
+                                {"n": 2, "url": segunda["url"], "streamer": segunda["streamer"], "momentos": por_fonte[1]}]}
+        else:
+            escolhidos, resumo = _escolher_longo(scored, alvo_min)
+            if escolhidos is None:
+                return None
         return _gravar_longo(video_path, escolhidos, resumo, segments, alvo_min * 60, url=url,
-                             video_id=HISTORICO.video_key if HISTORICO else None, streamer=STREAMER_NOME)
+                             video_id=HISTORICO.video_key if HISTORICO else None, streamer=streamer, extra=extra)
     except Exception as erro:                                       # noqa: BLE001 - não pode derrubar os cortes já feitos
         print(f"❌ Vídeo longo: erro inesperado: {erro}")
         return None
@@ -5396,6 +5456,174 @@ def suggest_titles_for_clip(name, biblioteca="cortes"):
     return True
 
 
+SUGESTOES_DESCRICOES = 3
+DESCRICAO_MAX_CORTE = 900         # caracteres da descrição de um corte (cabe em Shorts, Reels e TikTok)
+DESCRICAO_MAX_LONGO = 2500        # e a de um vídeo longo (capítulos incluídos; o YouTube aceita até 5000)
+
+
+def clean_description(raw, maximo=DESCRICAO_MAX_CORTE):
+    """Texto da descrição: sem caracteres de controle, linhas sem espaços repetidos, no máximo uma linha em branco seguida."""
+    texto = "".join(c for c in str(raw or "") if c == "\n" or (ord(c) >= 32 and ord(c) != 127))
+    linhas, vazias = [], 0
+    for linha in texto.split("\n"):
+        linha = " ".join(linha.split())
+        vazias = 0 if linha else vazias + 1
+        if linha or (vazias == 1 and linhas):
+            linhas.append(linha)
+    return "\n".join(linhas)[:maximo].strip()
+
+
+def suggest_descriptions(text, current_title, api_key, count=SUGESTOES_DESCRICOES, streamer=None, current=""):
+    """Opções de descrição (para colar no post) de um corte, escritas SÓ com a fala dele. [] se a IA não respondeu."""
+    text = (text or "").strip()
+    if not text or not api_key:
+        return []
+    titulo = f'Título do corte: "{current_title}"\n' if current_title else ""
+    nome = f"Streamer (pode citar este nome, nenhum outro): {streamer}\n" if streamer else ""
+    prompt = (
+        "Você escreve descrições de posts para Shorts, Reels e TikTok. Abaixo está a transcrição EXATA da fala de um corte "
+        f"de live/gameplay. Escreva {count} opções de descrição DIFERENTES entre si (uma com curiosidade, uma com humor, "
+        "uma que convida a comentar), cada uma com 1 a 2 frases curtas e, no fim, de 3 a 5 hashtags.\n\n"
+        f"{titulo}{nome}TRANSCRIÇÃO:\n{text[:2400]}\n\n"
+        'Responda APENAS com JSON válido, uma lista: [{"descricao": "texto da descrição com as hashtags no fim"}]\n\n'
+        "Regras:\n"
+        "- Português do Brasil, no máximo 280 caracteres por opção, sem emojis.\n"
+        "- Baseie-se SOMENTE no que foi dito na transcrição. NÃO invente fatos, nomes, jogos nem acontecimentos.\n"
+        "- Não prometa o que o trecho não mostra. As hashtags devem combinar com o assunto real do trecho."
+    )
+    return _opcoes_de_descricao(prompt, api_key, count, DESCRICAO_MAX_CORTE, current, 900)
+
+
+def suggest_long_descriptions(momentos, current_title, api_key, count=SUGESTOES_DESCRICOES, current=""):
+    """Opções de descrição para o vídeo longo, escritas SÓ com os títulos, motivos e streamers reais dos momentos."""
+    nomes = list(dict.fromkeys(str(m.get("streamer") or "").strip() for m in momentos or [] if str(m.get("streamer") or "").strip()))
+    linhas = []
+    for m in momentos or []:
+        titulo = str(m.get("titulo") or "").strip()
+        if not titulo:
+            continue
+        quem = str(m.get("streamer") or "").strip()
+        linhas.append(f"{m.get('n') or len(linhas) + 1}. {titulo}" + (f" ({m['motivo']})" if m.get("motivo") else "")
+                      + (f" [{quem}]" if quem and len(nomes) > 1 else ""))
+    if not linhas or not api_key:
+        return []
+    titulo = f'Título do vídeo: "{current_title}"\n' if current_title else ""
+    quem = f"Streamers (pode citar estes nomes, nenhum outro): {', '.join(nomes)}\n" if nomes else ""
+    prompt = (
+        "Você escreve descrições para vídeos de MELHORES MOMENTOS de lives/gameplay no YouTube. Abaixo estão os momentos do "
+        f"vídeo, já resumidos. Escreva {count} opções de descrição DIFERENTES entre si, cada uma com 2 a 4 frases (o que o "
+        "espectador vai ver, sem exagerar) e, no fim, de 4 a 6 hashtags. NÃO escreva marcas de tempo nem lista de "
+        "capítulos: o programa coloca isso depois.\n\n"
+        f"{titulo}{quem}MOMENTOS:\n" + "\n".join(linhas[:40]) + "\n\n"
+        'Responda APENAS com JSON válido, uma lista: [{"descricao": "texto da descrição com as hashtags no fim"}]\n\n'
+        "Regras:\n"
+        "- Português do Brasil, no máximo 600 caracteres por opção, sem emojis.\n"
+        "- Baseie-se SOMENTE nos momentos listados. NÃO invente fatos, nomes, jogos nem acontecimentos.\n"
+        "- Não prometa o que os momentos não mostram."
+    )
+    return _opcoes_de_descricao(prompt, api_key, count, DESCRICAO_MAX_LONGO, current, 1200)
+
+
+def _opcoes_de_descricao(prompt, api_key, count, maximo, current, max_tokens):
+    answer = groq_chat_with_fallback([{"role": "user", "content": prompt}], api_key, get_text_models_to_try,
+                                     max_tokens=max_tokens, temperature=0.9)
+    data = extract_json(answer) if answer else None
+    if not isinstance(data, list):
+        return []
+    out, vistos = [], {clean_description(current, maximo).lower()}
+    for item in data:
+        texto = item.get("descricao") if isinstance(item, dict) else item
+        if not isinstance(texto, str):
+            continue
+        texto = clean_description(texto, maximo)
+        if len(texto) < 10 or texto.lower() in vistos:
+            continue
+        vistos.add(texto.lower())
+        out.append({"descricao": texto})
+        if len(out) >= count:
+            break
+    return out
+
+
+def long_chapter_lines(meta):
+    """Capítulos do vídeo longo no formato da descrição do YouTube ("0:00 Abertura\\n0:12 Título..."), com os tempos do arquivo
+    que está na pasta (editado: com o resumo do início e sem os trechos cortados). "" se não houver capítulos suficientes."""
+    import longos
+    momentos = meta.get("momentos") if isinstance(meta.get("momentos"), list) else []
+    editado = isinstance(meta.get("edicao"), dict) and meta["edicao"].get("estado") == "renderizado"
+    intro = meta.get("resumo_intro") if editado and isinstance(meta.get("resumo_intro"), dict) else None
+    cta = meta.get("cta_final") if editado and isinstance(meta.get("cta_final"), dict) else None
+    deslocamento = float(intro.get("duracao_s") or 0) if intro else 0.0
+    if editado:
+        duracao = float(meta.get("duracao_final_s") or 0) - deslocamento - (float(cta.get("duracao_s") or 0) if cta else 0)
+    else:
+        duracao = float(meta.get("clip_duration") or meta.get("duracao_final_s") or 0)
+    trechos = meta.get("trechos_mantidos") if editado and meta.get("trechos_mantidos") else None
+    if duracao <= 0:
+        return ""
+    return longos.capitulos_para_descricao(longos.capitulos(momentos, trechos, duracao), deslocamento)
+
+
+def suggest_descriptions_for_clip(name, biblioteca="cortes"):
+    """--sugerir-descricoes: imprime 'DESCRICOES_JSON=[...]' com opções de descrição (lê o .json do corte/vídeo). True se deu certo.
+
+    No vídeo longo, os capítulos (marcas de tempo) são acrescentados pelo código a partir dos momentos reais do vídeo.
+    """
+    name = Path(str(name)).name
+    if not name.lower().endswith(".mp4") or name.startswith((".", "_")):
+        print(f"❌ Nome de arquivo inválido: {name!r}")
+        return False
+    longo = biblioteca == "longos"
+    pasta = Path("videos_longos") if longo else OUTPUT_DIR
+    try:
+        meta = json.loads((pasta / name).with_suffix(".json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = None
+    if not isinstance(meta, dict):
+        print("❌ Não encontrei os dados deste vídeo (.json); não dá para sugerir descrições.")
+        return False
+    if longo and not meta.get("momentos"):
+        print("❌ Este vídeo longo não tem os momentos guardados; não dá para sugerir descrições.")
+        return False
+    if not longo and not str(meta.get("transcricao") or "").strip():
+        print("❌ Este corte não tem a transcrição guardada; não dá para sugerir descrições.")
+        return False
+    load_env_file()
+    api_key = get_groq_key()
+    if not api_key:
+        print("❌ Sem GROQ_API_KEY no .env: não dá para sugerir descrições.")
+        return False
+    atual = str(meta.get("descricao") or "")
+    if longo:
+        options = suggest_long_descriptions(meta["momentos"], str(meta.get("titulo") or ""), api_key, current=atual)
+        capitulos = long_chapter_lines(meta)
+        if capitulos:
+            for opcao in options:
+                opcao["descricao"] = clean_description(opcao["descricao"] + "\n\n" + capitulos, DESCRICAO_MAX_LONGO + 1500)
+    else:
+        options = suggest_descriptions(str(meta["transcricao"]), str(meta.get("titulo_gancho") or ""), api_key,
+                                       streamer=meta.get("streamer") or None, current=atual)
+    if not options:
+        print("❌ A IA não devolveu sugestões agora (limite ou instabilidade). Tente de novo em instantes.")
+        return False
+    print("DESCRICOES_JSON=" + json.dumps(options, ensure_ascii=False))
+    return True
+
+
+def _manter_descricao(meta_path, meta):
+    """A descrição é salva pela interface a qualquer momento (sem renderizar): a renderização não pode apagar nem
+    desfazer uma descrição salva ENQUANTO ela rodava."""
+    try:
+        atual = json.loads(Path(meta_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(atual, dict):
+        if atual.get("descricao"):
+            meta["descricao"] = atual["descricao"]
+        else:
+            meta.pop("descricao", None)
+
+
 def render_edit(name):
     """Renderiza de novo um corte a partir do BRUTO, com as opções de _edicoes/NOME.json. True se deu certo.
 
@@ -5510,6 +5738,7 @@ def render_edit(name):
                                  + (cta_info["duracao_s"] if cta_info else 0), 2),
         "edicao": {"estado": "renderizado", "opcoes": opts, "em": datetime.now().isoformat()},
     })
+    _manter_descricao(meta_path, meta)
     try:
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError as e:
@@ -5737,6 +5966,7 @@ def render_edit_longo(name):
             "duracao_final_s": round(final_s, 2),
             "edicao": {"estado": "renderizado", "opcoes": opts, "em": datetime.now().isoformat()},
         })
+        _manter_descricao(meta_path, meta)
         try:
             tmp_meta = meta_path.with_name(meta_path.name + ".tmp")
             tmp_meta.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -6128,6 +6358,8 @@ def main():
                         help="Com --renderizar e --sugerir-titulos: de qual biblioteca é o arquivo (cortes_prontos/ ou videos_longos/)")
     parser.add_argument("--sugerir-titulos", metavar="CORTE.mp4", dest="sugerir_titulos",
                         help="Sugere títulos para um corte pronto (a IA lê a transcrição guardada) e imprime TITULOS_JSON=[...]")
+    parser.add_argument("--sugerir-descricoes", metavar="CORTE.mp4", dest="sugerir_descricoes",
+                        help="Sugere descrições para um corte ou vídeo longo prontos (a IA lê a transcrição/os momentos guardados) e imprime DESCRICOES_JSON=[...]")
     parser.add_argument("--renderizar", metavar="CORTE.mp4",
                         help="Renderiza de novo um corte bruto com as opções salvas em cortes_prontos/_edicoes/ (usado pelo menu Editar da interface)")
     parser.add_argument("--cortes", type=int, metavar="N",
@@ -6135,6 +6367,11 @@ def main():
     parser.add_argument("--video-longo", type=int, metavar="MIN", dest="video_longo",
                         help="Modo gameplay: além dos cortes, monta um vídeo longo horizontal (1920x1080) com os melhores "
                              "momentos do vídeo, de 4 a 12 minutos (salvo em videos_longos/). Com --cortes 0 gera só o longo")
+    parser.add_argument("--segundo-link", metavar="URL", dest="segundo_link",
+                        help="Com --video-longo: segundo vídeo (de OUTRO streamer); os melhores momentos dos dois se intercalam "
+                             "no vídeo longo. Os cortes curtos continuam saindo só do primeiro vídeo")
+    parser.add_argument("--streamer2", metavar="NOME",
+                        help="Com --segundo-link: nome do segundo streamer (padrão: nome do canal do segundo vídeo)")
     parser.add_argument("--longo-da-live", metavar="PLATAFORMA:CANAL", dest="longo_da_live",
                         help="Monta um vídeo longo (com --video-longo MIN) juntando os melhores cortes que o monitor de lives já fez desse canal")
     parser.add_argument("--live-horas", type=int, metavar="H", dest="live_horas",
@@ -6159,6 +6396,17 @@ def main():
         if args.audio != "gameplay" and not args.longo_da_live:
             print("⚠️  --video-longo só vale no modo gameplay: ignorado.")
             args.video_longo = None
+    if args.segundo_link:
+        args.segundo_link = args.segundo_link.strip()
+        if args.video_longo is None:
+            print("⚠️  --segundo-link só vale com --video-longo (modo gameplay): ignorado.")
+            args.segundo_link = None
+        elif not re.match(r"^https?://\S+$", args.segundo_link, re.I):
+            print(f"❌ --segundo-link inválido: {args.segundo_link!r} (use um link que comece com http:// ou https://).")
+            sys.exit(1)
+        elif args.url and video_key_from_url(clean_youtube_url(args.segundo_link)) == video_key_from_url(clean_youtube_url(args.url)):
+            print("⚠️  O segundo link é o mesmo vídeo do primeiro: ignorado (use o link de outro streamer).")
+            args.segundo_link = None
     if args.sem_resumo:
         os.environ["CORTES_RESUMO"] = "0"
     if args.sem_cta:
@@ -6181,6 +6429,9 @@ def main():
 
     if args.sugerir_titulos:
         sys.exit(0 if suggest_titles_for_clip(args.sugerir_titulos, args.biblioteca) else 1)
+
+    if args.sugerir_descricoes:
+        sys.exit(0 if suggest_descriptions_for_clip(args.sugerir_descricoes, args.biblioteca) else 1)
 
     if args.renderizar:
         if not resolve_ffmpeg():
@@ -6515,7 +6766,12 @@ def main():
                                              (clip.get('hook_data') or {}).get('titulo_gancho', ''))
 
         if quer_longo and pool_longo is not None:           # depois dos cortes: se falhar, eles já estão salvos
-            longo_json = build_long_video(video_path, pool_longo, segments, args.video_longo, url_limpa)
+            segunda = None
+            if args.segundo_link and video_key_from_url(clean_youtube_url(args.segundo_link)) == video_key_from_url(url_limpa):
+                print("⚠️  O segundo link é o mesmo vídeo do primeiro: ignorado (use o link de outro streamer).")
+            elif args.segundo_link:
+                segunda = analyze_second_source(args.segundo_link, groq_api_key, args.streamer2)
+            longo_json = build_long_video(video_path, pool_longo, segments, args.video_longo, url_limpa, segunda=segunda)
 
         print("\n🧹 Limpando arquivos temporários...")
         if TEMP_DIR.exists():

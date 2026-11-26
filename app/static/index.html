@@ -61,8 +61,18 @@
             <label for="longo-min">Duração do vídeo longo (4 a 12 min)</label>
             <input id="longo-min" name="longo_min" type="number" min="4" max="12" value="8">
           </div>
+          <div class="campo" id="campo-segundo-link" hidden>
+            <label for="segundo-link">Segundo link (opcional): vídeo de <strong>outro streamer</strong></label>
+            <input id="segundo-link" name="segundo_link" type="text" inputmode="url"
+                   placeholder="https://www.youtube.com/watch?v=...">
+          </div>
+          <div class="campo" id="campo-streamer2" hidden>
+            <label for="streamer2">Nome do segundo streamer (opcional)</label>
+            <input id="streamer2" name="streamer2" type="text" maxlength="60"
+                   placeholder="Em branco: usa o nome do canal do segundo vídeo">
+          </div>
         </div>
-        <p id="aviso-longo" class="ajuda" hidden>O <strong>vídeo longo</strong> usa a mesma análise dos cortes: a IA junta, em ordem, os momentos com nota <strong>6,5 ou mais</strong> até fechar a duração escolhida (se não houver momentos bons o bastante, ele sai mais curto). Sai <strong>bruto</strong>, horizontal 1920x1080, na pasta <strong>videos_longos</strong>. Com <strong>0 cortes</strong>, gera só o vídeo longo. Para editar (legenda, títulos dos momentos, resumo, chamada final e a linha do tempo), use a aba <strong>Vídeos longos</strong>.
+        <p id="aviso-longo" class="ajuda" hidden>O <strong>vídeo longo</strong> usa a mesma análise dos cortes: a IA junta, em ordem, os momentos com nota <strong>6,5 ou mais</strong> até fechar a duração escolhida (se não houver momentos bons o bastante, ele sai mais curto). Sai <strong>bruto</strong>, horizontal 1920x1080, na pasta <strong>videos_longos</strong>. Com <strong>0 cortes</strong>, gera só o vídeo longo. Com um <strong>segundo link</strong>, os melhores momentos dos <strong>dois streamers</strong> se intercalam (um de cada por vez, em partes iguais; se um deles tiver poucos momentos bons, o outro completa). Os cortes curtos saem só do primeiro link, e o segundo vídeo também é baixado e analisado, então demora mais. Para editar (legenda, títulos dos momentos, resumo, chamada final e a linha do tempo), use a aba <strong>Vídeos longos</strong>.
           <button type="button" id="btn-pasta-longos" class="btn">Abrir pasta dos vídeos longos</button></p>
         <p id="aviso-bruto" class="ajuda">No modo Gameplay / Streamer o corte sai <strong>bruto</strong> (tela completa do streamer, sem fundo desfocado, tarja nem legenda). Em <strong>Cortes prontos &gt; Editar</strong> você escolhe as caixas da câmera e do gameplay, a tarja vermelha, a legenda, o resumo e a chamada final, e renderiza de novo.</p>
 
@@ -219,6 +229,20 @@
           <summary>Resumo narrado no início</summary>
           <p class="texto-resumo"></p>
         </details>
+        <details class="descricao">
+          <summary>Descrição para postar</summary>
+          <div class="desc-corpo">
+            <textarea class="desc-texto" rows="6" maxlength="4000" aria-label="Descrição para postar" placeholder="Escreva a descrição do post ou peça sugestões à IA."></textarea>
+            <div class="acoes-form">
+              <button type="button" class="btn desc-sugerir">Sugerir descrições</button>
+              <button type="button" class="btn primario desc-salvar">Salvar descrição</button>
+              <button type="button" class="btn desc-copiar">Copiar descrição</button>
+              <span class="selo desc-estado" role="status" hidden></span>
+            </div>
+            <p class="erro desc-erro" role="alert" hidden></p>
+            <ul class="ed-sugestoes desc-sugestoes" aria-label="Descrições sugeridas"></ul>
+          </div>
+        </details>
         <div class="acoes">
           <button type="button" class="btn primario editar">Editar</button>
           <button type="button" class="btn aprovar">Aprovar</button>
@@ -245,6 +269,20 @@
         <details class="resumo-intro">
           <summary>Resumo narrado no início</summary>
           <p class="texto-resumo"></p>
+        </details>
+        <details class="descricao">
+          <summary>Descrição para postar</summary>
+          <div class="desc-corpo">
+            <textarea class="desc-texto" rows="6" maxlength="4000" aria-label="Descrição para postar" placeholder="Escreva a descrição do post ou peça sugestões à IA."></textarea>
+            <div class="acoes-form">
+              <button type="button" class="btn desc-sugerir">Sugerir descrições</button>
+              <button type="button" class="btn primario desc-salvar">Salvar descrição</button>
+              <button type="button" class="btn desc-copiar">Copiar descrição</button>
+              <span class="selo desc-estado" role="status" hidden></span>
+            </div>
+            <p class="erro desc-erro" role="alert" hidden></p>
+            <ul class="ed-sugestoes desc-sugestoes" aria-label="Descrições sugeridas"></ul>
+          </div>
         </details>
         <div class="acoes">
           <button type="button" class="btn primario editar">Editar</button>
@@ -417,6 +455,7 @@
     <div class="dlg-bloco">
       <div class="acoes-form">
         <button type="button" id="ed-renderizar" class="btn primario">Renderizar de novo</button>
+        <button type="button" id="ed-recomecar" class="btn" hidden title="Volta ao vídeo bruto com as opções de um vídeo ainda sem edição (layout, linha do tempo, legenda, resumo...). O título e a descrição ficam como estão.">Recomeçar do bruto</button>
         <button type="button" id="ed-fechar" class="btn">Fechar</button>
         <span id="ed-estado" class="selo" role="status" hidden></span>
       </div>
@@ -425,6 +464,7 @@
     </div>
   </dialog>
 
+  <script src="/static/descricao.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/timeline-logica.js"></script>
   <script src="/static/timeline.js"></script>

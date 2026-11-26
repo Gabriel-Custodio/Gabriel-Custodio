@@ -270,3 +270,11 @@ input[type="text"], input[type="number"], input[type="date"], select {
 .lv-longo { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border-top: 1px dashed var(--borda); padding-top: 8px; }
 .lv-longo select { padding: 4px 8px; font-size: 13px; }
 .lv-longo .btn { padding: 5px 11px; font-size: 13px; }
+
+/* ------------------------------------------------------------- descrição para postar (cards) */
+.descricao summary { cursor: pointer; color: var(--suave); }
+.desc-corpo { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.desc-texto { width: 100%; min-height: 110px; resize: vertical; font: inherit; font-size: 13px; line-height: 1.4; }
+.desc-corpo .acoes-form .btn { padding: 5px 10px; font-size: 13px; }
+.desc-sugestoes { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.desc-sugestoes .btn { width: 100%; text-align: left; white-space: normal; font-size: 13px; line-height: 1.35; }

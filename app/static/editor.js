@@ -430,8 +430,9 @@ function edAbrir(corte, lib = "cortes") {
   $("ed-log").hidden = true;
   $("ed-log").textContent = "";
   if (edLongo()) { edAbrirLongo(corte); return; }
-  $("dlg-titulo").textContent = `Editar: ${corte.titulo || corte.nome}`;
   const op = corte.edicao && corte.edicao.opcoes;           // opções da última edição (se houve)
+  $("dlg-titulo").textContent = `${op ? "Reeditar" : "Editar"}: ${corte.titulo || corte.nome}`;
+  $("ed-recomecar").hidden = !op;
   edTituloAbrir(corte);
   edMarcar("ed-layout", op ? op.layout : "empilhado");
   $("ed-tarja").checked = op ? op.tarja : true;
@@ -459,13 +460,15 @@ function edAbrir(corte, lib = "cortes") {
   TLUI.abrir(src, op && op.trechos);                         // linha do tempo: refaz os cortes da última edição
   edVideo.src = src;
   edCarregarLista();
+  if (edDlg.open) return;                                   // reaberto por "Recomeçar do bruto": a janela já está aberta
   if (typeof edDlg.showModal === "function") edDlg.showModal(); else edDlg.setAttribute("open", "");
 }
 
 /* Vídeo longo: sem quadro nem caixas; a linha do tempo mostra um marcador por momento e a onda do áudio vem do servidor */
 function edAbrirLongo(v) {
   const op = v.edicao && v.edicao.opcoes;
-  $("dlg-titulo").textContent = `Editar vídeo longo: ${v.titulo || v.nome}`;
+  $("dlg-titulo").textContent = `${op ? "Reeditar" : "Editar"} vídeo longo: ${v.titulo || v.nome}`;
+  $("ed-recomecar").hidden = !op;
   edTituloAbrir(v);
   $("ed-legenda").checked = op ? op.legenda : true;
   $("ed-capitulos").checked = op ? op.capitulos : true;
@@ -494,6 +497,7 @@ function edAbrirLongo(v) {
   TLUI.aoMudar(edAtualizarMomentos);
   edVideo.src = src;
   edDesenharMomentos();
+  if (edDlg.open) return;                                   // reaberto por "Recomeçar do bruto": a janela já está aberta
   if (typeof edDlg.showModal === "function") edDlg.showModal(); else edDlg.setAttribute("open", "");
 }
 
@@ -508,7 +512,7 @@ function edDesenharMomentos() {
     const txt = document.createElement("span");
     txt.className = "ed-mom-txt";
     const nota = typeof m.nota === "number" ? ` (nota ${m.nota.toFixed(1)})` : "";
-    txt.textContent = `${m.n || i + 1}. ${m.titulo || "Momento"}${nota}`;      // texto vindo do servidor: só textContent
+    txt.textContent = `${m.n || i + 1}. ${m.titulo || "Momento"}${m.streamer ? ` [${m.streamer}]` : ""}${nota}`;      // texto vindo do servidor: só textContent
     if (m.motivo) txt.title = m.motivo;
     const alt = document.createElement("button");
     alt.type = "button"; alt.className = "btn alternar";
@@ -536,6 +540,16 @@ function edFechar() {
   TLUI.fechar();
   edDlg.close();
 }
+/* Recomeçar do bruto: reabre o editor como se o vídeo nunca tivesse sido editado (layout, caixas, linha do tempo e opções
+   voltam ao padrão). Nada é renderizado até clicar em "Renderizar de novo", e o título/descrição continuam como estão. */
+$("ed-recomecar").addEventListener("click", () => {
+  if (!ED.corte || !ED.corte.edicao) return;
+  if (!confirm("Recomeçar do bruto?\n\nAs opções da última edição (layout, caixas, cortes da linha do tempo, legenda, resumo...) voltam ao padrão. Nada é refeito até você clicar em Renderizar de novo.")) return;
+  const lib = ED.lib, sem = { ...ED.corte, edicao: null };
+  edVideo.pause();
+  TLUI.fechar();
+  edAbrir(sem, lib);
+});
 $("ed-fechar").addEventListener("click", edFechar);
 $("ed-fechar-x").addEventListener("click", edFechar);
 edDlg.addEventListener("close", () => { edVideo.pause(); TLUI.fechar(); });

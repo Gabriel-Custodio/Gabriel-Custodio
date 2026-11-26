@@ -25,7 +25,12 @@ function montarLongo(v) {
   if (v.momentos.length) selos.append(selo(`${v.momentos.length} momento${v.momentos.length > 1 ? "s" : ""}`));
   const dur = duracaoLonga(v.duracao_s);
   if (dur) selos.append(selo(dur));
-  if (v.streamer) selos.append(selo(v.streamer));
+  if (v.fontes && v.fontes.length === 2) {
+    selos.append(selo("2 streamers", "concluido"));
+    for (const f of v.fontes) if (f.streamer) selos.append(selo(`${f.streamer}${f.momentos != null ? ` · ${f.momentos}` : ""}`));
+  } else if (v.streamer) {
+    selos.append(selo(v.streamer));
+  }
   if (v.editado) {
     selos.append(selo(v.resumo ? "com resumo no início" : "sem resumo", v.resumo ? "" : "cancelado"));
     selos.append(selo(v.cta ? "com chamada final" : "sem chamada final", v.cta ? "" : "cancelado"));
@@ -50,7 +55,7 @@ function montarLongo(v) {
     ir.addEventListener("click", () => { video.currentTime = m.inicio; video.play().catch(() => {}); });
     const txt = document.createElement("span");
     const nota = typeof m.nota === "number" ? ` · nota ${m.nota.toFixed(1)}` : "";
-    txt.textContent = `${m.titulo || "Momento"}${nota}${m.motivo ? ` — ${m.motivo}` : ""}`;
+    txt.textContent = `${m.titulo || "Momento"}${m.streamer ? ` [${m.streamer}]` : ""}${nota}${m.motivo ? ` — ${m.motivo}` : ""}`;
     li.append(ir, txt);
     lista.append(li);
   }
@@ -62,7 +67,13 @@ function montarLongo(v) {
   resumo.hidden = !v.resumo;
   no.querySelector(".texto-resumo").textContent = v.resumo || "";
 
-  no.querySelector(".editar").addEventListener("click", () => edAbrir(v, "longos"));
+  descricaoMontar(no, v, "longos");
+  const editar = no.querySelector(".editar");
+  if (v.editado) {                                                           // já editado: o mesmo botão reabre o editor com as opções da última edição
+    editar.textContent = "Reeditar";
+    editar.title = "Reabre o editor com as opções da última edição (dá para recomeçar do bruto lá dentro)";
+  }
+  editar.addEventListener("click", () => edAbrir(v, "longos"));
   const aprovar = no.querySelector(".aprovar");
   aprovar.textContent = v.estado === "aprovado" ? "Desfazer aprovação" : "Aprovar";
   aprovar.addEventListener("click", () => acaoLongo(v.nome, v.estado === "aprovado" ? "desfazer" : "aprovar"));
